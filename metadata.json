@@ -1,0 +1,6 @@
+{
+  "name": "Custody Core",
+  "description": "Creator-owned code custody, git gateway access control, and tamper-evident append-only event logging for Seed Signature.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
