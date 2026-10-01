@@ -42,6 +42,9 @@ export async function startEmbeddedTestDb(port?: number): Promise<EmbeddedTestDb
     onError: () => {}
   });
 
+  // Backstop: if the process is interrupted before a clean stop, still remove the temp directory.
+  process.once('exit', () => fs.rmSync(base, { recursive: true, force: true }));
+
   await pg.initialise();
   await pg.start();
   await pg.createDatabase(TEST_DB_NAME);
