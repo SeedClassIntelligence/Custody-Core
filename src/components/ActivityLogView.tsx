@@ -16,14 +16,12 @@ import {
   Code
 } from 'lucide-react';
 import { CustodyEvent } from '../types/custody';
-import { verifyHashChain, VerificationResult, formatHash } from '../utils/crypto';
+import { formatHash } from '../utils/crypto';
+import { mapServerEvent } from '../utils/api';
 
 interface ActivityLogViewProps {
   events: CustodyEvent[];
   projectId?: string;
-  onRefreshFromServer?: () => Promise<void>;
-  onTamperSimulate?: (eventSeq: number) => void;
-  onRestoreEvents?: () => void;
 }
 
 interface ServerVerifyResponse {
@@ -34,10 +32,7 @@ interface ServerVerifyResponse {
 
 export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
   events: initialEvents,
-  projectId,
-  onRefreshFromServer,
-  onTamperSimulate,
-  onRestoreEvents
+  projectId
 }) => {
   const [filterAction, setFilterAction] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -50,6 +45,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
     brokenAtSeq: number | null;
     totalEvents: number;
     reason?: string;
+    checkFailed?: boolean;
   } | null>(null);
   const [isVerifying, setIsVerifying] = useState(false);
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
@@ -70,21 +66,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
           const eventsRes = await fetch(`/api/v1/projects/${projectId}/events`);
           if (eventsRes.ok) {
             const data = await eventsRes.json();
-            const loaded = (data.events || []).map((e: any) => ({
-              seq: Number(e.seq),
-              project_id: e.project_id,
-              actor_type: e.actor_type,
-              actor_id: e.actor_id,
-              actor_name: e.actor_name || e.actor_id,
-              action: e.action,
-              subject_type: e.subject_type,
-              subject_id: e.subject_id,
-              payload: typeof e.payload === 'string' ? JSON.parse(e.payload) : e.payload,
-              prev_hash: e.prev_hash,
-              hash: e.hash,
-              seed_signature_id: e.seed_signature_id || '',
-              timestamp: e.created_at || e.timestamp
-            }));
+            const loaded = (data.events || []).map(mapServerEvent);
             setServerEvents(loaded);
             if (loaded.length > 0) {
               setSelectedEvent(loaded[loaded.length - 1]);
@@ -129,18 +111,20 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
         }
       }
 
-      // If no events or client verification
+      // The server could not run the check. That says nothing about the record, so do not call it tampered.
       setVerificationResult({
-        isValid: displayEvents.length === 0,
+        isValid: false,
         brokenAtSeq: null,
         totalEvents: displayEvents.length,
-        reason: 'Database is not connected to verify records.'
+        checkFailed: true,
+        reason: 'The server could not run the check, so this record has not been verified either way.'
       });
     } catch (err: any) {
       setVerificationResult({
         isValid: false,
         brokenAtSeq: null,
         totalEvents: 0,
+        checkFailed: true,
         reason: err.message
       });
     } finally {
@@ -181,7 +165,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
             </div>
             <p className="text-xs text-zinc-400 leading-relaxed max-w-2xl">
               Custody Core stores every action in an immutable, append-only PostgreSQL table with a database trigger rejecting updates and deletions.
-              Per <strong>Honesty Rule 1</strong>, synthetic simulated events are disabled until your real database is connected.
+              No events are shown until the database is connected.
             </p>
           </div>
 
@@ -233,10 +217,10 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
                 </pre>
               </li>
               <li>
-                Add <code className="text-amber-300 font-mono">DATABASE_URL</code> to your environment secrets in AI Studio or <code className="text-zinc-300 font-mono">.env</code>.
+                Add <code className="text-amber-300 font-mono">DATABASE_URL</code> to the server's environment or its <code className="text-zinc-300 font-mono">.env</code> file.
               </li>
               <li>
-                The server will automatically apply migration <code className="text-indigo-300 font-mono">001_initial_schema.sql</code>, creating all 11 tables and the <code className="text-emerald-300 font-mono">trg_event_append_only</code> trigger.
+                On start, the server applies any new files in <code className="text-indigo-300 font-mono">server/migrations/</code>, creating the tables and the <code className="text-emerald-300 font-mono">trg_event_append_only</code> trigger.
               </li>
             </ol>
           </div>
@@ -244,9 +228,9 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
           <div className="p-4 bg-zinc-950/70 border border-zinc-800 rounded-xl text-xs text-zinc-400 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Lock className="w-4 h-4 text-emerald-400" />
-              <span>Migration file prepared: <code className="text-zinc-300 font-mono">/server/migrations/001_initial_schema.sql</code></span>
+              <span>Migrations live in <code className="text-zinc-300 font-mono">/server/migrations/</code></span>
             </div>
-            <span className="text-[11px] text-zinc-500 font-mono">11 tables • Append-only trigger</span>
+            <span className="text-[11px] text-zinc-500 font-mono">Append-only trigger</span>
           </div>
         </div>
       </div>
@@ -304,6 +288,8 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
           className={`p-4 rounded-xl border flex items-start gap-3 text-xs animate-in fade-in duration-150 ${
             verificationResult.isValid
               ? 'bg-emerald-950/40 border-emerald-800 text-emerald-200'
+              : verificationResult.checkFailed
+              ? 'bg-amber-950/50 border-amber-700 text-amber-200'
               : 'bg-rose-950/60 border-rose-700 text-rose-200'
           }`}
         >
@@ -325,6 +311,8 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
                     <Server className="w-3 h-3" /> Server Recomputed
                   </span>
                 </>
+              ) : verificationResult.checkFailed ? (
+                <span>Check could not run</span>
               ) : (
                 <>
                   <span>Tamper Detected! Cryptographic Chain Compromised</span>

@@ -9,7 +9,6 @@ import {
   FileCheck,
   CheckCircle2,
   AlertTriangle,
-  RotateCcw,
   Sparkles,
   Database
 } from 'lucide-react';
@@ -21,9 +20,7 @@ interface HeaderProps {
   roleMode: RoleMode;
   onSelectRoleMode: (mode: RoleMode) => void;
   connections: Connection[];
-  activeDoorCount: number;
   onOpenSetup: () => void;
-  onResetState: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -32,9 +29,7 @@ export const Header: React.FC<HeaderProps> = ({
   roleMode,
   onSelectRoleMode,
   connections,
-  activeDoorCount,
-  onOpenSetup,
-  onResetState
+  onOpenSetup
 }) => {
   const [dbStatus, setDbStatus] = useState<'checking' | 'connected' | 'not_connected'>('checking');
 
@@ -147,7 +142,7 @@ export const Header: React.FC<HeaderProps> = ({
               <Terminal className="w-3.5 h-3.5" />
               Developer Workspace
               <span className="text-[10px] text-zinc-400 bg-zinc-800/80 px-1.5 py-0.2 rounded border border-zinc-700">
-                Preview
+                Not connected yet
               </span>
             </button>
             <button
@@ -197,14 +192,6 @@ export const Header: React.FC<HeaderProps> = ({
             Setup Guide
           </button>
 
-          <button
-            onClick={onResetState}
-            className="inline-flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900 border border-transparent hover:border-zinc-800 px-2 py-1.5 rounded-md transition-colors"
-            title="Clear all stored state"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span className="hidden lg:inline">Clear State</span>
-          </button>
         </div>
       </div>
     </header>

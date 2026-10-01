@@ -19,8 +19,8 @@ export const ClosingReportModal: React.FC<ClosingReportModalProps> = ({
 }) => {
   if (!isOpen) return null;
 
-  const targetDoorId = report?.door_id || doorId || 'Active Door';
-  const targetEmail = report?.developer_email || developerEmail || 'Assigned Developer';
+  const targetDoorId = report?.door_id || doorId || '';
+  const targetEmail = report?.developer_email || developerEmail || '';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-sm animate-in fade-in duration-200">
@@ -33,7 +33,7 @@ export const ClosingReportModal: React.FC<ClosingReportModalProps> = ({
             </div>
             <div>
               <h2 className="text-lg font-semibold text-zinc-100">Close the Door</h2>
-              <p className="text-xs text-zinc-400">Door #{targetDoorId.substring(0, 8)} • {targetEmail}</p>
+              {targetDoorId && <p className="text-xs text-zinc-400">Door #{targetDoorId.substring(0, 8)} • {targetEmail}</p>}
             </div>
           </div>
           <button

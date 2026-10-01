@@ -132,7 +132,7 @@ const SPEC_SCENARIOS: AcceptanceTestResult[] = [
     status: 'idle',
     log: [
       'Spec Requirement: Row-level tenant scoping enforced across all database queries.',
-      'Verification path: Tested in tests/schema_and_tenant.test.ts.'
+      'Verification path: tests/schema_and_tenant.test.ts (currently failing on purpose; login arrives in Milestone 2).'
     ]
   }
 ];
@@ -167,7 +167,7 @@ export const AcceptanceSuiteView: React.FC = () => {
             </h2>
           </div>
           <p className="text-xs text-zinc-400 leading-relaxed max-w-2xl">
-            Each milestone implements and tests a specific subset of these 13 criteria. Milestone 1 implements the PostgreSQL append-only database rule (#10), multi-tenant isolation (#13), and the cryptographic event hash chain.
+            Each milestone implements and tests a specific subset of these 13 criteria. Milestone 1 covers the PostgreSQL append-only database rule (#10) with passing tests. A multi-tenant isolation test (#13) exists and fails on purpose until Milestone 2 adds login.
           </p>
         </div>
       </div>
@@ -176,7 +176,8 @@ export const AcceptanceSuiteView: React.FC = () => {
       <div className="border border-zinc-800 rounded-2xl overflow-hidden bg-zinc-950 divide-y divide-zinc-800/80 shadow-xl">
         {SPEC_SCENARIOS.map((scenario) => {
           const isExpanded = expandedId === scenario.id;
-          const isMilestone1 = scenario.id === 10 || scenario.id === 13;
+          const isCovered = scenario.id === 10;
+          const failsOnPurpose = scenario.id === 13;
 
           return (
             <div key={scenario.id} className="p-4 transition-colors hover:bg-zinc-900/30 text-xs">
@@ -193,9 +194,13 @@ export const AcceptanceSuiteView: React.FC = () => {
                       <span className="font-semibold text-zinc-100">
                         {scenario.name}
                       </span>
-                      {isMilestone1 ? (
+                      {isCovered ? (
                         <span className="bg-emerald-950 text-emerald-300 border border-emerald-800 px-2 py-0.2 rounded text-[10px] font-mono">
-                          Covered in Milestone 1 Vitest
+                          Covered by passing tests
+                        </span>
+                      ) : failsOnPurpose ? (
+                        <span className="bg-rose-950 text-rose-300 border border-rose-800 px-2 py-0.2 rounded text-[10px] font-mono">
+                          Test fails until Milestone 2
                         </span>
                       ) : (
                         <span className="bg-zinc-900 text-zinc-500 border border-zinc-800 px-2 py-0.2 rounded text-[10px] font-mono">

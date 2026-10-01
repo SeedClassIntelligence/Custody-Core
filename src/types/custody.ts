@@ -164,7 +164,6 @@ export interface CustodyEvent {
   hash: string;
   seed_signature_id: string; // Empty in Phase 1, ready for Phase 2
   timestamp: string;
-  tampered?: boolean; // Used for simulation/tamper detection test
 }
 
 export interface ClosingReport {
@@ -197,16 +196,6 @@ export interface ClosingReport {
     status: 'automated_complete' | 'creator_verify';
     description: string;
   }>;
-}
-
-export interface LatencyMetric {
-  id: string;
-  timestamp: string;
-  service: 'git_gateway' | 'temporal_workflow' | 'api_auth' | 'secret_scanner';
-  latency_ms: number;
-  threshold_ms: number;
-  status: 'normal' | 'warning' | 'breach';
-  endpoint: string;
 }
 
 export interface AcceptanceTestResult {

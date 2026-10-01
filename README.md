@@ -1,20 +1,28 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Custody Core
 
-# Run and deploy your AI Studio app
+Lets non-technical creators give outside developers access to their code without losing control of it.
+See `CLAUDE.md`-style project instructions kept alongside this repo for the rules the code follows
+(nothing is faked; unbuilt features say "Not connected yet").
 
-This contains everything you need to run your app locally.
+## Run locally
 
-View your app in AI Studio: https://ai.studio/apps/0c8cf645-6630-49c5-aec8-6b23ede53087
+1. `npm install`
+2. Copy `.env.example` to `.env` and fill in `DATABASE_URL` (never commit `.env`).
+3. `npm run dev`
 
-## Run Locally
+Values already set in your shell take priority over `.env`.
 
-**Prerequisites:**  Node.js
+## Tests
 
+`npm test` starts a throwaway local PostgreSQL (the `embedded-postgres` package, no Docker needed), points the
+app at it through `TEST_DATABASE_URL`, and runs the whole suite. The test setup refuses to run if that URL contains
+`supabase.co` or matches `DATABASE_URL`, so tests can never touch the live database.
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+`npm run test:db` starts the same kind of database and leaves it running, printing a `TEST_DATABASE_URL` you can reuse.
+
+The tenant-isolation test is expected to fail until Milestone 2 (login) is built.
+
+## Migrations
+
+SQL files in `server/migrations/` are applied in order by the server on start (or `npm run migrate`).
+Applied files are recorded in the `schema_migrations` table and are never re-run.
