@@ -3,8 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
-dotenv.config({ override: true });
+dotenv.config();
 
+import { applyMigrations } from './migrationRunner';
 import { computeEventHash, GENESIS_PREV_HASH, verifyHashChain, VerificationResult } from '../shared/crypto';
 
 const { Pool } = pg;
@@ -117,33 +118,26 @@ export async function runMigrations(): Promise<{ success: boolean; message: stri
     return { success: true, message: 'Migrations already applied.' };
   }
 
-  const migrationFile = path.join(__dirname, 'migrations', '001_initial_schema.sql');
-  const sql = fs.readFileSync(migrationFile, 'utf8');
-
-  const client = await adminDb.connect();
   try {
-    await client.query('BEGIN');
-    await client.query(sql);
-    await client.query('COMMIT');
-
-    const rolesFile = path.join(__dirname, 'roles.sql');
-    if (fs.existsSync(rolesFile)) {
-      const rolesSql = fs.readFileSync(rolesFile, 'utf8');
-      try {
-        await client.query(rolesSql);
-      } catch (roleErr: any) {
-        console.warn('[DB Roles Notice]', roleErr.message);
-      }
-    }
-
-    isMigrated = true;
-    return { success: true, message: 'PostgreSQL schema initialized with append-only event trigger and custody_app role.' };
+    await applyMigrations(adminDb, path.join(__dirname, 'migrations'));
   } catch (err: any) {
-    await client.query('ROLLBACK');
-    return { success: false, message: `Migration failed: ${err.message}` };
-  } finally {
-    client.release();
+    return { success: false, message: err.message };
   }
+
+  const rolesFile = path.join(__dirname, 'roles.sql');
+  if (fs.existsSync(rolesFile)) {
+    const client = await adminDb.connect();
+    try {
+      await client.query(fs.readFileSync(rolesFile, 'utf8'));
+    } catch (roleErr: any) {
+      console.warn('[DB Roles Notice]', roleErr.message);
+    } finally {
+      client.release();
+    }
+  }
+
+  isMigrated = true;
+  return { success: true, message: 'PostgreSQL schema is up to date (versioned migrations applied, custody_app role configured).' };
 }
 
 export interface InsertEventParams {

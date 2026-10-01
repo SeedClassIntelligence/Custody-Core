@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
-dotenv.config({ override: true });
+dotenv.config();
 
 import {
   getDbPool,

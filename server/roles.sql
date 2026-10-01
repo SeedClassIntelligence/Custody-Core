@@ -27,3 +27,12 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO custody_app;
 -- Ensure future tables grant permissions correctly if needed
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE ON TABLES TO custody_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO custody_app;
+
+-- The migration bookkeeping table is for the admin role only; the app must not edit it.
+DO $$
+BEGIN
+  IF to_regclass('public.schema_migrations') IS NOT NULL THEN
+    REVOKE ALL ON TABLE schema_migrations FROM custody_app;
+  END IF;
+END
+$$;
