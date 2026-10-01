@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { HardDrive, Download, Loader2, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { HardDrive, Download, Loader2, AlertTriangle } from 'lucide-react';
 import { Project } from '../types/custody';
 import { generateExportZip, ExportManifest } from '../utils/zipExport';
 import { fetchProjectEvents } from '../utils/api';
@@ -77,9 +77,8 @@ export const MirrorBackupView: React.FC<MirrorBackupViewProps> = ({ project }) =
 
       {lastExportManifest && (
         <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-5 space-y-3">
-          <div className="flex items-center gap-2 text-emerald-400 font-semibold text-xs uppercase tracking-wider">
-            <CheckCircle2 className="w-4 h-4" />
-            <span>Manifest of the file you just downloaded</span>
+          <div className="flex items-center gap-2 text-zinc-300 font-semibold text-xs uppercase tracking-wider">
+            <span>Manifest included in the file you just downloaded</span>
           </div>
           <pre className="p-4 bg-zinc-900 rounded-xl text-xs font-mono text-zinc-300 overflow-x-auto max-h-60 leading-relaxed border border-zinc-800">
             {JSON.stringify(lastExportManifest, null, 2)}

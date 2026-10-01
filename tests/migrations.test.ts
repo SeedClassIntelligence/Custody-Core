@@ -35,14 +35,14 @@ describe('Versioned migrations (schema_migrations + 002_hashed_timestamp_constra
     const name = `custody_mig_${Math.random().toString(36).slice(2, 10)}`;
     await adminPool.query(`CREATE DATABASE ${name}`);
     const url = urlForDatabase(testUrl, name);
-    assertSafeTestDatabaseUrl(url, collectProtectedUrls(testUrl));
+    assertSafeTestDatabaseUrl(url, collectProtectedUrls());
     const pool = new pg.Pool({ connectionString: url });
     scratch.push({ name, pool });
     return pool;
   }
 
   beforeAll(() => {
-    assertSafeTestDatabaseUrl(testUrl, collectProtectedUrls(testUrl));
+    assertSafeTestDatabaseUrl(testUrl, collectProtectedUrls());
     adminPool = new pg.Pool({ connectionString: testUrl });
   });
 

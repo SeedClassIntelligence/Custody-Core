@@ -54,7 +54,10 @@ export async function setup() {
     testUrl = await startDatabaseProcess();
   }
 
-  assertSafeTestDatabaseUrl(testUrl, collectProtectedUrls(testUrl));
+  // Record the live-database URLs now, before anything is overridden, and hand them to the workers.
+  const protectedUrls = collectProtectedUrls();
+  assertSafeTestDatabaseUrl(testUrl, protectedUrls);
+  process.env.CUSTODY_PROTECTED_URLS = JSON.stringify(protectedUrls);
   // Test workers are started after this, so they inherit it.
   process.env.TEST_DATABASE_URL = testUrl;
 }

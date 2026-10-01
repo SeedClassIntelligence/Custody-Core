@@ -56,7 +56,7 @@ export const Header: React.FC<HeaderProps> = ({
       {/* Top Banner: Real Service Status */}
       <div className="bg-gradient-to-r from-zinc-900 via-zinc-900 to-zinc-950 px-4 py-1.5 border-b border-zinc-800/80 flex items-center justify-between text-xs">
         <div className="flex items-center gap-2">
-          <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+          <span className={`flex h-2 w-2 rounded-full ${dbStatus === 'connected' ? 'bg-emerald-400' : dbStatus === 'checking' ? 'bg-zinc-500' : 'bg-amber-400'}`} />
           <span className="font-mono text-zinc-400">Custody Core</span>
           <span className="text-zinc-600">|</span>
           <span className="text-zinc-300">Phase 1: Custody Core</span>

@@ -130,7 +130,7 @@ export async function runMigrations(): Promise<{ success: boolean; message: stri
     try {
       await client.query(fs.readFileSync(rolesFile, 'utf8'));
     } catch (roleErr: any) {
-      console.warn('[DB Roles Notice]', roleErr.message);
+      return { success: false, message: `Migrations applied, but configuring the custody_app role failed: ${roleErr.message}` };
     } finally {
       client.release();
     }

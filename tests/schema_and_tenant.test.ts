@@ -36,6 +36,17 @@ describe('PostgreSQL Schema, Append-Only Triggers, Restricted Roles & Multi-Tena
     expect(role.rows).toHaveLength(1);
   });
 
+  it('gives the app role no access at all to schema_migrations', async () => {
+    const client = await db.connect();
+    try {
+      for (const sql of ['SELECT * FROM schema_migrations', "INSERT INTO schema_migrations (version) VALUES ('999_forged.sql')", 'DELETE FROM schema_migrations']) {
+        await expect(client.query(sql)).rejects.toThrow(/permission denied for table schema_migrations/);
+      }
+    } finally {
+      client.release();
+    }
+  });
+
   it('creates all 11 required tables and both append-only triggers in the live database', async () => {
     const tables = await adminDb.query(
       `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`
@@ -65,7 +76,7 @@ describe('PostgreSQL Schema, Append-Only Triggers, Restricted Roles & Multi-Tena
 
       // Can SELECT from event
       const countRes = await client.query('SELECT COUNT(*) FROM event;');
-      expect(countRes.rows).toBeDefined();
+      expect(Number(countRes.rows[0].count)).toBeGreaterThanOrEqual(0);
 
       // 1. UPDATE on event table must fail with permission denied at grant level
       let updatePermFailed = false;
@@ -221,6 +232,51 @@ describe('PostgreSQL Schema, Append-Only Triggers, Restricted Roles & Multi-Tena
         await adminClient.query('ROLLBACK');
       } finally {
         adminClient.release();
+      }
+    }
+  });
+
+  it('keeps one unbroken chain with contiguous seq numbers when 20 events are inserted at the same time', async () => {
+    const client = await db.connect();
+    let creatorId: string | undefined;
+    let projectId: string | undefined;
+    try {
+      creatorId = (await client.query(
+        `INSERT INTO creator (identity_id, display_name, email) VALUES ('auth_concurrency_test', 'Concurrency', 'concurrency@custody.io') RETURNING id`
+      )).rows[0].id as string;
+      projectId = (await client.query(
+        `INSERT INTO project (creator_id, name, purpose) VALUES ($1, 'Concurrency Project', 'Concurrent inserts') RETURNING id`,
+        [creatorId]
+      )).rows[0].id as string;
+
+      const inserted = await Promise.all(
+        Array.from({ length: 20 }, (_, i) =>
+          insertEvent({
+            project_id: projectId!,
+            actor_type: 'system',
+            actor_id: 'concurrency_test',
+            action: 'test.concurrent',
+            subject_type: 'project',
+            subject_id: projectId!,
+            payload: { n: i }
+          })
+        )
+      );
+
+      expect(inserted.map((e) => Number(e.seq)).sort((a, b) => a - b)).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
+      const verified = await verifyServerProjectEvents(projectId);
+      expect(verified.isValid).toBe(true);
+      expect(verified.totalEvents).toBe(20);
+    } finally {
+      client.release();
+      if (projectId || creatorId) {
+        await withTriggersBypassed(adminDb, async (admin) => {
+          if (projectId) {
+            await admin.query('DELETE FROM event WHERE project_id = $1', [projectId]);
+            await admin.query('DELETE FROM project WHERE id = $1', [projectId]);
+          }
+          if (creatorId) await admin.query('DELETE FROM creator WHERE id = $1', [creatorId]);
+        });
       }
     }
   });
@@ -424,8 +480,10 @@ describe('PostgreSQL Schema, Append-Only Triggers, Restricted Roles & Multi-Tena
 
       // Anonymous request: no x-creator-id header, no creator_id query parameter.
       const res = await fetch(`http://127.0.0.1:${port}/api/v1/projects`);
+      expect(res.status).toBe(200); // an error response must not let this test pass by accident
       const data: any = await res.json();
-      const returnedProjects = data.projects || [];
+      const returnedProjects = data.projects;
+      expect(Array.isArray(returnedProjects)).toBe(true);
 
       const bobProjectLeaked = returnedProjects.some((p: any) => p.id === projBId);
       expect(bobProjectLeaked).toBe(false);

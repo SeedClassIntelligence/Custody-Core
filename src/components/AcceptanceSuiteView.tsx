@@ -167,7 +167,7 @@ export const AcceptanceSuiteView: React.FC = () => {
             </h2>
           </div>
           <p className="text-xs text-zinc-400 leading-relaxed max-w-2xl">
-            Each milestone implements and tests a specific subset of these 13 criteria. Milestone 1 covers the PostgreSQL append-only database rule (#10) with passing tests. A multi-tenant isolation test (#13) exists and fails on purpose until Milestone 2 adds login.
+            Each milestone implements and tests a specific subset of these 13 criteria. Tests exist for #10 (append-only database rule) and #13 (multi-tenant isolation). This page does not run them or show their results; run npm test for that.
           </p>
         </div>
       </div>
@@ -196,11 +196,11 @@ export const AcceptanceSuiteView: React.FC = () => {
                       </span>
                       {isCovered ? (
                         <span className="bg-emerald-950 text-emerald-300 border border-emerald-800 px-2 py-0.2 rounded text-[10px] font-mono">
-                          Covered by passing tests
+                          Has a test: see npm test
                         </span>
                       ) : failsOnPurpose ? (
                         <span className="bg-rose-950 text-rose-300 border border-rose-800 px-2 py-0.2 rounded text-[10px] font-mono">
-                          Test fails until Milestone 2
+                          Has a test: see npm test (expected to fail until Milestone 2)
                         </span>
                       ) : (
                         <span className="bg-zinc-900 text-zinc-500 border border-zinc-800 px-2 py-0.2 rounded text-[10px] font-mono">

@@ -5,7 +5,7 @@ import { assertSafeTestDatabaseUrl, collectProtectedUrls } from '../tests/suppor
 // process automatically; run `npm run test:db` yourself to get a database you can also use by hand.
 const port = Number(process.env.TEST_PG_PORT || 54329);
 const db = await startEmbeddedTestDb(port);
-assertSafeTestDatabaseUrl(db.url, collectProtectedUrls(db.url));
+assertSafeTestDatabaseUrl(db.url, collectProtectedUrls());
 
 console.log(`TEST_DATABASE_URL=${db.url}`);
 if (!process.env.TEST_DB_PARENT_PIPE) {

@@ -50,6 +50,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
   const [isVerifying, setIsVerifying] = useState(false);
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [eventsError, setEventsError] = useState<string | null>(null);
 
   // Check database health and fetch real events if available
   const fetchDbAndEvents = async () => {
@@ -62,6 +63,8 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
         setDbError(null);
 
         // Fetch real events for project
+        setEventsError(null);
+        setServerEvents([]);
         if (projectId) {
           const eventsRes = await fetch(`/api/v1/projects/${projectId}/events`);
           if (eventsRes.ok) {
@@ -71,6 +74,8 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
             if (loaded.length > 0) {
               setSelectedEvent(loaded[loaded.length - 1]);
             }
+          } else {
+            setEventsError(`The event log could not be loaded (server returned ${eventsRes.status}).`);
           }
         }
       } else {
@@ -104,7 +109,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
             brokenAtSeq: data.broken_at_seq,
             totalEvents: data.count,
             reason: data.valid
-              ? `Recomputed ${data.count} event hashes on PostgreSQL server from Genesis. All digests and prev_hash linkages match.`
+              ? `The server recomputed ${data.count} event hash${data.count === 1 ? '' : 'es'} from the first event. Every hash matches its stored fields and links to the previous event. This does not include signatures, which are not connected yet.`
               : `Server detected invalid hash at sequence #${data.broken_at_seq}.`
           });
           return;
@@ -155,7 +160,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
         <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-6 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-5">
           <div className="space-y-1">
             <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
+              <span className="w-2.5 h-2.5 rounded-full bg-amber-400" />
               <h2 className="text-lg font-bold text-zinc-100 flex items-center gap-2">
                 Append-Only Event Log
                 <span className="text-[10px] font-mono bg-amber-950 text-amber-300 border border-amber-800/80 px-2 py-0.5 rounded font-semibold">
@@ -244,7 +249,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
       <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-6 shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-5">
         <div className="space-y-1">
           <div className="flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
             <h2 className="text-lg font-bold text-zinc-100 flex items-center gap-2">
               Cryptographic Append-Only Event Log
               <span className="text-[10px] font-mono bg-zinc-800 text-emerald-400 border border-emerald-900/60 px-2 py-0.5 rounded font-semibold">
@@ -282,6 +287,10 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
         </div>
       </div>
 
+      {eventsError && (
+        <div className="p-4 rounded-xl border bg-rose-950/50 border-rose-800 text-xs text-rose-200">{eventsError}</div>
+      )}
+
       {/* Verification Result Banner */}
       {verificationResult && (
         <div
@@ -303,7 +312,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
             <div className="font-semibold text-sm flex items-center gap-2">
               {verificationResult.isValid ? (
                 <>
-                  <span>Chain Verified: 100% Cryptographically Sound</span>
+                  <span>Hash chain verified</span>
                   <span className="text-[10px] bg-emerald-900/80 px-2 py-0.5 rounded text-emerald-300 font-mono">
                     {verificationResult.totalEvents} Blocks Checked
                   </span>
@@ -475,8 +484,8 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
                 {/* Canonical Payload JSON */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between text-zinc-400 font-medium">
-                    <span>Canonical JSON Payload</span>
-                    <span className="text-[10px] text-zinc-500 font-mono">Sorted Keys</span>
+                    <span>Payload</span>
+                    <span className="text-[10px] text-zinc-500 font-mono">As stored</span>
                   </div>
                   <pre className="p-3 bg-zinc-900 border border-zinc-800 rounded-xl overflow-x-auto text-[11px] font-mono text-zinc-300 max-h-64 leading-relaxed">
                     {JSON.stringify(selectedEvent.payload, null, 2)}
@@ -490,7 +499,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
                     PostgreSQL Append-Only Trigger
                   </div>
                   <p className="text-[10px] leading-relaxed">
-                    The database role possesses <code className="text-zinc-200">INSERT</code> permission only.
+                    The app\'s database role can add and read events but is not allowed to change or delete them.
                     The trigger <code className="text-indigo-300">trg_event_append_only</code> raises an exception on any <code className="text-rose-300">UPDATE</code> or <code className="text-rose-300">DELETE</code> attempt.
                   </p>
                 </div>

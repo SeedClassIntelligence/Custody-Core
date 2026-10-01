@@ -145,8 +145,9 @@ const apiRouter = express.Router();
       if (Array.isArray(repositories)) {
         for (const repo of repositories) {
           const repoRes = await client.query(
-            `INSERT INTO repository (project_id, full_name, default_branch, is_core, locked_at)
-             VALUES ($1, $2, $3, $4, now())
+            // locked_at stays empty: nothing is locked until the GitHub integration reads the lock back.
+            `INSERT INTO repository (project_id, full_name, default_branch, is_core)
+             VALUES ($1, $2, $3, $4)
              RETURNING *`,
             [project.id, repo.full_name, repo.default_branch || 'main', repo.is_core || false]
           );
