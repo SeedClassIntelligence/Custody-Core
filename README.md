@@ -1,0 +1,45 @@
+# Custody Core
+
+Lets non-technical creators give outside developers access to their code without losing control of it.
+See `CLAUDE.md`-style project instructions kept alongside this repo for the rules the code follows
+(nothing is faked; unbuilt features say "Not connected yet").
+
+## Run locally
+
+1. `npm install`
+2. Copy `.env.example` to `.env` and fill in `DATABASE_URL` (never commit `.env`).
+3. `npm run dev`
+
+Values already set in your shell take priority over `.env`.
+
+## Tests
+
+`npm test` starts a throwaway local PostgreSQL (the `embedded-postgres` package, no Docker needed), points the
+app at it through `TEST_DATABASE_URL`, and runs the whole suite. The test setup refuses to run if that URL contains
+`supabase.co` or matches `DATABASE_URL`, so tests can never touch the live database.
+
+`npm run test:db` starts the same kind of database and leaves it running, printing a `TEST_DATABASE_URL` you can reuse.
+
+`npm run browser-check` runs the real app in a headless browser (Playwright/Chromium) against the same kind of local
+database: it loads every screen, claims a project, verifies its record, tampers with it, downloads an export and
+verifies that too. Screenshots land in `docs/screenshots/milestone-1/`.
+
+The tenant-isolation test is expected to fail until Milestone 2 (login) is built.
+
+## Event log
+
+Events are written only through the database function `append_event()`. The database assigns the sequence
+number, timestamp and hash; the application's database account has no `INSERT` on the `event` table. The exact
+hash format, so anyone can verify a chain, is in `docs/EVENT_HASH_FORMAT.md`.
+
+## Checking a deployed database
+
+`npm run migrate` applies pending migrations as the admin role. `npm run verify-live` then checks, as the application's
+own database account, that it cannot `INSERT` into `event` and that `append_event()` works. Its only write runs inside a
+transaction that is always rolled back, so it is safe against a database whose event log is permanent. It never prints
+connection strings.
+
+## Migrations
+
+SQL files in `server/migrations/` are applied in order by the server on start (or `npm run migrate`).
+Applied files are recorded in the `schema_migrations` table and are never re-run.
