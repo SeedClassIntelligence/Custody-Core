@@ -66,6 +66,14 @@ export interface StandIn {
    * setup URL points. The install page and the authorize page then behave like GitHub's (redirecting back).
    */
   browser: { login: string; org: string; setupUrl: string } | null;
+  /** The permissions the app was registered with (docs/GITHUB_APP_SETUP.md). Tokens can never exceed these. */
+  appPermissions: Record<string, 'read' | 'write'>;
+  /** Refuse every git push (to test a failure after a repository was created). */
+  refusePushes: boolean;
+  /** Answer 500 to reading a repository (to test a GitHub failure after creating one). */
+  failRepoRead: boolean;
+  /** Report file trees as truncated, as GitHub does for very large trees. */
+  truncateTrees: boolean;
   stop(): Promise<void>;
 }
 
@@ -137,6 +145,13 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       if (!verifyAppJwt(bearer(req))) return send(res, 401, { message: 'A JSON web token could not be decoded' });
       const inst = s.installations.get(Number(match[1]));
       if (!inst || inst.appId !== s.appId) return send(res, 404, { message: 'Not Found' });
+      const known = ['administration', 'contents', 'pull_requests', 'metadata', 'organization_administration', 'members'];
+      const asked = Object.keys(body?.permissions ?? {});
+      if (asked.some((k) => !known.includes(k))) return send(res, 422, { message: 'The permissions requested are not granted to this installation.' });
+      // An installation token can never carry more than the app was granted.
+      if (asked.some((k) => !handle.appPermissions[k] || (body.permissions[k] === 'write' && handle.appPermissions[k] !== 'write'))) {
+        return send(res, 422, { message: 'The permissions requested are not granted to this installation.' });
+      }
       const repositories: string[] | null = Array.isArray(body?.repositories) ? body.repositories : null;
       if (repositories && repositories.some((n) => !s.repos.has(`${inst.org}/${n}`))) return send(res, 422, { message: 'There is at least one repository that does not exist or is not accessible to the parent installation.' });
       const t: IssuedToken = { token: `ghs_${randomBytes(18).toString('hex')}`, installationId: Number(match[1]), repositories, permissions: body?.permissions ?? {}, revoked: false };
@@ -195,7 +210,7 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       const repo = s.repos.get(`${o}/${n}`);
       const t = instToken(req);
       if (!t || !repo || !coversRepo(t, o, n)) return send(res, 404, { message: 'Not Found' });
-      if (rest === '' && m === 'GET') return send(res, 200, repoView(repo));
+      if (rest === '' && m === 'GET') return handle.failRepoRead ? send(res, 500, { message: 'Server Error' }) : send(res, 200, repoView(repo));
       if (rest === '' && m === 'DELETE') {
         if (!can(t, 'administration', 'write')) return send(res, 403, { message: 'Resource not accessible by integration' });
         s.repos.delete(`${o}/${n}`);
@@ -218,8 +233,20 @@ export async function startGitHubStandIn(): Promise<StandIn> {
         return send(res, 201, rs);
       }
       if ((match = /^\/rulesets\/(\d+)$/.exec(rest)) && m === 'GET') {
+        if (!can(t, 'administration', 'read')) return send(res, 403, { message: 'Resource not accessible by integration' });
         const rs = repo.rulesets.find((r) => r.id === Number(match![1]));
         return rs ? send(res, 200, rs) : send(res, 404, { message: 'Not Found' });
+      }
+      if ((match = /^\/git\/trees\/([0-9a-f]{40})$/.exec(rest)) && m === 'GET') {
+        if (!can(t, 'contents', 'read')) return send(res, 403, { message: 'Resource not accessible by integration' });
+        const r = spawnSync('git', ['-C', repo.bare, 'ls-tree', '-r', '-z', match[1]], { encoding: 'utf8' });
+        if (r.status !== 0) return send(res, 404, { message: 'Not Found' });
+        const tree = r.stdout.split('\0').filter(Boolean).map((line) => {
+          const [meta, p2] = line.split('\t');
+          const [mode, type, sha] = meta.split(' ');
+          return { path: p2, mode, type, sha };
+        });
+        return send(res, 200, { sha: match[1], tree: handle.truncateTrees ? tree.slice(0, 1) : tree, truncated: handle.truncateTrees });
       }
       if ((match = /^\/commits\/([^/]+)$/.exec(rest)) && m === 'GET') {
         if (!can(t, 'contents', 'read')) return send(res, 403, { message: 'Resource not accessible by integration' });
@@ -244,6 +271,7 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       if (!user || user.revoked) return send(res, 401, { message: 'Bad credentials' });
       const org = s.orgs.get(decodeURIComponent(match[1]));
       if (!org || !(org.owners.has(user.login) || org.members.has(user.login))) return send(res, 404, { message: 'Not Found' });
+      if (!handle.appPermissions.members) return send(res, 403, { message: 'Resource not accessible by integration' });
       return send(res, 200, { state: 'active', role: org.owners.has(user.login) ? 'admin' : 'member', user: { login: user.login } });
     }
     if (m === 'DELETE' && (match = /^\/applications\/([^/]+)\/token$/.exec(p))) {
@@ -264,6 +292,10 @@ export async function startGitHubStandIn(): Promise<StandIn> {
     const basic = Buffer.from((req.headers.authorization || '').replace(/^Basic /, ''), 'base64').toString();
     const t = basic.startsWith('x-access-token:') ? s.tokens.find((x) => x.token === basic.slice(15) && !x.revoked) : undefined;
     const pushing = rest === '/git-receive-pack' || /service=git-receive-pack/.test(query);
+    if (pushing && handle.refusePushes) {
+      res.writeHead(403, { 'Content-Type': 'text/plain' });
+      return res.end('Push refused (test)');
+    }
     if (!repo || !t || !coversRepo(t, o, n) || !can(t, 'contents', pushing ? 'write' : 'read')) {
       res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="GitHub"' });
       return res.end('Unauthorized');
@@ -358,6 +390,17 @@ export async function startGitHubStandIn(): Promise<StandIn> {
   const handle: StandIn = {
     url,
     browser: null,
+    refusePushes: false,
+    failRepoRead: false,
+    truncateTrees: false,
+    appPermissions: {
+      administration: 'write',
+      contents: 'write',
+      pull_requests: 'write',
+      metadata: 'read',
+      organization_administration: 'write',
+      members: 'read'
+    },
     appId: s.appId,
     slug: s.slug,
     clientId: s.clientId,

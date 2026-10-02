@@ -116,8 +116,12 @@ function Workspace({ auth }: { auth: AuthInfo }) {
         : prev
     );
     if (data.createRepositories) {
+      // The project is recorded now, whatever happens on GitHub. A failure there is recorded too and shown on
+      // the dashboard (with a way to finish), so the claim window closes either way.
       try {
         await createCodeHomeRepositories(project.id, { splitCore: data.splitCore, zip: data.zip });
+      } catch {
+        /* shown on the dashboard from the event log */
       } finally {
         await refresh();
       }

@@ -31,6 +31,10 @@ const expectedErrors: string[] = [];
 // Statuses the code-check endpoint is expected to answer at this moment (a deliberate wrong code, or a lock).
 let expectedCodeStatuses: number[] = [];
 const isCodeCheck = (url: string) => /\/api\/v1\/mfa\/verify$/.test(url);
+// A deliberate GitHub refusal while creating repositories (502 from Claim it), when the check sets this.
+let expectClaim502 = false;
+const isExpected = (status: number, url: string) =>
+  (expectedCodeStatuses.includes(status) && isCodeCheck(url)) || (expectClaim502 && status === 502 && /\/code-home$/.test(new URL(url).pathname));
 const wrongCodeFor = (secret: string) => {
   const near = [-1, 0, 1].map((o) => generateSync({ secret, epoch: Math.floor(Date.now() / 1000) + o * 30 }));
   let c = 0;
@@ -129,7 +133,7 @@ async function main() {
       const line = `${m.text()} (${m.location().url})`;
       // A deliberate wrong code (422) or a lock (429) from our code check is the behaviour under test.
       const status = Number(/status of (\d{3})/.exec(m.text())?.[1]);
-      if (expectedCodeStatuses.includes(status) && isCodeCheck(m.location().url)) expectedErrors.push(line);
+      if (isExpected(status, m.location().url)) expectedErrors.push(line);
       else consoleErrors.push(line);
     });
     page.on('pageerror', (e) => pageErrors.push(String(e)));
@@ -140,7 +144,7 @@ async function main() {
       failedRequests.push(`${r.method()} ${r.url()} ${r.failure()?.errorText}`);
     });
     page.on('response', (r) => {
-      if (r.status() >= 400 && !(expectedCodeStatuses.includes(r.status()) && isCodeCheck(r.url()))) failedRequests.push(`${r.status()} ${r.request().method()} ${r.url()}`);
+      if (r.status() >= 400 && !isExpected(r.status(), r.url())) failedRequests.push(`${r.status()} ${r.request().method()} ${r.url()}`);
     });
 
     // 1. Empty state: no invented project, and old demo data is not resurrected.
@@ -368,9 +372,31 @@ async function main() {
     check(made.length === 2 && made.every((r) => r.private && !r.allow_forking), 'two private, unforkable repositories really exist in the organization');
     await shot(page, '20-repositories-created');
 
+    // A claim that stops half way (GitHub refuses the core repository's name) can be finished from the dashboard.
+    gh.repos.set(`${ghOrg}/second-project-core`, { ...made[0], id: 999999, name: 'second-project-core' });
+    await page.getByRole('button', { name: 'Claim Another' }).click();
+    await page.getByPlaceholder('The name you call this project').fill('Second Project');
+    await page.getByPlaceholder('What this software does and why you are building it.').fill('Checking that a half-finished claim can be finished');
+    await page.getByRole('checkbox').last().check();
+    expectClaim502 = true;
+    const claimAnswer = page.waitForResponse((r) => /\/code-home$/.test(new URL(r.url()).pathname));
+    await page.getByRole('button', { name: 'Claim it' }).click();
+    check((await claimAnswer).status() === 502, 'GitHub refusing the core repository name is reported, not hidden');
+    const finish = page.getByTestId('finish-claim');
+    await finish.waitFor();
+    expectClaim502 = false;
+    check((await page.getByTestId('repository-record').count()) === 1, 'the main repository was created and is shown');
+    await shot(page, '20b-claim-half-finished');
+    gh.repos.delete(`${ghOrg}/second-project-core`); // the name is free again on GitHub
+    await finish.getByRole('button', { name: 'Finish creating the core repository' }).click();
+    await page.getByTestId('repository-record').nth(1).waitFor();
+    check((await page.getByTestId('finish-claim').count()) === 0, 'after finishing, both repositories are shown and the notice is gone');
+    check((await page.getByText('GitHub did not create').count()) === 0, 'the old failure line is gone once the repository exists');
+    await shot(page, '20c-claim-finished');
+
     // Uninstalling the app on GitHub (a signed webhook) shows the connection as broken.
     const installationId = [...gh.installations.entries()].find(([, i]) => i.org === ghOrg)![0];
-    const hookBody = Buffer.from(JSON.stringify({ action: 'deleted', installation: { id: installationId }, sender: { login: 'browser-owner' } }));
+    const hookBody = Buffer.from(JSON.stringify({ action: 'deleted', installation: { id: installationId, account: { login: ghOrg, id: gh.orgs.get(ghOrg)!.id } }, sender: { login: 'browser-owner' } }));
     const hook = await fetch(`${base}/api/v1/github/webhook`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-GitHub-Event': 'installation', 'X-GitHub-Delivery': randomBytes(8).toString('hex'), 'X-Hub-Signature-256': signatureFor(webhookSecret, hookBody) },

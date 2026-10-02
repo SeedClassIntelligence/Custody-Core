@@ -97,7 +97,8 @@ export interface RepositoryResult {
   html_url: string;
   settings: SettingResult[];
   ruleset: { applied: boolean; refused: { status: number; message: string; needs_paid_plan: boolean } | null };
-  initial_commit: { pushed: boolean; files: number; reported_sha: string | null; matches: boolean } | null;
+  initial_commit: { pushed: boolean; files_uploaded: number; reported_files: number | null; reported_sha: string | null; matches: boolean; error: string | null } | null;
+  incomplete?: string;
 }
 
 /** Creates the project's repositories on GitHub (empty, or with an uploaded zip as the first commit). */

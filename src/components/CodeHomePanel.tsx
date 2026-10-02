@@ -38,6 +38,10 @@ const OUTCOMES: Record<string, { ok: boolean; text: string }> = {
   not_yours: { ok: false, text: 'GitHub could not confirm that installation belongs to you.' },
   not_an_organization: { ok: false, text: 'Install the app on an organization, not on your personal account.' },
   not_owner: { ok: false, text: 'Only an owner of the organization can connect it.' },
+  app_needs_members_permission: {
+    ok: false,
+    text: 'GitHub would not confirm that you own this organization, because the Custody Core app is missing the "Members: Read-only" organization permission. The app owner must add it (see the setup guide).'
+  },
   linked_elsewhere: { ok: false, text: 'That organization is already connected to another Custody Core account.' },
   already_connected: { ok: false, text: 'You already have a code home connected.' },
   github_error: { ok: false, text: 'GitHub did not answer as expected. Nothing was linked. Try again.' }

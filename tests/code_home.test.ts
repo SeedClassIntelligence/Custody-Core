@@ -330,6 +330,65 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
     expect(outcome(await finish(state, cookie, id, 'carol'))).toBe('not_yours');
   });
 
+  it('two owners linking the same installation at the same moment: exactly one is connected, the other is told the truth', async () => {
+    const a = await createMfaUser('raceA', running.base);
+    const b = await createMfaUser('raceB', running.base);
+    const org = `race-${randomBytes(3).toString('hex')}`;
+    gh.addOrg(org, { owners: ['ownerA', 'ownerB'] });
+    const id = gh.install(org);
+    const sa = await start(a.session);
+    const sb = await start(b.session);
+    const outcomes = (await Promise.all([finish(sa.state, sa.cookie, id, 'ownerA'), finish(sb.state, sb.cookie, id, 'ownerB')])).map(outcome).sort();
+    expect(outcomes).toEqual(['connected', 'linked_elsewhere']);
+    const connectedEvents = (
+      await adminDb.query(`SELECT account_id FROM account_event WHERE action = 'github.connected' AND account_id = ANY($1::text[])`, [[a.session.userId, b.session.userId]])
+    ).rows;
+    expect(connectedEvents).toHaveLength(1);
+    const owner = (await adminDb.query('SELECT c.identity_id FROM github_installation g JOIN creator c ON c.id = g.creator_id WHERE g.installation_id = $1', [id])).rows;
+    expect(owner).toEqual([{ identity_id: connectedEvents[0].account_id }]);
+  });
+
+  it('a link that overlaps another one in the database (the other not yet committed) still ends "linked elsewhere", never "connected"', async () => {
+    const a = await createMfaUser('overlapA', running.base);
+    const b = await createMfaUser('overlapB', running.base);
+    const org = `overlap-${randomBytes(3).toString('hex')}`;
+    const orgRow = gh.addOrg(org, { owners: ['ownerB'] });
+    const id = gh.install(org);
+    const aCreator = (await adminDb.query('SELECT id FROM creator WHERE identity_id = $1', [a.session.userId])).rows[0].id;
+    const sb = await start(b.session);
+    // Another link of the same installation is in progress: written, not yet committed.
+    const other = await adminDb.connect();
+    try {
+      await other.query('BEGIN');
+      await other.query(`INSERT INTO github_installation (creator_id, installation_id, account_login, account_id, status) VALUES ($1, $2, $3, $4, 'active')`, [aCreator, id, org, orgRow.id]);
+      const pending = finish(sb.state, sb.cookie, id, 'ownerB');
+      await new Promise((r) => setTimeout(r, 1500)); // B reaches the database and has to wait for this one
+      await other.query('COMMIT');
+      expect(outcome(await pending)).toBe('linked_elsewhere');
+    } finally {
+      await other.query('ROLLBACK').catch(() => undefined);
+      other.release();
+    }
+    expect((await adminDb.query(`SELECT 1 FROM account_event WHERE account_id = $1 AND action = 'github.connected'`, [b.session.userId])).rowCount).toBe(0);
+    expect((await adminDb.query('SELECT creator_id FROM github_installation WHERE installation_id = $1', [id])).rows[0].creator_id).toBe(aCreator);
+  });
+
+  it("if the app lacks the Members permission, GitHub cannot confirm ownership: the creator is told exactly that, not 'not an owner'", async () => {
+    const { session } = await createMfaUser('noperm', running.base);
+    const org = `noperm-${randomBytes(3).toString('hex')}`;
+    gh.addOrg(org, { owners: ['frank'] });
+    const id = gh.install(org);
+    const saved = gh.appPermissions.members;
+    delete gh.appPermissions.members;
+    try {
+      const { state, cookie } = await start(session);
+      expect(outcome(await finish(state, cookie, id, 'frank'))).toBe('app_needs_members_permission');
+      expect((await adminDb.query('SELECT 1 FROM github_installation WHERE installation_id = $1', [id])).rowCount).toBe(0);
+    } finally {
+      gh.appPermissions.members = saved;
+    }
+  });
+
   it("the round trip only works in the browser that started it, and only once (someone else's link cannot attach their org to you)", async () => {
     const { session } = await createMfaUser('csrf', running.base);
     const org = `csrf-${randomBytes(3).toString('hex')}`;
@@ -456,7 +515,7 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
     expect(res.status).toBe(201);
     const main = body.repositories.find((x: any) => x.role === 'main');
     const core = body.repositories.find((x: any) => x.role === 'core');
-    expect(main.initial_commit).toMatchObject({ pushed: true, files: 3, matches: true });
+    expect(main.initial_commit).toMatchObject({ pushed: true, files_uploaded: 3, reported_files: 3, matches: true, error: null });
     expect(main.initial_commit.reported_sha).toMatch(/^[0-9a-f]{40}$/);
     expect(core.initial_commit).toBeNull();
 
@@ -523,6 +582,132 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
     await expect(readZip(bomb)).rejects.toThrow(/larger than 100 MB/);
   }, 60_000);
 
+  /** A zip whose stored names are exactly these bytes (JSZip would clean some of them when building one). */
+  const rawZip = async (files: Record<string, string>) => {
+    const z = new JSZip();
+    const swaps: Array<[string, string]> = [];
+    let i = 0;
+    for (const [name, content] of Object.entries(files)) {
+      const placeholder = (String.fromCharCode(81 + i++) + 'z'.repeat(400)).slice(0, Buffer.byteLength(name));
+      if (Buffer.byteLength(placeholder) !== Buffer.byteLength(name)) throw new Error('placeholder length');
+      z.file(placeholder, content);
+      swaps.push([placeholder, name]);
+    }
+    let bytes = (await z.generateAsync({ type: 'nodebuffer', createFolders: false } as any)) as Buffer;
+    for (const [from, to] of swaps) {
+      let hex = bytes.toString('hex');
+      hex = hex.split(Buffer.from(from).toString('hex')).join(Buffer.from(to).toString('hex'));
+      bytes = Buffer.from(hex, 'hex');
+    }
+    return bytes;
+  };
+  const postZip = (session: AuthSession, projectId: string, zip: Buffer) =>
+    fetch(`${running.base}/api/v1/projects/${projectId}/code-home`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${session.accessToken}`, 'Content-Type': 'application/zip' },
+      body: new Uint8Array(zip)
+    });
+
+  it.each([
+    ['a file that is also a folder', { 'docs': 'x', 'docs/b.txt': 'y' }],
+    ['.git with a trailing dot', { '.git./config': 'x' }],
+    ['.git with a trailing space', { 'sub/.git /hooks/x': 'x' }],
+    ['git~1 (Windows short name of .git)', { 'GIT~1/config': 'x' }],
+    ['a NUL byte in a name', { 'bad\u0000name.txt': 'x' }],
+    ['a name longer than 255 bytes', { ['n'.repeat(300)]: 'x' }],
+    ['the same file twice (by case)', { 'README.md': 'x', 'readme.md': 'y' }],
+    ['everything inside a .git folder', { '.git/config': 'x', '.git/HEAD': 'y' }]
+  ])('an upload with %s is refused before anything is created on GitHub (nothing to clean up, nothing false recorded)', async (_label, files) => {
+    const c = await connectedCreator('badnames');
+    const projectId = await claim(c.session, `Bad Names ${randomBytes(3).toString('hex')}`);
+    const repos = gh.repos.size;
+    const tokens = gh.tokens.length;
+    const res = await postZip(c.session, projectId, await rawZip(files as Record<string, string>));
+    expect(res.status).toBe(400);
+    expect(gh.repos.size).toBe(repos);
+    expect(gh.tokens.length).toBe(tokens); // not even a token was requested
+    const actions = (await adminDb.query('SELECT action FROM event WHERE project_id = $1 ORDER BY seq', [projectId])).rows.map((r) => r.action);
+    expect(actions).toEqual(['project.claimed']);
+  });
+
+  it('every uploaded file is committed, even ones a .gitignore in the upload lists, and the count is what GitHub reports', async () => {
+    const c = await connectedCreator('ignored');
+    const projectId = await claim(c.session, `Ignored ${randomBytes(2).toString('hex')}`);
+    const z = new JSZip();
+    z.file('README.md', '# hi\n');
+    z.file('.gitignore', 'secret.txt\nsrc/\n*\n');
+    z.file('secret.txt', 'still the creator\'s file\n');
+    z.file('src/app.js', 'x\n');
+    const res = await postZip(c.session, projectId, await z.generateAsync({ type: 'nodebuffer' }));
+    const body: any = await res.json();
+    expect(res.status).toBe(201);
+    expect(body.repositories[0].initial_commit).toMatchObject({ files_uploaded: 4, reported_files: 4, matches: true });
+    const listed = spawnSync('git', ['--git-dir', gh.repos.get(body.repositories[0].full_name)!.bare, 'ls-tree', '-r', '--name-only', 'HEAD'], { encoding: 'utf8' }).stdout.trim().split('\n').sort();
+    expect(listed).toEqual(['.gitignore', 'README.md', 'secret.txt', 'src/app.js']);
+  });
+
+  it('if something fails after GitHub created the repository, it is still recorded as created, with what failed, never as "not created"', async () => {
+    const c = await connectedCreator('afterfail');
+    const projectId = await claim(c.session, `After Fail ${randomBytes(2).toString('hex')}`);
+    const z = new JSZip();
+    z.file('README.md', '# hi\n');
+    gh.refusePushes = true;
+    try {
+      const res = await postZip(c.session, projectId, await z.generateAsync({ type: 'nodebuffer' }));
+      const body: any = await res.json();
+      expect(res.status).toBe(201);
+      const [repo] = body.repositories;
+      expect(gh.repos.has(repo.full_name)).toBe(true);
+      expect(repo.initial_commit).toMatchObject({ pushed: false, reported_sha: null, matches: false });
+      expect(repo.initial_commit.error).toMatch(/push/);
+      // The rest of the lock still happened and was read back.
+      expect(repo.settings.find((s: any) => s.setting === 'allow_forking')).toMatchObject({ reported: false, applied: true });
+      const events = (await adminDb.query('SELECT action, payload FROM event WHERE project_id = $1 ORDER BY seq', [projectId])).rows;
+      expect(events.map((e) => e.action)).toEqual(['project.claimed', 'repository.created']);
+      expect(events[1].payload.fully_locked).toBe(false);
+      expect(events[1].payload.github_repo_id).toBe(gh.repos.get(repo.full_name)!.id);
+      const row = (await adminDb.query('SELECT github_repo_id, locked_at FROM repository WHERE project_id = $1', [projectId])).rows[0];
+      expect(row).toEqual({ github_repo_id: String(gh.repos.get(repo.full_name)!.id), locked_at: null });
+    } finally {
+      gh.refusePushes = false;
+    }
+  });
+
+  it('if GitHub fails while reading the new repository back, it is recorded as created but not finished, never as locked', async () => {
+    const c = await connectedCreator('readfail');
+    const projectId = await claim(c.session, `Read Fail ${randomBytes(2).toString('hex')}`);
+    gh.failRepoRead = true;
+    try {
+      const r = await api(running.base, c.session, `/projects/${projectId}/code-home`, { method: 'POST', body: {} });
+      expect(r.status).toBe(201);
+      const [repo] = r.body.repositories;
+      expect(gh.repos.has(repo.full_name)).toBe(true);
+      expect(repo.incomplete).toMatch(/GitHub answered 500/);
+      expect(repo.settings).toEqual([]); // nothing GitHub did not report is claimed
+      const ev = (await adminDb.query(`SELECT payload FROM event WHERE project_id = $1 AND action = 'repository.created'`, [projectId])).rows[0].payload;
+      expect(ev.fully_locked).toBe(false);
+      expect((await adminDb.query('SELECT locked_at FROM repository WHERE project_id = $1', [projectId])).rows[0].locked_at).toBeNull();
+    } finally {
+      gh.failRepoRead = false;
+    }
+  });
+
+  it('if GitHub cannot report every file in the first commit, the upload is not called a match', async () => {
+    const c = await connectedCreator('truncated');
+    const projectId = await claim(c.session, `Truncated ${randomBytes(2).toString('hex')}`);
+    const z = new JSZip();
+    z.file('a.txt', 'a');
+    z.file('b.txt', 'b');
+    gh.truncateTrees = true;
+    try {
+      const res = await postZip(c.session, projectId, await z.generateAsync({ type: 'nodebuffer' }));
+      const body: any = await res.json();
+      expect(body.repositories[0].initial_commit).toMatchObject({ pushed: true, files_uploaded: 2, reported_files: null, matches: false });
+    } finally {
+      gh.truncateTrees = false;
+    }
+  });
+
   it('a dangerous zip is refused before anything is created on GitHub', async () => {
     const c = await connectedCreator('badzip');
     const projectId = await claim(c.session, `Bad Zip ${randomBytes(2).toString('hex')}`);
@@ -559,7 +744,8 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
     const clash = await api(running.base, a.session, `/projects/${second}/code-home`, { method: 'POST', body: {} });
     expect(clash.status).toBe(502);
     const failed = (await adminDb.query(`SELECT payload FROM event WHERE project_id = $1 AND action = 'repository.creation_failed'`, [second])).rows[0].payload;
-    expect(failed.error).toEqual({ status: 422, message: 'Repository creation failed.' });
+    expect(failed.error).toEqual({ status: 422, message: 'Repository creation failed.', details: ['name already exists on this account'] });
+    expect(clash.body.error).toMatch(/name already exists on this account/);
     expect((await adminDb.query('SELECT 1 FROM repository WHERE project_id = $1', [second])).rowCount).toBe(0);
   });
 
@@ -614,7 +800,7 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
 
   it('a webhook with a wrong or missing signature is refused and changes nothing', async () => {
     const c = await connectedCreator('sig');
-    const payload = { action: 'deleted', installation: { id: c.installationId }, sender: { login: 'x' } };
+    const payload = { action: 'deleted', installation: { id: c.installationId, account: { login: c.org, id: gh.orgs.get(c.org)!.id } }, sender: { login: 'x' } };
     const id = randomUUID();
     expect((await deliver('installation', payload, { secret: 'not the secret', id })).status).toBe(401);
     expect((await deliver('installation', payload, { signature: '', id })).status).toBe(401);
@@ -625,7 +811,7 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
   it('uninstalling the app on GitHub: the connection shows as broken and it is recorded, once even if GitHub delivers twice', async () => {
     const c = await connectedCreator('uninstall');
     const id = randomUUID();
-    const payload = { action: 'deleted', installation: { id: c.installationId, account: { login: c.org } }, sender: { login: c.owner } };
+    const payload = { action: 'deleted', installation: { id: c.installationId, account: { login: c.org, id: gh.orgs.get(c.org)!.id } }, sender: { login: c.owner } };
     const first = await deliver('installation', payload, { id });
     expect(first.status).toBe(200);
     expect(((await first.json()) as any).outcome).toBe('connection removed');
@@ -643,6 +829,18 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
     const projectId = await claim(c.session, `After ${randomBytes(2).toString('hex')}`);
     expect((await api(running.base, c.session, `/projects/${projectId}/code-home`, { method: 'POST', body: {} })).status).toBe(409);
     expect((await raw('/github/connect', { method: 'POST', headers: { Authorization: `Bearer ${c.session.accessToken}` } })).status).toBe(200);
+  });
+
+  it('a signed body replayed under another event name, or for another account, changes nothing', async () => {
+    const c = await connectedCreator('replay', { plan: 'team' });
+    const projectId = await claim(c.session, `Replay ${randomBytes(2).toString('hex')}`);
+    const made = (await api(running.base, c.session, `/projects/${projectId}/code-home`, { method: 'POST', body: {} })).body.repositories[0];
+    const repoBody = { action: 'deleted', installation: { id: c.installationId }, repository: { id: made.github_repo_id, full_name: made.full_name, private: true }, sender: { login: 'x' } };
+    const asInstallation = await deliver('installation', repoBody);
+    expect(((await asInstallation.json()) as any).outcome).toBe('ignored: body does not match the installation event');
+    const otherAccount = await deliver('installation', { action: 'deleted', installation: { id: c.installationId, account: { login: c.org, id: 1 } }, sender: { login: 'x' } });
+    expect(((await otherAccount.json()) as any).outcome).toBe('ignored: installation account does not match');
+    expect((await adminDb.query('SELECT status FROM github_installation WHERE installation_id = $1', [c.installationId])).rows[0].status).toBe('active');
   });
 
   it('a repository deleted on GitHub is recorded in its project chain', async () => {

@@ -51,18 +51,24 @@ Under **Organization permissions**, set:
 | Permission | Access |
 |---|---|
 | **Administration** | Read and write |
+| **Members** | Read-only |
 
-Everything else: **No access**, with one possible exception below.
+Everything else: **No access**.
+
+**Members: Read-only is an addition to the original permission list.** When a creator connects, Custody Core asks
+GitHub "is the person who just installed this an owner of the organization?" GitHub answers that question for an
+app only if the app may read the organization's members; without it GitHub refuses (and the dashboard then says
+exactly that: the app is missing "Members: Read-only"). It only allows reading who belongs to the organization. The
+same permission is what makes the Member and Organization events available below. (I could not confirm this from
+GitHub's documentation in my environment; the end-to-end `--connect` run checks it against real GitHub.)
 
 ### Subscribe to events
 
 Tick: **Member**, **Organization**, **Pull request**, **Push**, **Repository**.
 
 - **Installation** events (install, uninstall, suspend) are always sent to an app; there is no box for them.
-- If the **Member** and **Organization** boxes are greyed out: GitHub only offers those two events to apps that may
-  read the organization's members. Set Organization permissions > **Members** to **Read-only** and they become
-  available. (I could not confirm from GitHub's documentation in my environment which permission these two events
-  need, so this is what to look for, not a guess presented as fact.) Custody Core only reads these events.
+- If the **Member** and **Organization** boxes are greyed out, check that Organization permissions > **Members** is
+  set to **Read-only** (above). Custody Core only reads these events.
 
 ### Where can this GitHub App be installed?
 

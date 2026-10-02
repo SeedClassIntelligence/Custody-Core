@@ -278,6 +278,8 @@ async function verifyRepositories(db: pg.Pool, config: ReturnType<typeof githubC
       if (e.initial_commit) {
         const head = await gh(config, auth, 'GET', `${repoPath}/commits/${e.default_branch}`);
         note(`${e.full_name} first commit`, e.initial_commit.reported_sha, head.sha);
+        const tree = await gh(config, auth, 'GET', `${repoPath}/git/trees/${head.sha}?recursive=1`);
+        note(`${e.full_name} files in the first commit`, e.initial_commit.reported_files, (tree.tree ?? []).filter((t: any) => t.type === 'blob').length);
       }
     }
   });

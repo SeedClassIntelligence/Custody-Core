@@ -83,10 +83,24 @@ export async function githubWebhook(req: Request, res: Response) {
 
 async function handle(client: import('pg').PoolClient, event: string, action: string | null, installationId: number | null, payload: any): Promise<string> {
   if (installationId === null) return 'no installation';
-  const known = (await client.query('SELECT id, creator_id, account_login, status FROM github_installation WHERE installation_id = $1 FOR UPDATE', [installationId])).rows[0];
+  const known = (await client.query('SELECT id, creator_id, account_login, account_id, status FROM github_installation WHERE installation_id = $1 FOR UPDATE', [installationId])).rows[0];
   if (!known) return 'installation not linked to a creator';
   const identity = (await client.query('SELECT identity_id FROM creator WHERE id = $1', [known.creator_id])).rows[0]?.identity_id as string;
   const sender = typeof payload?.sender?.login === 'string' ? payload.sender.login : null;
+
+  // The event name is a header GitHub does not sign, so the signed body must look like that event: an
+  // installation event carries the installation's account and no repository; a repository event carries one.
+  const shapeOk =
+    event === 'installation'
+      ? typeof payload?.installation?.account?.login === 'string' && payload?.repository === undefined
+      : event === 'repository'
+        ? typeof payload?.repository?.id === 'number'
+        : true;
+  if (!shapeOk) return `ignored: body does not match the ${event} event`;
+  // (Compared by GitHub's account id, which survives an organization being renamed.)
+  if (event === 'installation' && Number(payload.installation.account.id) !== Number(known.account_id)) {
+    return 'ignored: installation account does not match';
+  }
 
   if (event === 'installation' && (action === 'deleted' || action === 'suspend' || action === 'unsuspend')) {
     const status = action === 'deleted' ? 'removed' : action === 'suspend' ? 'suspended' : 'active';

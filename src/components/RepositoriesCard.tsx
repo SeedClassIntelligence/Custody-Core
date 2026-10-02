@@ -57,14 +57,18 @@ export const RepositoriesCard: React.FC<{
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const records = repositoryRecords(events);
-  const failures = events.filter((e) => e.action === 'repository.creation_failed');
+  const recordedNames = new Set(records.map((r) => String(r.full_name).split('/')[1]));
+  // A failure stays on screen only while that repository still does not exist.
+  const failures = events.filter((e) => e.action === 'repository.creation_failed' && !recordedNames.has(String((e.payload as any).name)));
   const connected = codeHome?.installation?.status === 'active';
+  const hasMain = records.some((r) => r.role === 'main');
+  const coreMissing = hasMain && !records.some((r) => r.role === 'core') && failures.some((f) => (f.payload as any).role === 'core');
 
-  const create = async () => {
+  const create = async (finishCore = false) => {
     setBusy(true);
     setError(null);
     try {
-      await createCodeHomeRepositories(project.id, { splitCore, zip });
+      await createCodeHomeRepositories(project.id, finishCore ? { splitCore: true, zip: null } : { splitCore, zip });
       onCreated();
     } catch (e: any) {
       setError(e.message);
@@ -95,7 +99,7 @@ export const RepositoriesCard: React.FC<{
               </p>
               <RepositoryOptions splitCore={splitCore} onSplitCore={setSplitCore} zip={zip} onZip={setZip} disabled={busy} />
               <button
-                onClick={create}
+                onClick={() => void create()}
                 disabled={busy}
                 className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium px-4 py-2 rounded-lg text-xs flex items-center gap-2"
               >
@@ -108,6 +112,20 @@ export const RepositoriesCard: React.FC<{
       )}
 
       {error && <div className="p-3 rounded-lg text-xs border bg-rose-950/50 border-rose-800 text-rose-200">{error}</div>}
+
+      {connected && coreMissing && (
+        <div className="space-y-2 border border-amber-800/60 rounded-xl p-3 text-xs text-amber-200" data-testid="finish-claim">
+          <p>The core repository was not created. You can finish the claim now.</p>
+          <button
+            onClick={() => void create(true)}
+            disabled={busy}
+            className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium px-4 py-2 rounded-lg text-xs flex items-center gap-2"
+          >
+            {busy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            Finish creating the core repository
+          </button>
+        </div>
+      )}
 
       {records.map((r) => {
         const rules = rulesLine(r.ruleset);
@@ -129,14 +147,22 @@ export const RepositoriesCard: React.FC<{
             </div>
             {r.initial_commit && (
               <div className="text-[11px] text-zinc-400">
-                First commit: {r.initial_commit.files} files,{' '}
                 {r.initial_commit.matches ? (
-                  <span className="text-zinc-200">GitHub reports commit {String(r.initial_commit.reported_sha).slice(0, 12)}</span>
+                  <>
+                    First commit: {r.initial_commit.reported_files} files,{' '}
+                    <span className="text-zinc-200">GitHub reports commit {String(r.initial_commit.reported_sha).slice(0, 12)}</span>
+                  </>
+                ) : r.initial_commit.pushed ? (
+                  <span className="text-rose-300">
+                    First commit: {r.initial_commit.files_uploaded} files uploaded, but GitHub reports{' '}
+                    {r.initial_commit.reported_files ?? 'no'} files{r.initial_commit.reported_sha ? '' : ' and no commit'}.
+                  </span>
                 ) : (
-                  <span className="text-rose-300">GitHub does not report the pushed commit</span>
+                  <span className="text-rose-300">The uploaded code was not pushed: {r.initial_commit.error}</span>
                 )}
               </div>
             )}
+            {r.incomplete && <div className="text-[11px] text-rose-300">Created on GitHub, but not finished: {r.incomplete}</div>}
           </div>
         );
       })}
@@ -144,6 +170,7 @@ export const RepositoriesCard: React.FC<{
       {failures.map((f) => (
         <div key={f.seq} className="text-[11px] text-rose-300">
           GitHub did not create {(f.payload as any).name}: {(f.payload as any).error?.message}
+          {(f.payload as any).error?.details ? ` (${(f.payload as any).error.details.join('; ')})` : ''}
         </div>
       ))}
     </div>

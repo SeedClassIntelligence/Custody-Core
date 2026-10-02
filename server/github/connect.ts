@@ -231,10 +231,16 @@ githubPublicRouter.get('/callback', async (req, res) => {
     if (!installation) return backToApp(res, 'not_yours');
     if (installation.account?.type !== 'Organization') return backToApp(res, 'not_an_organization');
     const org: string = installation.account.login;
-    const membership = await gh(config, user, 'GET', `/user/memberships/orgs/${encodeURIComponent(org)}`).catch((err) => {
-      if (err instanceof GitHubError && (err.status === 404 || err.status === 403)) return null;
-      throw err;
-    });
+    let membership: any = null;
+    try {
+      membership = await gh(config, user, 'GET', `/user/memberships/orgs/${encodeURIComponent(org)}`);
+    } catch (err) {
+      if (!(err instanceof GitHubError)) throw err;
+      // 403: GitHub would not tell us, because the app lacks Organization > Members: Read-only. Say exactly that,
+      // rather than calling the person "not an owner".
+      if (err.status === 403) return backToApp(res, 'app_needs_members_permission');
+      if (err.status !== 404) throw err;
+    }
     if (membership?.state !== 'active' || membership?.role !== 'admin') return backToApp(res, 'not_owner');
     const githubUser: string = membership.user?.login ?? null;
 
@@ -243,17 +249,26 @@ githubPublicRouter.get('/callback', async (req, res) => {
     const client = await db.connect();
     try {
       await client.query('BEGIN');
+      // One link attempt per installation at a time, so two creators (two owners of the same organization)
+      // finishing at the same moment cannot both be told "connected".
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`github_installation:${installationId}`]);
       const taken = await client.query(`SELECT creator_id FROM github_installation WHERE installation_id = $1`, [installationId]);
       if (taken.rowCount && taken.rows[0].creator_id !== creator.id) {
         await client.query('ROLLBACK');
         return backToApp(res, 'linked_elsewhere');
       }
-      await client.query(
+      const linked = await client.query(
         `INSERT INTO github_installation (creator_id, installation_id, account_login, account_id, status)
          VALUES ($1, $2, $3, $4, 'active')
-         ON CONFLICT (installation_id) DO UPDATE SET status = 'active', account_login = EXCLUDED.account_login, status_changed_at = now()`,
+         ON CONFLICT (installation_id) DO UPDATE SET status = 'active', account_login = EXCLUDED.account_login, status_changed_at = now()
+           WHERE github_installation.creator_id = EXCLUDED.creator_id
+         RETURNING id`,
         [creator.id, installationId, org, installation.account.id]
       );
+      if (linked.rowCount !== 1) {
+        await client.query('ROLLBACK');
+        return backToApp(res, 'linked_elsewhere');
+      }
       await appendAccountEvent(
         creator.identity_id,
         'creator',

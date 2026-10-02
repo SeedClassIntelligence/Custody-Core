@@ -2,7 +2,7 @@ import type { Request, Response } from 'express';
 import { getDbPool, insertEvent } from '../db';
 import { creatorOf } from '../auth';
 import { githubConfig, GitHubConfig, GitHubError, GitHubNotConfigured } from './app';
-import { BadUpload, createLockedRepository, readZip, repositoryName, RepositoryResult } from './repositories';
+import { BadUpload, createLockedRepository, prepareInitialCommit, PreparedCommit, readZip, repositoryName, RepositoryResult } from './repositories';
 
 /**
  * POST /api/v1/projects/:id/code-home
@@ -33,6 +33,7 @@ export async function createCodeHome(req: Request, res: Response) {
 
   const client = await db.connect();
   let locked = false;
+  let prepared: PreparedCommit | null = null;
   try {
     const project = (await client.query('SELECT id, name, purpose FROM project WHERE id = $1 AND creator_id = $2', [projectId, creator.id])).rows[0];
     if (!project) return res.status(404).json({ error: 'Project not found.' });
@@ -69,6 +70,17 @@ export async function createCodeHome(req: Request, res: Response) {
       return res.status(400).json({ error: 'Existing code can only be added when the main repository is created; it already exists.' });
     }
 
+    // The first commit is made locally before anything is created on GitHub, so a problem with the files
+    // (a name git refuses, for example) is found while nothing exists yet.
+    if (files) {
+      try {
+        prepared = await prepareInitialCommit(files, 'main');
+      } catch (err) {
+        if (err instanceof BadUpload) return res.status(400).json({ error: err.message });
+        throw err;
+      }
+    }
+
     const results: RepositoryResult[] = [];
     for (const want of missing) {
       let result: RepositoryResult;
@@ -80,10 +92,16 @@ export async function createCodeHome(req: Request, res: Response) {
           want.name,
           want.role,
           want.role === 'core' ? `${project.name} (core)` : project.name,
-          want.role === 'main' ? files : null
+          want.role === 'main' ? prepared : null,
+          want.role === 'main' && files ? files.length : 0
         );
       } catch (err: any) {
-        const failure = err instanceof GitHubError ? { status: err.status, message: String(err.body?.message ?? err.message) } : { status: null, message: String(err?.message ?? err).slice(0, 500) };
+        // GitHub's own words, including its detailed reasons (for example "name already exists on this account").
+        const details = err instanceof GitHubError && Array.isArray(err.body?.errors) ? err.body.errors.map((e: any) => e?.message).filter((m: any) => typeof m === 'string') : [];
+        const failure =
+          err instanceof GitHubError
+            ? { status: err.status, message: String(err.body?.message ?? err.message), ...(details.length ? { details } : {}) }
+            : { status: null, message: String(err?.message ?? err).slice(0, 500) };
         await insertEvent({
           project_id: projectId,
           actor_type: 'system',
@@ -94,10 +112,17 @@ export async function createCodeHome(req: Request, res: Response) {
           payload: { organization: installation.account_login, name: want.name, role: want.role, requested_by: creator.id, error: failure }
         });
         console.error('[github] creating a repository failed:', failure.status, failure.message);
-        return res.status(502).json({ error: `GitHub did not create ${want.name}: ${failure.message}`, repositories: results });
+        const why = 'details' in failure && failure.details ? `${failure.message} (${failure.details.join('; ')})` : failure.message;
+        return res.status(502).json({ error: `GitHub did not create ${want.name}: ${why}`, repositories: results });
       }
 
-      const fullyLocked = result.settings.every((s) => s.applied) && result.ruleset.applied;
+      // Locked only if GitHub confirmed every setting, the branch rules, and (with an upload) the exact commit.
+      const fullyLocked =
+        !result.incomplete &&
+        result.settings.length > 0 &&
+        result.settings.every((s) => s.applied) &&
+        result.ruleset.applied &&
+        (!result.initial_commit || result.initial_commit.matches);
       await client.query('BEGIN');
       const row = (
         await client.query(
@@ -127,6 +152,7 @@ export async function createCodeHome(req: Request, res: Response) {
     console.error('[github] code home failed:', err?.message ?? err);
     res.status(500).json({ error: 'Something went wrong on the server.' });
   } finally {
+    prepared?.cleanup();
     if (locked) await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [`code_home:${projectId}`]).catch(() => undefined);
     client.release();
   }
