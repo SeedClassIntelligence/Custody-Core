@@ -20,6 +20,10 @@ app at it through `TEST_DATABASE_URL`, and runs the whole suite. The test setup 
 
 `npm run test:db` starts the same kind of database and leaves it running, printing a `TEST_DATABASE_URL` you can reuse.
 
+`npm run browser-check` runs the real app in a headless browser (Playwright/Chromium) against the same kind of local
+database: it loads every screen, claims a project, verifies its record, tampers with it, downloads an export and
+verifies that too. Screenshots land in `docs/screenshots/milestone-1/`.
+
 The tenant-isolation test is expected to fail until Milestone 2 (login) is built.
 
 ## Event log

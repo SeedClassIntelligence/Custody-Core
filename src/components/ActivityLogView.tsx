@@ -499,7 +499,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
                     PostgreSQL Append-Only Trigger
                   </div>
                   <p className="text-[10px] leading-relaxed">
-                    The app\'s database role can add and read events but is not allowed to change or delete them.
+                    The app's database role can add and read events but is not allowed to change or delete them.
                     The trigger <code className="text-indigo-300">trg_event_append_only</code> raises an exception on any <code className="text-rose-300">UPDATE</code> or <code className="text-rose-300">DELETE</code> attempt.
                   </p>
                 </div>

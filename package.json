@@ -12,7 +12,8 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test:db": "tsx scripts/test-db.ts"
+    "test:db": "tsx scripts/test-db.ts",
+    "browser-check": "tsx scripts/browser-check.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
@@ -36,6 +37,7 @@
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
     "embedded-postgres": "^18.4.0-beta.17",
+    "playwright": "^1.56.1",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2",

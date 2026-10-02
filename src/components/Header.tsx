@@ -121,7 +121,7 @@ export const Header: React.FC<HeaderProps> = ({
                 onSelectTab('dashboard');
               }}
               className={`px-3 py-1.5 rounded-md font-medium transition-all ${
-                currentTab === 'dashboard' && roleMode === 'creator'
+                currentTab === 'dashboard'
                   ? 'bg-zinc-800 text-white shadow-sm'
                   : 'text-zinc-400 hover:text-zinc-200'
               }`}
@@ -134,7 +134,7 @@ export const Header: React.FC<HeaderProps> = ({
                 onSelectTab('workspace');
               }}
               className={`px-3 py-1.5 rounded-md font-medium transition-all flex items-center gap-1.5 ${
-                currentTab === 'workspace' || roleMode === 'developer'
+                currentTab === 'workspace'
                   ? 'bg-indigo-600 text-white shadow-sm'
                   : 'text-zinc-400 hover:text-zinc-200'
               }`}
