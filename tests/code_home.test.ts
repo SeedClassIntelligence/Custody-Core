@@ -739,10 +739,9 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
     expect(r.status).toBe(409);
     expect(r.body.error).toMatch(/Connect your code home first/);
 
-    // A repository with that name already exists in the organization: GitHub refuses, and that is recorded.
+    // Someone made a repository with that name directly on GitHub: GitHub refuses, and that is recorded.
     const name = `Clash ${randomBytes(2).toString('hex')}`;
-    const first = await claim(a.session, name);
-    expect((await api(running.base, a.session, `/projects/${first}/code-home`, { method: 'POST', body: {} })).status).toBe(201);
+    gh.addForeignRepo(a.org, repositoryName(name));
     const second = await claim(a.session, name);
     const clash = await api(running.base, a.session, `/projects/${second}/code-home`, { method: 'POST', body: {} });
     expect(clash.status).toBe(502);
@@ -756,11 +755,9 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
     const c = await connectedCreator('halfway', { plan: 'team' });
     const name = `Half ${randomBytes(2).toString('hex')}`;
     const projectId = await claim(c.session, name);
-    // Someone already has a repository with the core repository's name, so GitHub refuses that one.
+    // Someone made a repository with the core repository's name directly on GitHub, so GitHub refuses that one.
     const core = `${repositoryName(name)}-core`;
-    const blocker = await claim(c.session, `${name} core`);
-    expect(repositoryName(`${name} core`)).toBe(core);
-    expect((await api(running.base, c.session, `/projects/${blocker}/code-home`, { method: 'POST', body: {} })).status).toBe(201);
+    gh.addForeignRepo(c.org, core);
 
     const first = await api(running.base, c.session, `/projects/${projectId}/code-home`, { method: 'POST', body: { split_core: true } });
     expect(first.status).toBe(502);
@@ -768,7 +765,6 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
 
     // The name is freed on GitHub; asking again creates only the core repository.
     gh.repos.delete(`${c.org}/${core}`);
-    await adminDb.query('DELETE FROM repository WHERE full_name = $1', [`${c.org}/${core}`]);
     const before = gh.repos.size;
     const second = await api(running.base, c.session, `/projects/${projectId}/code-home`, { method: 'POST', body: { split_core: true } });
     expect(second.status).toBe(201);
@@ -864,9 +860,11 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
   });
 
   it('a webhook for an installation nobody connected is kept as received but changes nothing', async () => {
-    const r = await deliver('push', { installation: { id: 987654321 }, ref: 'refs/heads/main' });
+    const r = await deliver('installation', { action: 'deleted', installation: { id: 987654321, account: { login: 'nobody', id: 1 } } });
     expect(r.status).toBe(200);
     expect(((await r.json()) as any).outcome).toBe('installation not linked to a creator');
+    const push = await deliver('push', { installation: { id: 987654321 }, ref: 'refs/heads/main' });
+    expect(((await push.json()) as any).outcome).toBe('received, not acted on');
   });
 
   // ---------------------------------------------------------------- third review: GitHub is asked, not the message believed
@@ -987,11 +985,10 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
     expect(repo.adopted).toMatch(/502/);
     expect(gh.repos.get(repo.full_name)!.description).toContain(`Custody Core ${projectId}`);
     expect((await adminDb.query('SELECT github_repo_id FROM repository WHERE project_id = $1', [projectId])).rows[0].github_repo_id).toBe(String(gh.repos.get(repo.full_name)!.id));
-    // A repository of the same name that is NOT ours (no marker) is never adopted.
+    // A repository of the same name that is NOT ours (no marker, made on GitHub) is never adopted.
     const p2 = await claim(c.session, `Foreign ${randomBytes(2).toString('hex')}`);
     const name = (await adminDb.query('SELECT name FROM project WHERE id = $1', [p2])).rows[0].name;
-    const blocker = await claim(c.session, name);
-    await api(running.base, c.session, `/projects/${blocker}/code-home`, { method: 'POST', body: {} });
+    gh.addForeignRepo(c.org, repositoryName(name));
     expect((await api(running.base, c.session, `/projects/${p2}/code-home`, { method: 'POST', body: {} })).status).toBe(502);
     expect((await adminDb.query('SELECT 1 FROM repository WHERE project_id = $1', [p2])).rowCount).toBe(0);
   });
@@ -1152,16 +1149,30 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
     expect(((await res.json()) as any).error).toMatch(/already has commits/);
   });
 
-  it("a repository already recorded for another project is never adopted, even if its description carries this project's marker", async () => {
+  it("a repository already recorded for another project is never adopted, even renamed on GitHub to this project's name with its marker forged", async () => {
     const c = await connectedCreator('noadopt', { plan: 'team' });
     const first = await claim(c.session, `Adopt ${randomBytes(2).toString('hex')}`);
     const made = (await api(running.base, c.session, `/projects/${first}/code-home`, { method: 'POST', body: {} })).body.repositories[0];
-    const name = (await adminDb.query('SELECT name FROM project WHERE id = $1', [first])).rows[0].name;
-    const second = await claim(c.session, name); // same name, so the same repository name
-    gh.repos.get(made.full_name)!.description = `x · Custody Core ${second}`; // marker forged on GitHub
+    const second = await claim(c.session, `Other ${randomBytes(2).toString('hex')}`);
+    const wantedName = repositoryName((await adminDb.query('SELECT name FROM project WHERE id = $1', [second])).rows[0].name);
+    // On GitHub (without Custody Core being told): the first repository is renamed to the name the second
+    // project wants, and its description is given the second project's marker.
+    gh.renameRepo(made.full_name, wantedName);
+    gh.repos.get(`${c.org}/${wantedName}`)!.description = `x · Custody Core ${second}`;
     const r = await api(running.base, c.session, `/projects/${second}/code-home`, { method: 'POST', body: {} });
-    expect(r.status).toBe(502); // GitHub: name exists; not adopted
+    expect(r.status).toBe(502); // GitHub: name exists; not adopted, because it is already recorded (by GitHub id)
     expect((await adminDb.query('SELECT 1 FROM repository WHERE project_id = $1', [second])).rowCount).toBe(0);
+  });
+
+  it('a second project with the same name gets its own repository name (-2), not a refusal', async () => {
+    const c = await connectedCreator('samename', { plan: 'team' });
+    const name = `Same ${randomBytes(2).toString('hex')}`;
+    const p1 = await claim(c.session, name);
+    const p2 = await claim(c.session, name);
+    const r1 = await api(running.base, c.session, `/projects/${p1}/code-home`, { method: 'POST', body: { split_core: true } });
+    const r2 = await api(running.base, c.session, `/projects/${p2}/code-home`, { method: 'POST', body: { split_core: true } });
+    expect(r1.body.repositories.map((x: any) => x.full_name)).toEqual([`${c.org}/${repositoryName(name)}`, `${c.org}/${repositoryName(name)}-core`]);
+    expect(r2.body.repositories.map((x: any) => x.full_name)).toEqual([`${c.org}/${repositoryName(name)}-2`, `${c.org}/${repositoryName(name)}-2-core`]);
   });
 
   it('a repository from an earlier code home connection is not re-locked through the new one', async () => {
@@ -1195,6 +1206,69 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
       expect(body.repositories[0].github_repo_id).toBeGreaterThan(0);
     } finally {
       gh.failRepoRead = false;
+    }
+  });
+
+  // ---------------------------------------------------------------- fifth review
+
+  it('a burst of webhooks while GitHub is slow does not lock anyone else out of the database', async () => {
+    const c = await connectedCreator('slowhooks');
+    const account = { login: c.org, id: gh.orgs.get(c.org)!.id };
+    gh.slowInstallationReadMs = 4000;
+    try {
+      const burst = Promise.all(Array.from({ length: 14 }, () => deliver('installation', { action: 'new_permissions_accepted', installation: { id: c.installationId, account }, sender: { login: 'x' } })));
+      await new Promise((r) => setTimeout(r, 500)); // the webhooks are now waiting on GitHub
+      const t0 = Date.now();
+      const other = await createMfaUser('bystander', running.base);
+      const projects = await api(running.base, other.session, '/projects');
+      expect(projects.status).toBe(200);
+      expect(Date.now() - t0).toBeLessThan(8000);
+      const answers = await burst;
+      expect(answers.every((a) => a.status === 200)).toBe(true);
+    } finally {
+      gh.slowInstallationReadMs = 0;
+    }
+  }, 60_000);
+
+  it('right after a claim answers, the next request on that project is not told it is still busy', async () => {
+    const c = await connectedCreator('rightafter', { plan: 'team' });
+    const projectId = await claim(c.session, `Right After ${randomBytes(2).toString('hex')}`);
+    for (let i = 0; i < 3; i++) {
+      const made = await api(running.base, c.session, `/projects/${projectId}/code-home`, { method: 'POST', body: i === 0 ? {} : { split_core: true } });
+      expect(made.status).toBe(i === 0 ? 201 : i === 1 ? 201 : 409);
+      if (i === 2) expect(made.body.error).toMatch(/already has its repositories/);
+    }
+    expect((await adminDb.query('SELECT code_home_busy_until, code_home_busy_token FROM project WHERE id = $1', [projectId])).rows[0]).toEqual({ code_home_busy_until: null, code_home_busy_token: null });
+  });
+
+  it('"check again" and the webhook check use tokens for that one repository only', async () => {
+    const c = await connectedCreator('narrowtok', { plan: 'team' });
+    const projectId = await claim(c.session, `Narrow ${randomBytes(2).toString('hex')}`);
+    const made = (await api(running.base, c.session, `/projects/${projectId}/code-home`, { method: 'POST', body: {} })).body.repositories[0];
+    const repoId = (await adminDb.query('SELECT id FROM repository WHERE project_id = $1', [projectId])).rows[0].id;
+    const before = gh.tokens.length;
+    await api(running.base, c.session, `/projects/${projectId}/repositories/${repoId}/lock`, { method: 'POST', body: {} });
+    await deliver('repository', { action: 'edited', installation: { id: c.installationId }, repository: { id: made.github_repo_id, full_name: made.full_name, private: true }, sender: { login: 'x' } });
+    const repoName = made.full_name.split('/')[1];
+    const used = gh.tokens.slice(before).filter((t) => !('members' in t.permissions)); // (the owner check reads members, never code)
+    expect(used.length).toBeGreaterThanOrEqual(3);
+    for (const t of used) expect(t.repositories).toEqual([repoName]);
+  });
+
+  it('if GitHub refuses the forking change, making the repository private again still happens', async () => {
+    const c = await connectedCreator('forkrule', { plan: 'team' });
+    const projectId = await claim(c.session, `Fork Rule ${randomBytes(2).toString('hex')}`);
+    const made = (await api(running.base, c.session, `/projects/${projectId}/code-home`, { method: 'POST', body: {} })).body.repositories[0];
+    gh.repos.get(made.full_name)!.private = false;
+    const repoId = (await adminDb.query('SELECT id FROM repository WHERE project_id = $1', [projectId])).rows[0].id;
+    gh.refuseForkingChange = true;
+    try {
+      const r = await api(running.base, c.session, `/projects/${projectId}/repositories/${repoId}/lock`, { method: 'POST', body: {} });
+      expect(gh.repos.get(made.full_name)!.private).toBe(true);
+      expect(r.body.repository.settings.find((x: any) => x.setting === 'allow_forking (change refused)')).toMatchObject({ applied: false });
+      expect(r.body.fully_locked).toBe(false);
+    } finally {
+      gh.refuseForkingChange = false;
     }
   });
 

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import { getDbPool, insertEvent } from '../db';
 import { creatorOf } from '../auth';
@@ -35,6 +36,10 @@ import {
 
 const BUSY_MINUTES = 10;
 
+// Uploads are unpacked in memory (up to 100 MB each), so only a few at a time; others are asked to retry.
+const MAX_UPLOADS_AT_ONCE = 2;
+let uploadsInProgress = 0;
+
 function describe(err: any) {
   // GitHub's own words, including its detailed reasons (for example "name already exists on this account").
   const details = err instanceof GitHubError && Array.isArray(err.body?.errors) ? err.body.errors.map((e: any) => e?.message).filter((m: any) => typeof m === 'string') : [];
@@ -66,24 +71,40 @@ function configOr503(res: Response): GitHubConfig | null {
   }
 }
 
-/** Marks the project busy for a code-home operation. Returns false (and answers) if it is not the creator's or already busy. */
-async function markBusy(projectId: string, creatorId: string, res: Response): Promise<boolean> {
+/**
+ * Marks the project busy for one code-home operation, with a token of its own so that only this operation can
+ * clear it (an expired mark taken over by a newer operation is not cleared by the old one). Returns the token, or
+ * null after answering 404 (not the creator's) or 409 (already busy).
+ */
+async function markBusy(projectId: string, creatorId: string, res: Response): Promise<string | null> {
   const db = getDbPool()!;
+  const token = randomUUID();
   const marked = await db.query(
-    `UPDATE project SET code_home_busy_until = now() + make_interval(mins => $3)
+    `UPDATE project SET code_home_busy_until = now() + make_interval(mins => $3), code_home_busy_token = $4
       WHERE id = $1 AND creator_id = $2 AND (code_home_busy_until IS NULL OR code_home_busy_until < now())
       RETURNING id`,
-    [projectId, creatorId, BUSY_MINUTES]
+    [projectId, creatorId, BUSY_MINUTES, token]
   );
-  if (marked.rowCount === 1) return true;
+  if (marked.rowCount === 1) return token;
   const exists = await db.query('SELECT 1 FROM project WHERE id = $1 AND creator_id = $2', [projectId, creatorId]);
   if (!exists.rowCount) res.status(404).json({ error: 'Project not found.' });
   else res.status(409).json({ error: 'Repositories are already being created or checked for this project. Try again in a moment.' });
-  return false;
+  return null;
 }
 
-async function clearBusy(projectId: string) {
-  await getDbPool()!.query('UPDATE project SET code_home_busy_until = NULL WHERE id = $1', [projectId]).catch(() => undefined);
+async function clearBusy(projectId: string, token: string) {
+  try {
+    await getDbPool()!.query('UPDATE project SET code_home_busy_until = NULL, code_home_busy_token = NULL WHERE id = $1 AND code_home_busy_token = $2', [projectId, token]);
+  } catch (err: any) {
+    // The mark expires by itself; say so loudly rather than hide it.
+    console.error(`[github] could not clear the busy mark on project ${projectId} (it expires within ${BUSY_MINUTES} minutes):`, err?.message ?? err);
+  }
+}
+
+/** Repository names already used by recorded repositories in this organization (any project). */
+async function usedNames(org: string): Promise<Set<string>> {
+  const rows = (await getDbPool()!.query('SELECT full_name FROM repository WHERE lower(full_name) LIKE lower($1)', [`${org.replace(/[\\%_]/g, '\\$&')}/%`])).rows;
+  return new Set(rows.map((r) => String(r.full_name).split('/')[1].toLowerCase()));
 }
 
 const isRecorded = async (githubRepoId: number) =>
@@ -103,14 +124,25 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
     return res.status(400).json({ error: 'split_core must be true or false.' });
   }
 
-  let busy = false;
+  let busy: string | null = null;
+  let counted = false;
   let prepared: PreparedCommit | null = null;
+  // Every answer given while the project is marked busy clears the mark first, so a follow-up request is not
+  // told "already in progress" by an operation that has finished.
+  const respond = async (status: number, body: unknown) => {
+    if (busy) await clearBusy(projectId, busy);
+    busy = null;
+    res.status(status).json(body);
+  };
   try {
     const project = (await db.query('SELECT id, name FROM project WHERE id = $1 AND creator_id = $2', [projectId, creator.id])).rows[0];
     if (!project) return res.status(404).json({ error: 'Project not found.' });
 
     let files: Awaited<ReturnType<typeof readZip>> | null = null;
     if (isZip) {
+      if (uploadsInProgress >= MAX_UPLOADS_AT_ONCE) return res.status(429).json({ error: 'Other uploads are being processed. Try again in a moment.' });
+      uploadsInProgress++;
+      counted = true;
       try {
         files = await readZip(req.body);
       } catch (err) {
@@ -119,21 +151,32 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
       }
     }
 
+    // Checked with GitHub before anything else (installed, not suspended, renamed followed, owner still owner).
+    const home = await codeHomeFor(config, res);
+    if (!home) return;
+
     busy = await markBusy(projectId, creator.id, res);
     if (!busy) return;
 
-    const base = repositoryName(project.name);
-    const wanted: Array<{ name: string; role: 'main' | 'core' }> = [{ name: base, role: 'main' }];
-    if (splitCore) wanted.push({ name: `${base}-core`, role: 'core' });
     // A claim that stopped half way (for example the core repository failed) can be finished: only what is
     // missing is created.
-    const existingRoles = new Set(
-      (await db.query('SELECT is_core FROM repository WHERE project_id = $1', [projectId])).rows.map((r) => (r.is_core ? 'core' : 'main'))
-    );
+    const existing = (await db.query('SELECT is_core, full_name FROM repository WHERE project_id = $1', [projectId])).rows;
+    const existingRoles = new Set(existing.map((r) => (r.is_core ? 'core' : 'main')));
+    // Names: from the project's name, avoiding names already used by recorded repositories in this organization
+    // (a second project with the same name gets "-2", and so on). The main repository's name decides the core's.
+    const used = await usedNames(home.org);
+    const mainRecorded = existing.find((r) => !r.is_core);
+    let base = mainRecorded ? String(mainRecorded.full_name).split('/')[1] : repositoryName(project.name);
+    if (!mainRecorded) {
+      const stem = base;
+      for (let i = 2; used.has(base.toLowerCase()) || used.has(`${base}-core`.toLowerCase()); i++) base = `${stem.slice(0, 76)}-${i}`;
+    }
+    const wanted: Array<{ name: string; role: 'main' | 'core' }> = [{ name: base, role: 'main' }];
+    if (splitCore) wanted.push({ name: `${base}-core`, role: 'core' });
     const missing = wanted.filter((w) => !existingRoles.has(w.role));
-    if (missing.length === 0) return res.status(409).json({ error: 'This project already has its repositories.' });
+    if (missing.length === 0) return respond(409, { error: 'This project already has its repositories.' });
     if (files && existingRoles.has('main')) {
-      return res.status(400).json({ error: 'Existing code can only be added when the main repository is created; it already exists.' });
+      return respond(400, { error: 'Existing code can only be added when the main repository is created; it already exists.' });
     }
 
     // The first commit is made locally before anything is created on GitHub, so a problem with the files
@@ -142,13 +185,10 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
       try {
         prepared = await prepareInitialCommit(files, 'main');
       } catch (err) {
-        if (err instanceof BadUpload) return res.status(400).json({ error: err.message });
+        if (err instanceof BadUpload) return respond(400, { error: err.message });
         throw err;
       }
     }
-
-    const home = await codeHomeFor(config, res);
-    if (!home) return;
 
     const results: RepositoryResult[] = [];
     for (const want of missing) {
@@ -179,7 +219,7 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
         });
         console.error('[github] creating a repository failed:', failure.status, failure.message);
         const why = 'details' in failure && failure.details ? `${failure.message} (${failure.details.join('; ')})` : failure.message;
-        return res.status(502).json({ error: `GitHub did not create ${want.name}: ${why}`, repositories: results });
+        return respond(502, { error: `GitHub did not create ${want.name}: ${why}`, repositories: results });
       }
 
       const fullyLocked = isFullyLocked(result);
@@ -218,20 +258,24 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
       } catch (err: any) {
         await client.query('ROLLBACK').catch(() => undefined);
         if (err?.code === '23505') {
-          return res.status(409).json({ error: `GitHub's repository ${result.full_name} is already recorded for a project.`, repositories: results });
+          client.release();
+          return respond(409, { error: `GitHub's repository ${result.full_name} is already recorded for a project.`, repositories: results });
         }
-        throw err;
-      } finally {
         client.release();
+        throw err;
       }
+      client.release();
       results.push(result);
     }
-    res.status(201).json({ repositories: results });
+    return respond(201, { repositories: results });
   } catch (err: any) {
+    if (busy) await clearBusy(projectId, busy);
+    busy = null;
     next(err);
   } finally {
     prepared?.cleanup();
-    if (busy) await clearBusy(projectId);
+    if (counted) uploadsInProgress--;
+    if (busy) await clearBusy(projectId, busy);
   }
 }
 
@@ -249,8 +293,14 @@ export async function relockRepository(req: Request, res: Response, next: NextFu
   const { id: projectId, repoId } = req.params;
   const isZip = Buffer.isBuffer(req.body);
 
-  let busy = false;
+  let busy: string | null = null;
+  let counted = false;
   let prepared: PreparedCommit | null = null;
+  const respond = async (status: number, body: unknown) => {
+    if (busy) await clearBusy(projectId, busy);
+    busy = null;
+    res.status(status).json(body);
+  };
   try {
     const repo = (
       await db.query(
@@ -264,6 +314,9 @@ export async function relockRepository(req: Request, res: Response, next: NextFu
     let files: Awaited<ReturnType<typeof readZip>> | null = null;
     if (isZip) {
       if (repo.is_core) return res.status(400).json({ error: 'Existing code goes into the main repository.' });
+      if (uploadsInProgress >= MAX_UPLOADS_AT_ONCE) return res.status(429).json({ error: 'Other uploads are being processed. Try again in a moment.' });
+      uploadsInProgress++;
+      counted = true;
       try {
         files = await readZip(req.body);
         prepared = await prepareInitialCommit(files, repo.default_branch || 'main');
@@ -273,28 +326,34 @@ export async function relockRepository(req: Request, res: Response, next: NextFu
       }
     }
 
-    busy = await markBusy(projectId, creator.id, res);
-    if (!busy) return;
-
     const home = await codeHomeFor(config, res);
     if (!home) return;
     if (Number(repo.installation_id) !== home.installationId) {
       return res.status(409).json({ error: 'This repository belongs to an earlier code home connection, which Custody Core can no longer act on.' });
     }
 
+    busy = await markBusy(projectId, creator.id, res);
+    if (!busy) return;
+
     // Where the repository is now, according to GitHub (it may have been renamed), and whether it has commits.
-    const now = await withInstallationToken(config, home.installationId, { permissions: { metadata: 'read', contents: 'read' } }, async (token) => {
-      const auth = { kind: 'token' as const, token };
-      const found = await gh(config, auth, 'GET', `/repositories/${Number(repo.github_repo_id)}`).catch((err) => {
-        if (err instanceof GitHubError && err.status === 404) return null;
-        throw err;
-      });
-      if (!found) return null;
-      const repoPath = `/repos/${String(found.full_name).split('/').map(encodeURIComponent).join('/')}`;
-      return { ...found, empty: prepared ? await isEmpty(config, auth, repoPath) : null };
+    // The token covers this one repository only.
+    const now = await withInstallationToken(
+      config,
+      home.installationId,
+      { repositoryIds: [Number(repo.github_repo_id)], permissions: { metadata: 'read', contents: 'read' } },
+      async (token) => {
+        const auth = { kind: 'token' as const, token };
+        const found = await gh(config, auth, 'GET', `/repositories/${Number(repo.github_repo_id)}`);
+        const repoPath = `/repos/${String(found.full_name).split('/').map(encodeURIComponent).join('/')}`;
+        return { ...found, empty: prepared ? await isEmpty(config, auth, repoPath) : null };
+      }
+    ).catch((err) => {
+      // 404 from the read, or 422 when a token cannot even be narrowed to it: GitHub no longer shows it to the app.
+      if (err instanceof GitHubError && (err.status === 404 || err.status === 422)) return null;
+      throw err;
     });
-    if (!now) return res.status(409).json({ error: 'GitHub no longer shows this repository to Custody Core (deleted, moved, or access removed).' });
-    if (prepared && !now.empty) return res.status(409).json({ error: 'GitHub reports this repository already has commits.' });
+    if (!now) return respond(409, { error: 'GitHub no longer shows this repository to Custody Core (deleted, moved, or access removed).' });
+    if (prepared && !now.empty) return respond(409, { error: 'GitHub reports this repository already has commits.' });
 
     const [, name] = String(now.full_name).split('/');
     const result: RepositoryResult = await finishRepository(
@@ -337,11 +396,14 @@ export async function relockRepository(req: Request, res: Response, next: NextFu
     } finally {
       client.release();
     }
-    res.json({ repository: result, fully_locked: fullyLocked });
+    return respond(200, { repository: result, fully_locked: fullyLocked });
   } catch (err: any) {
+    if (busy) await clearBusy(projectId, busy);
+    busy = null;
     next(err);
   } finally {
     prepared?.cleanup();
-    if (busy) await clearBusy(projectId);
+    if (counted) uploadsInProgress--;
+    if (busy) await clearBusy(projectId, busy);
   }
 }

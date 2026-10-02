@@ -137,11 +137,12 @@ export type Permissions = Partial<Record<'administration' | 'contents' | 'pull_r
 export async function withInstallationToken<T>(
   config: GitHubConfig,
   installationId: number | string,
-  scope: { repositories?: string[]; permissions: Permissions },
+  scope: { repositories?: string[]; repositoryIds?: number[]; permissions: Permissions },
   work: (token: string) => Promise<T>
 ): Promise<T> {
   const body: Record<string, unknown> = { permissions: scope.permissions };
   if (scope.repositories) body.repositories = scope.repositories;
+  if (scope.repositoryIds) body.repository_ids = scope.repositoryIds;
   const issued = await gh(config, { kind: 'app', token: appJwt(config) }, 'POST', `/app/installations/${Number(installationId)}/access_tokens`, body);
   try {
     return await work(issued.token);

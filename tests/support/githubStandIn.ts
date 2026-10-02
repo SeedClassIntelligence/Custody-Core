@@ -62,6 +62,10 @@ export interface StandIn {
   addOrg(login: string, opts?: { plan?: 'free' | 'team'; owners?: string[]; members?: string[] }): Org;
   /** GitHub's permanent id for a user login. */
   userId(login: string): number;
+  /** A repository someone made directly on GitHub (not through Custody Core). */
+  addForeignRepo(org: string, name: string, opts?: { description?: string }): void;
+  /** Rename a repository on GitHub (its id stays the same). */
+  renameRepo(fullName: string, newName: string): void;
   install(org: string, opts?: { appId?: string }): number;
   /** What GitHub does when a user clicks Authorize: a one-time code for that user. */
   authorizeCode(login: string): string;
@@ -78,6 +82,10 @@ export interface StandIn {
   failRepoRead: boolean;
   /** Answer 500 to reading an organization (to test a failed organization lock). */
   failOrgRead: boolean;
+  /** Make GitHub slow: wait this long before answering GET /app/installations/:id. */
+  slowInstallationReadMs: number;
+  /** Refuse changing allow_forking (as an organization-level rule can). */
+  refuseForkingChange: boolean;
   /** Report file trees as truncated, as GitHub does for very large trees. */
   truncateTrees: boolean;
   /** Create the repository but lose GitHub's answer (502), as when a response times out. */
@@ -176,13 +184,19 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       if (asked.some((k) => !handle.appPermissions[k] || (body.permissions[k] === 'write' && handle.appPermissions[k] !== 'write'))) {
         return send(res, 422, { message: 'The permissions requested are not granted to this installation.' });
       }
-      const repositories: string[] | null = Array.isArray(body?.repositories) ? body.repositories : null;
+      let repositories: string[] | null = Array.isArray(body?.repositories) ? body.repositories : null;
+      if (Array.isArray(body?.repository_ids)) {
+        const names = body.repository_ids.map((id: number) => [...s.repos.values()].find((r) => r.id === id && r.org === inst.org)?.name);
+        if (names.some((n: string | undefined) => !n)) return send(res, 422, { message: 'There is at least one repository that does not exist or is not accessible to the parent installation.' });
+        repositories = [...(repositories ?? []), ...names];
+      }
       if (repositories && repositories.some((n) => !s.repos.has(`${inst.org}/${n}`))) return send(res, 422, { message: 'There is at least one repository that does not exist or is not accessible to the parent installation.' });
       const t: IssuedToken = { token: `ghs_${randomBytes(18).toString('hex')}`, installationId: Number(match[1]), repositories, permissions: body?.permissions ?? {}, revoked: false };
       s.tokens.push(t);
       return send(res, 201, { token: t.token, expires_at: new Date(Date.now() + 3600_000).toISOString(), permissions: t.permissions, repository_selection: repositories ? 'selected' : 'all' });
     }
     if (m === 'GET' && (match = /^\/app\/installations\/(\d+)$/.exec(p))) {
+      if (handle.slowInstallationReadMs) await new Promise((r) => setTimeout(r, handle.slowInstallationReadMs));
       if (!verifyAppJwt(bearer(req))) return send(res, 401, { message: 'A JSON web token could not be decoded' });
       const inst = s.installations.get(Number(match[1]));
       if (!inst || inst.appId !== s.appId) return send(res, 404, { message: 'Not Found' });
@@ -295,7 +309,10 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       }
       if (rest === '' && m === 'PATCH') {
         if (!can(t, 'administration', 'write')) return send(res, 403, { message: 'Resource not accessible by integration' });
-        if (typeof body.allow_forking === 'boolean') repo.allow_forking = body.allow_forking;
+        if (typeof body.allow_forking === 'boolean') {
+          if (handle.refuseForkingChange) return send(res, 422, { message: 'Forking settings are managed by the organization.' });
+          repo.allow_forking = body.allow_forking;
+        }
         if (typeof body.private === 'boolean') repo.private = body.private;
         return send(res, 200, repoView(repo));
       }
@@ -468,6 +485,8 @@ export async function startGitHubStandIn(): Promise<StandIn> {
     loseCreateAnswer: false,
     failRepoRead: false,
     failOrgRead: false,
+    slowInstallationReadMs: 0,
+    refuseForkingChange: false,
     truncateTrees: false,
     appPermissions: {
       administration: 'write',
@@ -508,6 +527,29 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       return org;
     },
     userId,
+    addForeignRepo(org, name, opts = {}) {
+      const bare = path.join(root, org, `${name}.git`);
+      fs.mkdirSync(path.dirname(bare), { recursive: true });
+      spawnSync('git', ['init', '-q', '--bare', '-b', 'main', bare]);
+      s.repos.set(`${org}/${name}`, {
+        id: nextId++,
+        org,
+        name,
+        private: true,
+        allow_forking: false,
+        default_branch: 'main',
+        rulesets: [],
+        bare,
+        description: opts.description ?? 'made on GitHub',
+        created_at: new Date().toISOString()
+      });
+    },
+    renameRepo(fullName, newName) {
+      const r = s.repos.get(fullName)!;
+      s.repos.delete(fullName);
+      r.name = newName;
+      s.repos.set(`${r.org}/${newName}`, r);
+    },
     uninstall(id) {
       s.installations.delete(id);
     },

@@ -535,6 +535,7 @@ ALTER TABLE repository ADD COLUMN github_state JSONB;
 -- One code-home operation per project at a time, without holding a database connection while GitHub works.
 -- Set while repositories are being created or re-locked; expires on its own if the server stops part way.
 ALTER TABLE project ADD COLUMN code_home_busy_until TIMESTAMPTZ;
+ALTER TABLE project ADD COLUMN code_home_busy_token UUID;   -- which operation set the mark (only it may clear it)
 CREATE UNIQUE INDEX uq_repository_github_repo_id ON repository (github_repo_id) WHERE github_repo_id <> '';
 
 $mig$;

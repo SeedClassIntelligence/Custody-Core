@@ -10,7 +10,7 @@ import { ensureAuthStack } from './auth-stack';
 import { startDatabaseProcess, freePort } from '../tests/support/dbProcess';
 import { assertSafeTestDatabaseUrl, collectProtectedUrls } from '../tests/support/safety';
 import { appJwt, gh, githubConfig, withInstallationToken } from '../server/github/app';
-import { RULESET_NAME } from '../server/github/repositories';
+import { RULESET_NAME, rulesetMatches } from '../server/github/repositories';
 
 /**
  * End-to-end run against REAL GitHub and a dedicated TEST organization (never your real one). Nothing is mocked.
@@ -266,24 +266,48 @@ async function verifyOrganization(db: pg.Pool, config: ReturnType<typeof githubC
 }
 
 /** Every recorded repository against a fresh read from GitHub. */
+/** Every recorded repository (its latest record: created, or checked again) against a fresh read from GitHub. */
 async function verifyRepositories(db: pg.Pool, config: ReturnType<typeof githubConfig>, installationId: number, org: string) {
-  const events = (await db.query(`SELECT payload FROM event WHERE action = 'repository.created' ORDER BY created_at`)).rows.map((r) => r.payload);
-  if (!events.length) fail('no repository was recorded');
-  const names = events.map((e: any) => String(e.full_name).split('/')[1]);
-  await withInstallationToken(config, installationId, { repositories: names, permissions: { administration: 'read', contents: 'read' } }, async (token) => {
+  const rows = (
+    await db.query(
+      `SELECT DISTINCT ON (subject_id) payload FROM event
+        WHERE action IN ('repository.created', 'repository.lock_checked') ORDER BY subject_id, seq DESC`
+    )
+  ).rows.map((r) => r.payload);
+  if (!rows.length) fail('no repository was recorded');
+  const ids = rows.map((e: any) => Number(e.github_repo_id));
+  await withInstallationToken(config, installationId, { repositoryIds: ids, permissions: { administration: 'read', contents: 'read' } }, async (token) => {
     const auth = { kind: 'token' as const, token };
-    for (const e of events) {
+    for (const e of rows) {
       const repoPath = `/repos/${e.full_name}`;
       const now = await gh(config, auth, 'GET', repoPath);
       for (const s of e.settings) if (!String(s.setting).includes('(')) note(`${e.full_name} ${s.setting}`, s.reported, now[s.setting] ?? null);
-      const rulesets: any[] = await gh(config, auth, 'GET', `${repoPath}/rulesets`).catch((err: any) => {
-        if (err.status === 403 || err.status === 404) return [];
-        throw err;
-      });
-      const ours = rulesets.find((r) => r.name === RULESET_NAME);
-      note(`${e.full_name} branch rules active`, e.ruleset.applied, !!ours && ours.enforcement === 'active');
-      if (e.ruleset.refused) console.log(`          (GitHub refused branch rules: "${e.ruleset.refused.message}")`);
-      if (e.initial_commit) {
+
+      // Branch rules: the exact ruleset recorded, every detail, judged by the same test the app uses.
+      if (e.ruleset.reported) {
+        const back = await gh(config, auth, 'GET', `${repoPath}/rulesets/${e.ruleset.reported.id}`).catch(() => null);
+        note(`${e.full_name} branch rules enforcement`, e.ruleset.reported.enforcement, back?.enforcement ?? null);
+        note(`${e.full_name} branch rules`, e.ruleset.reported.rules, (back?.rules ?? []).map((r: any) => String(r.type)).sort());
+        note(
+          `${e.full_name} branch rules bypass`,
+          e.ruleset.reported.bypass_actors,
+          (back?.bypass_actors ?? []).map((b: any) => ({ actor_type: String(b.actor_type), actor_id: b.actor_id ?? null, bypass_mode: String(b.bypass_mode) }))
+        );
+        note(`${e.full_name} branch rules cover`, e.ruleset.reported.branches, {
+          include: back?.conditions?.ref_name?.include ?? [],
+          exclude: back?.conditions?.ref_name?.exclude ?? []
+        });
+        note(`${e.full_name} branch rules count as the lock`, e.ruleset.applied, back ? rulesetMatches(back, config.appId) : false);
+      } else {
+        const listed: any[] = await gh(config, auth, 'GET', `${repoPath}/rulesets?includes_parents=false`).catch((err: any) => {
+          if (err.status === 403 || err.status === 404) return [];
+          throw err;
+        });
+        note(`${e.full_name} branch rules present`, false, listed.some((r) => r.name === RULESET_NAME));
+        if (e.ruleset.refused) console.log(`          (GitHub refused branch rules: "${e.ruleset.refused.message}")`);
+      }
+
+      if (e.initial_commit?.pushed) {
         const head = await gh(config, auth, 'GET', `${repoPath}/commits/${e.default_branch}`);
         note(`${e.full_name} first commit`, e.initial_commit.reported_sha, head.sha);
         const tree = await gh(config, auth, 'GET', `${repoPath}/git/trees/${head.sha}?recursive=1`);

@@ -55,35 +55,81 @@ export async function githubWebhook(req: Request, res: Response) {
   const installationId = Number.isSafeInteger(payload?.installation?.id) ? payload.installation.id : null;
   const action = typeof payload?.action === 'string' ? payload.action.slice(0, 100) : null;
 
-  const client = await db.connect();
   try {
-    await client.query('BEGIN');
-    // One at a time per delivery id, so a delivery GitHub sends twice is handled once.
-    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`github_delivery:${deliveryId}`]);
-    const seen = await client.query('SELECT 1 FROM github_webhook_delivery WHERE delivery_id = $1', [deliveryId]);
-    if (seen.rowCount) {
-      await client.query('ROLLBACK');
-      return res.status(200).json({ ok: true, duplicate: true });
+    // 1. Decide what (if anything) this delivery could change, from our own record. Short queries only.
+    const plan = await planFor(db, event, action, installationId, payload);
+    // 2. Ask GitHub what is true now, holding no database connection while GitHub answers.
+    const githubNow = plan.kind === 'installation' ? await installationNow(config, installationId!) : plan.kind === 'repository' ? await repositoryNow(config, installationId!, plan.repoId) : null;
+    // 3. One short transaction: handle each delivery id once, compare with what is stored, record real changes.
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`github_delivery:${deliveryId}`]);
+      const seen = await client.query('SELECT 1 FROM github_webhook_delivery WHERE delivery_id = $1', [deliveryId]);
+      if (seen.rowCount) {
+        await client.query('ROLLBACK');
+        return res.status(200).json({ ok: true, duplicate: true });
+      }
+      const outcome =
+        plan.kind === 'installation'
+          ? await applyInstallation(client, installationId!, githubNow as Installation, event, action, payload)
+          : plan.kind === 'repository'
+            ? await applyRepository(client, installationId!, plan.repoId, githubNow as RepoNow, payload)
+            : plan.outcome;
+      await client.query('INSERT INTO github_webhook_delivery (delivery_id, event, action, installation_id, outcome) VALUES ($1, $2, $3, $4, $5)', [
+        deliveryId,
+        event,
+        action,
+        installationId,
+        outcome
+      ]);
+      await client.query('COMMIT');
+      console.log(`[github] webhook ${event}${action ? `.${action}` : ''}: ${outcome}`);
+      res.status(200).json({ ok: true, outcome });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
     }
-    const outcome = await handle(config, client, event, action, installationId, payload);
-    await client.query(
-      'INSERT INTO github_webhook_delivery (delivery_id, event, action, installation_id, outcome) VALUES ($1, $2, $3, $4, $5)',
-      [deliveryId, event, action, installationId, outcome]
-    );
-    await client.query('COMMIT');
-    console.log(`[github] webhook ${event}${action ? `.${action}` : ''}: ${outcome}`);
-    res.status(200).json({ ok: true, outcome });
   } catch (err: any) {
-    await client.query('ROLLBACK').catch(() => undefined);
     console.error('[github] webhook handling failed:', err?.message ?? err);
     // 500 makes GitHub mark the delivery failed, so it can be redelivered.
     res.status(500).json({ error: 'Could not process this delivery.' });
-  } finally {
-    client.release();
   }
 }
 
 type Installation = { state: 'active' | 'suspended' | 'removed'; login: string | null };
+type RepoNow = { exists: true; full_name: string; private: boolean; archived: boolean } | { exists: false };
+type Plan = { kind: 'installation' } | { kind: 'repository'; repoId: number } | { kind: 'none'; outcome: string };
+
+/** What this delivery could change, judged from its (signed) body and our own record; nothing is changed here. */
+async function planFor(db: import('pg').Pool, event: string, action: string | null, installationId: number | null, payload: any): Promise<Plan> {
+  if (installationId === null) return { kind: 'none', outcome: 'no installation' };
+  // The event name is a header GitHub does not sign, so the signed body must look like that event.
+  const shapeOk =
+    event === 'installation'
+      ? typeof payload?.installation?.account?.login === 'string' && payload?.repository === undefined
+      : event === 'repository'
+        ? typeof payload?.repository?.id === 'number'
+        : event === 'organization'
+          ? typeof payload?.organization?.login === 'string'
+          : true;
+  if (!shapeOk) return { kind: 'none', outcome: `ignored: body does not match the ${event} event` };
+  const isInstallation = event === 'installation' || (event === 'organization' && action === 'renamed');
+  const isRepository = event === 'repository' && !!action && ['deleted', 'renamed', 'transferred', 'publicized', 'privatized', 'archived', 'unarchived', 'edited'].includes(action);
+  if (!isInstallation && !isRepository) return { kind: 'none', outcome: 'received, not acted on' };
+  const known = (await db.query('SELECT account_id FROM github_installation WHERE installation_id = $1', [installationId])).rows[0];
+  if (!known) return { kind: 'none', outcome: 'installation not linked to a creator' };
+  // (Compared by GitHub's account id, which survives an organization being renamed.)
+  if (event === 'installation' && Number(payload.installation.account.id) !== Number(known.account_id)) {
+    return { kind: 'none', outcome: 'ignored: installation account does not match' };
+  }
+  if (isInstallation) return { kind: 'installation' };
+  const repoId = Number(payload.repository.id);
+  const ours = await db.query('SELECT 1 FROM repository WHERE github_repo_id = $1 AND installation_id = $2', [String(repoId), installationId]);
+  return ours.rowCount ? { kind: 'repository', repoId } : { kind: 'none', outcome: 'not one of our repositories' };
+}
 
 /** What GitHub reports about an installation right now (asked with the app's own login, not from a webhook). */
 async function installationNow(config: GitHubConfig, installationId: number): Promise<Installation> {
@@ -96,135 +142,102 @@ async function installationNow(config: GitHubConfig, installationId: number): Pr
   }
 }
 
-/**
- * A webhook only says something happened; anyone holding an old signed delivery could send it again. So nothing
- * is changed or recorded from the body alone: each change is confirmed by asking GitHub what is true now, and
- * what GitHub reports is what gets recorded.
- */
-async function handle(
-  config: GitHubConfig,
-  client: import('pg').PoolClient,
-  event: string,
-  action: string | null,
-  installationId: number | null,
-  payload: any
-): Promise<string> {
-  if (installationId === null) return 'no installation';
-  const known = (await client.query('SELECT id, creator_id, account_login, account_id, status FROM github_installation WHERE installation_id = $1 FOR UPDATE', [installationId])).rows[0];
+/** What GitHub reports about one repository right now, with a token for that repository only. */
+async function repositoryNow(config: GitHubConfig, installationId: number, repoId: number): Promise<RepoNow> {
+  try {
+    const repo = await withInstallationToken(config, installationId, { repositoryIds: [repoId], permissions: { metadata: 'read' } }, (token) =>
+      gh(config, { kind: 'token', token }, 'GET', `/repositories/${repoId}`)
+    );
+    return { exists: true, full_name: String(repo.full_name), private: repo.private === true, archived: repo.archived === true };
+  } catch (err) {
+    // 404 from the read, or 422 when a token cannot even be narrowed to it: GitHub no longer shows it to the app.
+    if (err instanceof GitHubError && (err.status === 404 || err.status === 422)) return { exists: false };
+    throw err;
+  }
+}
+
+async function applyInstallation(client: import('pg').PoolClient, installationId: number, now: Installation, event: string, action: string | null, payload: any): Promise<string> {
+  const known = (await client.query('SELECT id, creator_id, account_login, status FROM github_installation WHERE installation_id = $1 FOR UPDATE', [installationId])).rows[0];
   if (!known) return 'installation not linked to a creator';
   const identity = (await client.query('SELECT identity_id FROM creator WHERE id = $1', [known.creator_id])).rows[0]?.identity_id as string;
   const sender = typeof payload?.sender?.login === 'string' ? payload.sender.login : null;
-
-  // The event name is a header GitHub does not sign, so the signed body must look like that event.
-  const shapeOk =
-    event === 'installation'
-      ? typeof payload?.installation?.account?.login === 'string' && payload?.repository === undefined
-      : event === 'repository'
-        ? typeof payload?.repository?.id === 'number'
-        : event === 'organization'
-          ? typeof payload?.organization?.login === 'string'
-          : true;
-  if (!shapeOk) return `ignored: body does not match the ${event} event`;
-  // (Compared by GitHub's account id, which survives an organization being renamed.)
-  if (event === 'installation' && Number(payload.installation.account.id) !== Number(known.account_id)) {
-    return 'ignored: installation account does not match';
+  const changes: string[] = [];
+  if (now.state !== known.status) {
+    await client.query('UPDATE github_installation SET status = $2, status_changed_at = now() WHERE id = $1', [known.id, now.state]);
+    await appendAccountEvent(
+      identity,
+      'system',
+      'github-webhook',
+      now.state === 'active' ? 'github.connection_restored' : 'github.connection_broken',
+      {
+        installation_id: installationId,
+        organization: now.login ?? known.account_login,
+        reason:
+          now.state === 'removed'
+            ? 'GitHub reports the app is no longer installed'
+            : now.state === 'suspended'
+              ? 'GitHub reports the app is suspended'
+              : 'GitHub reports the app is installed and working again',
+        github_reports: now.state,
+        webhook_said: `${event}.${action ?? ''}`,
+        webhook_sender_unconfirmed: sender
+      },
+      client
+    );
+    changes.push(`connection ${now.state}`);
   }
-
-  if (event === 'installation' || (event === 'organization' && action === 'renamed')) {
-    const now = await installationNow(config, installationId);
-    const changes: string[] = [];
-    if (now.state !== known.status) {
-      await client.query('UPDATE github_installation SET status = $2, status_changed_at = now() WHERE id = $1', [known.id, now.state]);
-      await appendAccountEvent(
-        identity,
-        'system',
-        'github-webhook',
-        now.state === 'active' ? 'github.connection_restored' : 'github.connection_broken',
-        {
-          installation_id: installationId,
-          organization: now.login ?? known.account_login,
-          reason:
-            now.state === 'removed'
-              ? 'GitHub reports the app is no longer installed'
-              : now.state === 'suspended'
-                ? 'GitHub reports the app is suspended'
-                : 'GitHub reports the app is installed and working again',
-          github_reports: now.state,
-          webhook_said: `${event}.${action ?? ''}`,
-          webhook_sender_unconfirmed: sender
-        },
-        client
-      );
-      changes.push(`connection ${now.state}`);
-    }
-    if (now.login && now.login !== known.account_login) {
-      await client.query('UPDATE github_installation SET account_login = $2 WHERE id = $1', [known.id, now.login]);
-      await appendAccountEvent(identity, 'system', 'github-webhook', 'github.organization_renamed', { installation_id: installationId, from: known.account_login, to: now.login }, client);
-      changes.push(`organization renamed to ${now.login}`);
-    }
-    return changes.length ? changes.join(', ') : `no change (GitHub reports ${now.state})`;
+  if (now.login && now.login !== known.account_login) {
+    await client.query('UPDATE github_installation SET account_login = $2 WHERE id = $1', [known.id, now.login]);
+    await appendAccountEvent(identity, 'system', 'github-webhook', 'github.organization_renamed', { installation_id: installationId, from: known.account_login, to: now.login }, client);
+    changes.push(`organization renamed to ${now.login}`);
   }
-
-  if (event === 'repository' && action && ['deleted', 'renamed', 'transferred', 'publicized', 'privatized', 'archived', 'unarchived', 'edited'].includes(action)) {
-    const repoId = Number(payload.repository.id);
-    const ours = (
-      await client.query('SELECT id, project_id, full_name, github_state FROM repository WHERE github_repo_id = $1 AND installation_id = $2 FOR UPDATE', [
-        String(repoId),
-        installationId
-      ])
-    ).rows[0];
-    if (!ours) return 'not one of our repositories';
-
-    let repo: any = null;
-    try {
-      repo = await withInstallationToken(config, installationId, { permissions: { metadata: 'read' } }, (token) =>
-        gh(config, { kind: 'token', token }, 'GET', `/repositories/${repoId}`).catch((err) => {
-          if (err instanceof GitHubError && err.status === 404) return null;
-          throw err;
-        })
-      );
-    } catch (err) {
-      if (err instanceof GitHubError) return `could not check with GitHub (${err.status}); nothing changed`;
-      throw err;
-    }
-    // What GitHub reports now, compared with what was last recorded. Only a real difference is recorded, so the
-    // same webhook sent again (or an old one) adds nothing. The webhook's own words are not used as facts.
-    const before = ours.github_state ?? { exists: true, full_name: ours.full_name, private: true, archived: false };
-    const now = repo ? { exists: true, full_name: String(repo.full_name), private: repo.private === true, archived: repo.archived === true } : { exists: false };
-    const changes: string[] = [];
-    if (!now.exists) {
-      if (before.exists !== false) changes.push('no_longer_visible');
-    } else {
-      if (before.exists === false) changes.push('visible_again');
-      if (now.full_name !== before.full_name) {
-        changes.push(String(now.full_name).split('/')[0] !== String(before.full_name).split('/')[0] ? 'transferred' : 'renamed');
-      }
-      if (before.private !== undefined && now.private !== before.private) changes.push(now.private ? 'privatized' : 'publicized');
-      if (before.archived !== undefined && now.archived !== before.archived) changes.push(now.archived ? 'archived' : 'unarchived');
-    }
-    if (!changes.length) return 'no change (GitHub reports the same as last recorded)';
-    for (const change of changes) {
-      await insertEvent(
-        {
-          project_id: ours.project_id,
-          actor_type: 'system',
-          actor_id: 'github-webhook',
-          action: `repository.${change}_on_github`,
-          subject_type: 'repository',
-          subject_id: ours.id,
-          payload: { before, github_reports: now, webhook_sender_unconfirmed: sender }
-        },
-        client
-      );
-    }
-    await client.query('UPDATE repository SET github_state = $2::jsonb, full_name = COALESCE($3, full_name), updated_at = now() WHERE id = $1', [
-      ours.id,
-      JSON.stringify(now),
-      now.exists ? (now as any).full_name : null
-    ]);
-    return `recorded ${changes.join(', ')}`;
-  }
-
-  return 'received, not acted on';
+  return changes.length ? changes.join(', ') : `no change (GitHub reports ${now.state})`;
 }
 
+/**
+ * What GitHub reports now, compared with what was last recorded. Only a real difference is recorded, so the same
+ * webhook sent again (or an old one) adds nothing. The webhook's own words are not used as facts.
+ */
+async function applyRepository(client: import('pg').PoolClient, installationId: number, repoId: number, now: RepoNow, payload: any): Promise<string> {
+  const ours = (
+    await client.query('SELECT id, project_id, full_name, github_state FROM repository WHERE github_repo_id = $1 AND installation_id = $2 FOR UPDATE', [
+      String(repoId),
+      installationId
+    ])
+  ).rows[0];
+  if (!ours) return 'not one of our repositories';
+  const sender = typeof payload?.sender?.login === 'string' ? payload.sender.login : null;
+  const before = ours.github_state ?? { exists: true, full_name: ours.full_name, private: true, archived: false };
+  const changes: string[] = [];
+  if (!now.exists) {
+    if (before.exists !== false) changes.push('no_longer_visible');
+  } else {
+    if (before.exists === false) changes.push('visible_again');
+    if (now.full_name !== before.full_name) {
+      changes.push(String(now.full_name).split('/')[0] !== String(before.full_name).split('/')[0] ? 'transferred' : 'renamed');
+    }
+    if (before.private !== undefined && now.private !== before.private) changes.push(now.private ? 'privatized' : 'publicized');
+    if (before.archived !== undefined && now.archived !== before.archived) changes.push(now.archived ? 'archived' : 'unarchived');
+  }
+  if (!changes.length) return 'no change (GitHub reports the same as last recorded)';
+  for (const change of changes) {
+    await insertEvent(
+      {
+        project_id: ours.project_id,
+        actor_type: 'system',
+        actor_id: 'github-webhook',
+        action: `repository.${change}_on_github`,
+        subject_type: 'repository',
+        subject_id: ours.id,
+        payload: { before, github_reports: now, webhook_sender_unconfirmed: sender }
+      },
+      client
+    );
+  }
+  await client.query('UPDATE repository SET github_state = $2::jsonb, full_name = COALESCE($3, full_name), updated_at = now() WHERE id = $1', [
+    ours.id,
+    JSON.stringify(now),
+    now.exists ? now.full_name : null
+  ]);
+  return `recorded ${changes.join(', ')}`;
+}

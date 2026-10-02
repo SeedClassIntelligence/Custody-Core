@@ -436,7 +436,7 @@ export async function finishRepository(
 }
 
 /** What a ruleset must say to count as the Custody Core lock: all branches, the three rules, only the app may bypass. */
-function rulesetMatches(back: any, appId: string): boolean {
+export function rulesetMatches(back: any, appId: string): boolean {
   const include = back?.conditions?.ref_name?.include ?? [];
   const exclude = back?.conditions?.ref_name?.exclude ?? [];
   const types = (back?.rules ?? []).map((r: any) => String(r.type));
@@ -469,10 +469,18 @@ async function lockAndReadBack(
     const auth = { kind: 'token' as const, token };
     const repoPath = `/repos/${fullName.split('/').map(encodeURIComponent).join('/')}`;
 
+    // Private (again, if someone made it public), then not forkable: two separate changes, so that GitHub
+    // refusing one (for example forking, under an organization rule) does not stop the other.
+    let privacyError: string | null = null;
+    try {
+      await gh(config, auth, 'PATCH', repoPath, { private: true, visibility: 'private' });
+    } catch (err) {
+      if (!(err instanceof GitHubError)) throw err;
+      privacyError = String(err.body?.message ?? err.message);
+    }
     let forkingError: string | null = null;
     try {
-      // Private (again, if someone made it public) and not forkable.
-      await gh(config, auth, 'PATCH', repoPath, { private: true, visibility: 'private', allow_forking: false });
+      await gh(config, auth, 'PATCH', repoPath, { allow_forking: false });
     } catch (err) {
       if (!(err instanceof GitHubError)) throw err;
       forkingError = String(err.body?.message ?? err.message);
@@ -505,6 +513,7 @@ async function lockAndReadBack(
 
     const repo = await gh(config, auth, 'GET', repoPath);
     const settings = compareSettings({ private: true, visibility: 'private', allow_forking: false }, repo);
+    if (privacyError) settings.push({ setting: 'private (change refused)', requested: true, reported: privacyError, applied: false });
     if (forkingError) settings.push({ setting: 'allow_forking (change refused)', requested: false, reported: forkingError, applied: false });
 
     if (initialCommit) {
