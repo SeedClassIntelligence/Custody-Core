@@ -13,7 +13,8 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test:db": "tsx scripts/test-db.ts",
-    "browser-check": "tsx scripts/browser-check.ts"
+    "browser-check": "tsx scripts/browser-check.ts",
+    "verify-live": "tsx scripts/verify-live-db.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",

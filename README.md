@@ -32,6 +32,13 @@ Events are written only through the database function `append_event()`. The data
 number, timestamp and hash; the application's database account has no `INSERT` on the `event` table. The exact
 hash format, so anyone can verify a chain, is in `docs/EVENT_HASH_FORMAT.md`.
 
+## Checking a deployed database
+
+`npm run migrate` applies pending migrations as the admin role. `npm run verify-live` then checks, as the application's
+own database account, that it cannot `INSERT` into `event` and that `append_event()` works. Its only write runs inside a
+transaction that is always rolled back, so it is safe against a database whose event log is permanent. It never prints
+connection strings.
+
 ## Migrations
 
 SQL files in `server/migrations/` are applied in order by the server on start (or `npm run migrate`).
