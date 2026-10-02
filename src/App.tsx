@@ -18,8 +18,13 @@ import { OpenDoorModal } from './components/OpenDoorModal';
 import { ClosingReportModal } from './components/ClosingReportModal';
 import { DeveloperInviteModal } from './components/DeveloperInviteModal';
 import { RoleMode } from './types/custody';
+import { AuthGate, AuthInfo } from './auth/AuthGate';
 
 export default function App() {
+  return <AuthGate>{(auth) => <Workspace auth={auth} />}</AuthGate>;
+}
+
+function Workspace({ auth }: { auth: AuthInfo }) {
   const [state, setState] = useState<AppState | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [eventsError, setEventsError] = useState<string | null>(null);
@@ -105,6 +110,8 @@ export default function App() {
         onSelectRoleMode={setRoleMode}
         connections={state.connections}
         onOpenSetup={() => setIsSetupOpen(true)}
+        userEmail={auth.email}
+        onSignOut={() => void auth.signOut()}
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">

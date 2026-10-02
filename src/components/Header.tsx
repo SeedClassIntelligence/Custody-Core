@@ -21,6 +21,8 @@ interface HeaderProps {
   onSelectRoleMode: (mode: RoleMode) => void;
   connections: Connection[];
   onOpenSetup: () => void;
+  userEmail: string;
+  onSignOut: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -29,7 +31,9 @@ export const Header: React.FC<HeaderProps> = ({
   roleMode,
   onSelectRoleMode,
   connections,
-  onOpenSetup
+  onOpenSetup,
+  userEmail,
+  onSignOut
 }) => {
   const [dbStatus, setDbStatus] = useState<'checking' | 'connected' | 'not_connected'>('checking');
 
@@ -190,6 +194,16 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Sparkles className="w-3.5 h-3.5 text-amber-400" />
             Setup Guide
+          </button>
+
+          <span className="hidden md:inline text-xs text-zinc-400 max-w-[14rem] truncate" title={userEmail}>
+            {userEmail}
+          </span>
+          <button
+            onClick={onSignOut}
+            className="inline-flex items-center gap-1 text-xs text-zinc-300 hover:text-white bg-zinc-900 hover:bg-zinc-800 border border-zinc-700/80 px-3 py-1.5 rounded-lg transition-colors font-medium"
+          >
+            Sign out
           </button>
 
         </div>

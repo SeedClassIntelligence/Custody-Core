@@ -18,6 +18,7 @@ import {
 import { CustodyEvent } from '../types/custody';
 import { formatHash } from '../utils/crypto';
 import { mapServerEvent } from '../utils/api';
+import { authFetch } from '../auth/supabase';
 
 interface ActivityLogViewProps {
   events: CustodyEvent[];
@@ -66,7 +67,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
         setEventsError(null);
         setServerEvents([]);
         if (projectId) {
-          const eventsRes = await fetch(`/api/v1/projects/${projectId}/events`);
+          const eventsRes = await authFetch(`/api/v1/projects/${projectId}/events`);
           if (eventsRes.ok) {
             const data = await eventsRes.json();
             const loaded = (data.events || []).map(mapServerEvent);
@@ -101,7 +102,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
     setIsVerifying(true);
     try {
       if (dbStatus === 'connected' && projectId) {
-        const res = await fetch(`/api/v1/projects/${projectId}/events/verify`);
+        const res = await authFetch(`/api/v1/projects/${projectId}/events/verify`);
         if (res.ok) {
           const data: ServerVerifyResponse = await res.json();
           setVerificationResult({
