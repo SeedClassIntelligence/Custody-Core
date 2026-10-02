@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,7 +39,11 @@ describe('Built browser bundle', () => {
       SECRET_KEY: env.SECRET_KEY,
       JWT_SECRET: env.JWT_SECRET,
       // The server's key for stored authenticator keys (set by tests/globalSetup.ts).
-      MFA_ENCRYPTION_KEY: process.env.MFA_ENCRYPTION_KEY ?? ''
+      MFA_ENCRYPTION_KEY: process.env.MFA_ENCRYPTION_KEY ?? '',
+      // The GitHub App's server-only secrets (throwaway values made here; a leaky build would copy them in).
+      GITHUB_APP_PRIVATE_KEY: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+      GITHUB_WEBHOOK_SECRET: randomBytes(24).toString('hex'),
+      GITHUB_APP_CLIENT_SECRET: randomBytes(20).toString('hex')
     };
 
     const build = spawnSync(process.execPath, [path.join(root, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', '--outDir', outDir, '--emptyOutDir'], {
@@ -52,7 +57,11 @@ describe('Built browser bundle', () => {
         SUPABASE_SERVICE_ROLE_KEY: secrets.SERVICE_ROLE_KEY ?? '',
         SERVICE_ROLE_KEY: secrets.SERVICE_ROLE_KEY ?? '',
         DATABASE_URL: process.env.TEST_DATABASE_URL ?? '',
-        MFA_ENCRYPTION_KEY: secrets.MFA_ENCRYPTION_KEY ?? ''
+        MFA_ENCRYPTION_KEY: secrets.MFA_ENCRYPTION_KEY ?? '',
+        GITHUB_APP_ID: '123456',
+        GITHUB_APP_PRIVATE_KEY: secrets.GITHUB_APP_PRIVATE_KEY,
+        GITHUB_WEBHOOK_SECRET: secrets.GITHUB_WEBHOOK_SECRET,
+        GITHUB_APP_CLIENT_SECRET: secrets.GITHUB_APP_CLIENT_SECRET
       }
     });
     if (build.status !== 0) throw new Error(`vite build failed:\n${build.stdout}\n${build.stderr}`.slice(-2000));
@@ -79,10 +88,14 @@ describe('Built browser bundle', () => {
     }
     expect(Object.values(secrets).filter(Boolean).length).toBeGreaterThan(0); // we really had secrets to look for
     expect(secrets.MFA_ENCRYPTION_KEY, 'the authenticator key must be set for this check').toBeTruthy();
+    // The private key's body, in case a build reformats the PEM header lines.
+    const keyBody = secrets.GITHUB_APP_PRIVATE_KEY.split('\n').slice(1, -2).join('');
+    expect(keyBody.length).toBeGreaterThan(1000);
+    expect(all().replace(/\\n|\n/g, '').includes(keyBody), 'GitHub App private key found in the bundle').toBe(false);
   });
 
   it('contains no service-role variable name or app database password', () => {
-    for (const needle of ['SUPABASE_SERVICE_ROLE_KEY', 'SERVICE_ROLE_KEY', 'service_role', 'CustodyAppPass', 'MFA_ENCRYPTION_KEY']) {
+    for (const needle of ['SUPABASE_SERVICE_ROLE_KEY', 'SERVICE_ROLE_KEY', 'service_role', 'CustodyAppPass', 'MFA_ENCRYPTION_KEY', 'GITHUB_APP_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET', 'GITHUB_APP_CLIENT_SECRET', 'BEGIN PRIVATE KEY']) {
       const hit = files.find((f) => f.text.includes(needle));
       expect(hit?.name, `"${needle}" found in ${hit?.name}`).toBeUndefined();
     }
