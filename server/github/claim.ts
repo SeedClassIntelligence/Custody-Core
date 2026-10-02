@@ -55,16 +55,22 @@ export async function createCodeHome(req: Request, res: Response) {
     // One code-home creation per project at a time, and only once.
     await client.query('SELECT pg_advisory_lock(hashtextextended($1, 0))', [`code_home:${projectId}`]);
     locked = true;
-    if ((await client.query('SELECT 1 FROM repository WHERE project_id = $1', [projectId])).rowCount) {
-      return res.status(409).json({ error: 'This project already has its repositories.' });
-    }
-
     const base = repositoryName(project.name);
     const wanted: Array<{ name: string; role: 'main' | 'core' }> = [{ name: base, role: 'main' }];
     if (splitCore) wanted.push({ name: `${base}-core`, role: 'core' });
+    // A claim that stopped half way (for example the core repository failed) can be finished: only what is
+    // missing is created.
+    const existingRoles = new Set(
+      (await client.query('SELECT is_core FROM repository WHERE project_id = $1', [projectId])).rows.map((r) => (r.is_core ? 'core' : 'main'))
+    );
+    const missing = wanted.filter((w) => !existingRoles.has(w.role));
+    if (missing.length === 0) return res.status(409).json({ error: 'This project already has its repositories.' });
+    if (files && existingRoles.has('main')) {
+      return res.status(400).json({ error: 'Existing code can only be added when the main repository is created; it already exists.' });
+    }
 
     const results: RepositoryResult[] = [];
-    for (const want of wanted) {
+    for (const want of missing) {
       let result: RepositoryResult;
       try {
         result = await createLockedRepository(

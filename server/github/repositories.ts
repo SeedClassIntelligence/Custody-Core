@@ -66,6 +66,44 @@ const MAX_TOTAL_BYTES = 100 * 1024 * 1024;
 
 export class BadUpload extends Error {}
 
+/**
+ * Unpacks one file, stopping as soon as it would pass `limit` bytes, so a small "zip bomb" cannot fill the
+ * server's memory (the sizes a zip declares for its files are not trusted).
+ */
+function unpackWithLimit(entry: JSZip.JSZipObject, limit: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let done = false;
+    const stream = (entry as any).internalStream('uint8array');
+    stream
+      .on('data', (chunk: Uint8Array) => {
+        if (done) return;
+        size += chunk.length;
+        if (size > limit) {
+          done = true;
+          stream.pause();
+          reject(new BadUpload('The unpacked files are larger than 100 MB.'));
+          return;
+        }
+        chunks.push(Buffer.from(chunk));
+      })
+      .on('error', (err: Error) => {
+        if (!done) {
+          done = true;
+          reject(new BadUpload(`The zip file could not be read: ${String(err.message).slice(0, 200)}`));
+        }
+      })
+      .on('end', () => {
+        if (!done) {
+          done = true;
+          resolve(Buffer.concat(chunks));
+        }
+      })
+      .resume();
+  });
+}
+
 /** Reads an uploaded zip safely: no paths outside the folder, no links, no .git, size and count limits. */
 export async function readZip(zipBytes: Buffer): Promise<Array<{ path: string; data: Buffer; executable: boolean }>> {
   let zip: JSZip;
@@ -100,13 +138,12 @@ export async function readZip(zipBytes: Buffer): Promise<Array<{ path: string; d
     if (!name || name.startsWith('/') || /^[A-Za-z]:/.test(name) || parts.some((p) => p === '..' || p === '' || p === '.')) {
       throw new BadUpload(`The zip file contains a path that is not allowed: ${names[i].slice(0, 200)}`);
     }
-    if (parts.some((p) => p === '.git')) throw new BadUpload('The zip file contains a .git folder; upload the files only.');
+    if (parts.some((p) => p.toLowerCase() === '.git')) throw new BadUpload('The zip file contains a .git folder; upload the files only.');
     if (parts[parts.length - 1] === '.DS_Store') continue;
     const mode = (entry.unixPermissions as number | null) ?? 0;
     if ((mode & 0o170000) === 0o120000) throw new BadUpload(`The zip file contains a link, which is not allowed: ${name.slice(0, 200)}`);
-    const data = await entry.async('nodebuffer');
+    const data = await unpackWithLimit(entry, MAX_TOTAL_BYTES - total);
     total += data.length;
-    if (total > MAX_TOTAL_BYTES) throw new BadUpload('The unpacked files are larger than 100 MB.');
     files.push({ path: name, data, executable: (mode & 0o111) !== 0 });
   }
   if (files.length === 0) throw new BadUpload('The zip file has no files in it.');
@@ -132,6 +169,7 @@ function run(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): 
  */
 async function pushInitialCommit(config: GitHubConfig, token: string, fullName: string, branch: string, files: Awaited<ReturnType<typeof readZip>>): Promise<string> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'custody-push-'));
+  const homes: string[] = [];
   try {
     for (const f of files) {
       const target = path.join(dir, f.path);
@@ -139,10 +177,18 @@ async function pushInitialCommit(config: GitHubConfig, token: string, fullName: 
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.writeFileSync(target, f.data, { mode: f.executable ? 0o755 : 0o644 });
     }
+    // git must take no settings from the uploaded files or from this machine: a .gitconfig in the upload could
+    // otherwise run commands or send the push (and its token) elsewhere. So: an empty home of its own, and no
+    // global or system configuration at all. The only setting is the one header below.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'custody-git-home-'));
+    homes.push(home);
     const env: NodeJS.ProcessEnv = {
       PATH: process.env.PATH,
-      HOME: dir, // no personal git settings or credential helpers
+      HOME: home,
+      XDG_CONFIG_HOME: home,
       GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_SYSTEM: os.devNull,
+      GIT_CONFIG_GLOBAL: os.devNull,
       GIT_TERMINAL_PROMPT: '0',
       GIT_AUTHOR_NAME: 'Custody Core',
       GIT_AUTHOR_EMAIL: 'custody-core@users.noreply.github.com',
@@ -155,7 +201,8 @@ async function pushInitialCommit(config: GitHubConfig, token: string, fullName: 
     for (const k of ['HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'https_proxy', 'http_proxy', 'no_proxy', 'SSL_CERT_FILE', 'GIT_SSL_CAINFO']) {
       if (process.env[k]) env[k] = process.env[k];
     }
-    await run('git', ['init', '-q', '-b', branch], dir, env);
+    // No template (so no hooks), and the repository's own settings are written by git itself, not the upload.
+    await run('git', ['init', '-q', '--template=', '-b', branch], dir, env);
     await run('git', ['add', '-A'], dir, env);
     await run('git', ['commit', '-q', '-m', 'Initial code, uploaded to Custody Core'], dir, env);
     const sha = await run('git', ['rev-parse', 'HEAD'], dir, env);
@@ -163,6 +210,7 @@ async function pushInitialCommit(config: GitHubConfig, token: string, fullName: 
     return sha;
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+    for (const h of homes) fs.rmSync(h, { recursive: true, force: true });
   }
 }
 
