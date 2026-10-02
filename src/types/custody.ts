@@ -138,6 +138,8 @@ export type EventAction =
   | 'repository.created'
   | 'repository.creation_failed'
   | 'repository.lock_checked'
+  | 'repository.no_longer_visible_on_github'
+  | 'repository.visible_again_on_github'
   | 'repository.deleted_on_github'
   | 'repository.renamed_on_github'
   | 'repository.transferred_on_github'

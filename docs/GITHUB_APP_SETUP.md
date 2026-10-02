@@ -162,6 +162,10 @@ uploaded code again into a repository GitHub reports as still empty). Each repos
 marker (`Custody Core <project id>`) so that, if GitHub's answer to "create" is lost, Custody Core can recognise
 its own repository; a repository without that marker is never taken over.
 
+Custody Core does not receive a webhook when someone edits a repository's branch rules on GitHub (that event is
+not in the list above). **Check again with GitHub** on the dashboard reads them back, judges them by what they
+actually cover (every branch, the three rules, only the app may bypass), and sets them back if they were loosened.
+
 ## Tokens
 
 - The app's own login is a short JWT signed with the private key, made for each call.
@@ -198,6 +202,7 @@ suspended) on GitHub, the dashboard shows **Connection broken** and the account 
    ```
    GITHUB_E2E_ORG="yourname-custody-test"
    GITHUB_E2E_INSTALLATION_ID="<number>"
+   GITHUB_E2E_OWNER="<your GitHub username>"   # an owner of the test organization
    GITHUB_REAL_ORG="your-real-org"        # optional: the script refuses to run against this one
    ```
 6. Docker must be running (the test uses the local login stack and a throwaway database, never the live database).

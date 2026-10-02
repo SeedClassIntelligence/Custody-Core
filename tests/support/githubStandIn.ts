@@ -60,6 +60,8 @@ export interface StandIn {
   userTokens: Map<string, { login: string; revoked: boolean }>;
   calls: Array<{ method: string; path: string; auth: string }>;
   addOrg(login: string, opts?: { plan?: 'free' | 'team'; owners?: string[]; members?: string[] }): Org;
+  /** GitHub's permanent id for a user login. */
+  userId(login: string): number;
   install(org: string, opts?: { appId?: string }): number;
   /** What GitHub does when a user clicks Authorize: a one-time code for that user. */
   authorizeCode(login: string): string;
@@ -109,6 +111,12 @@ export async function startGitHubStandIn(): Promise<StandIn> {
     calls: [] as Array<{ method: string; path: string; auth: string }>
   };
   let nextId = 5000;
+  // GitHub gives every user a permanent numeric id.
+  const userIds = new Map<string, number>();
+  const userId = (login: string) => {
+    if (!userIds.has(login)) userIds.set(login, 900000 + userIds.size);
+    return userIds.get(login)!;
+  };
 
   const send = (res: http.ServerResponse, status: number, body?: unknown) => {
     res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -243,6 +251,11 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       if (!repo || !coversRepo(t, repo.org, repo.name)) return send(res, 404, { message: 'Not Found' });
       return send(res, 200, repoView(repo));
     }
+    if (m === 'GET' && (match = /^\/user\/(\d+)$/.exec(p))) {
+      if (!instToken(req)) return send(res, 401, { message: 'Bad credentials' });
+      const login = [...userIds.entries()].find(([, id]) => id === Number(match![1]))?.[0];
+      return login ? send(res, 200, { login, id: Number(match[1]) }) : send(res, 404, { message: 'Not Found' });
+    }
     if (m === 'GET' && (match = /^\/orgs\/([^/]+)\/memberships\/([^/]+)$/.exec(p))) {
       const t = instToken(req);
       const org = s.orgs.get(decodeURIComponent(match[1]));
@@ -250,7 +263,7 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       if (!can(t, 'members', 'read')) return send(res, 403, { message: 'Resource not accessible by integration' });
       const login = decodeURIComponent(match[2]);
       if (!org.owners.has(login) && !org.members.has(login)) return send(res, 404, { message: 'Not Found' });
-      return send(res, 200, { state: 'active', role: org.owners.has(login) ? 'admin' : 'member', user: { login } });
+      return send(res, 200, { state: 'active', role: org.owners.has(login) ? 'admin' : 'member', user: { login, id: userId(login) } });
     }
     if ((match = /^\/repos\/([^/]+)\/([^/]+)(\/.*)?$/.exec(p))) {
       const [o, n, rest = ''] = [decodeURIComponent(match[1]), decodeURIComponent(match[2]), match[3]];
@@ -265,11 +278,25 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       }
       if (rest === '/rulesets' && m === 'GET') {
         if (!can(t, 'administration', 'read')) return send(res, 403, { message: 'Resource not accessible by integration' });
-        return send(res, 200, repo.rulesets.map((r) => ({ id: r.id, name: r.name, enforcement: r.enforcement })));
+        return send(res, 200, repo.rulesets.map((r) => ({ id: r.id, name: r.name, enforcement: r.enforcement, source_type: 'Repository' })));
+      }
+      if ((match = /^\/rulesets\/(\d+)$/.exec(rest)) && m === 'PUT') {
+        if (!can(t, 'administration', 'write')) return send(res, 403, { message: 'Resource not accessible by integration' });
+        const i = repo.rulesets.findIndex((r) => r.id === Number(match![1]));
+        if (i < 0) return send(res, 404, { message: 'Not Found' });
+        repo.rulesets[i] = { id: repo.rulesets[i].id, ...body };
+        return send(res, 200, repo.rulesets[i]);
+      }
+      if (rest === '/commits' && m === 'GET') {
+        if (!can(t, 'contents', 'read')) return send(res, 403, { message: 'Resource not accessible by integration' });
+        const r = spawnSync('git', ['-C', repo.bare, 'rev-list', '--all', '--max-count=1'], { encoding: 'utf8' });
+        const sha = r.stdout.trim();
+        return sha ? send(res, 200, [{ sha }]) : send(res, 409, { message: 'Git Repository is empty.' });
       }
       if (rest === '' && m === 'PATCH') {
         if (!can(t, 'administration', 'write')) return send(res, 403, { message: 'Resource not accessible by integration' });
         if (typeof body.allow_forking === 'boolean') repo.allow_forking = body.allow_forking;
+        if (typeof body.private === 'boolean') repo.private = body.private;
         return send(res, 200, repoView(repo));
       }
       if (rest === '/rulesets' && m === 'POST') {
@@ -319,7 +346,7 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       const org = s.orgs.get(decodeURIComponent(match[1]));
       if (!org || !(org.owners.has(user.login) || org.members.has(user.login))) return send(res, 404, { message: 'Not Found' });
       if (!handle.appPermissions.members) return send(res, 403, { message: 'Resource not accessible by integration' });
-      return send(res, 200, { state: 'active', role: org.owners.has(user.login) ? 'admin' : 'member', user: { login: user.login } });
+      return send(res, 200, { state: 'active', role: org.owners.has(user.login) ? 'admin' : 'member', user: { login: user.login, id: userId(user.login) } });
     }
     if (m === 'DELETE' && (match = /^\/applications\/([^/]+)\/token$/.exec(p))) {
       const basic = Buffer.from((req.headers.authorization || '').replace(/^Basic /, ''), 'base64').toString();
@@ -480,6 +507,7 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       s.orgs.set(login, org);
       return org;
     },
+    userId,
     uninstall(id) {
       s.installations.delete(id);
     },

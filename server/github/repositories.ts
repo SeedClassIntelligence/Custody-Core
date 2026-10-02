@@ -35,7 +35,13 @@ export interface RulesetResult {
   /** GitHub's refusal, when it refused */
   refused: { status: number; message: string; needs_paid_plan: boolean } | null;
   /** What GitHub reports for the ruleset after creating it */
-  reported: { id: number; enforcement: string; rules: string[]; bypass_actors: Array<{ actor_type: string; actor_id: number | null; bypass_mode: string }> } | null;
+  reported: {
+    id: number;
+    enforcement: string;
+    rules: string[];
+    bypass_actors: Array<{ actor_type: string; actor_id: number | null; bypass_mode: string }>;
+    branches?: { include: string[]; exclude: string[] };
+  } | null;
 }
 
 export interface RepositoryResult {
@@ -60,6 +66,8 @@ export interface RepositoryResult {
   incomplete?: string;
   /** Set when the repository was found on GitHub (made by Custody Core for this project) after creating it failed */
   adopted?: string;
+  /** What GitHub reported about the repository at the end (kept to tell real changes from repeated webhooks) */
+  github_state?: { exists: boolean; full_name: string; private: boolean; archived: boolean };
 }
 
 /** A repository name GitHub accepts, from a project name. */
@@ -290,15 +298,38 @@ export function repositoryMarker(projectId: string): string {
  * After creating failed or its answer was lost: is there a repository of that name that Custody Core made for
  * this project (its description carries the project's marker) and that is still empty? Then it is ours.
  */
-async function findOwnRepository(config: GitHubConfig, installationId: number, org: string, name: string, projectId: string) {
+async function findOwnRepository(
+  config: GitHubConfig,
+  installationId: number,
+  org: string,
+  name: string,
+  projectId: string,
+  isRecorded: (githubRepoId: number) => Promise<boolean>
+) {
   try {
-    const repo = await withInstallationToken(config, installationId, { repositories: [name], permissions: { metadata: 'read' } }, (token) =>
-      gh(config, { kind: 'token', token }, 'GET', `/repos/${encodeURIComponent(org)}/${encodeURIComponent(name)}`)
-    );
-    const ours = typeof repo?.description === 'string' && repo.description.includes(repositoryMarker(projectId)) && Number(repo.size) === 0;
-    return ours ? repo : null;
+    return await withInstallationToken(config, installationId, { repositories: [name], permissions: { metadata: 'read', contents: 'read' } }, async (token) => {
+      const auth = { kind: 'token' as const, token };
+      const repo = await gh(config, auth, 'GET', `/repos/${encodeURIComponent(org)}/${encodeURIComponent(name)}`);
+      const marked = typeof repo?.description === 'string' && repo.description.includes(repositoryMarker(projectId));
+      if (!marked || (await isRecorded(Number(repo.id)))) return null; // never another project's repository
+      return (await isEmpty(config, auth, `/repos/${encodeURIComponent(org)}/${encodeURIComponent(name)}`)) ? repo : null;
+    });
   } catch {
     return null; // not there (or not visible): nothing to adopt
+  }
+}
+
+/**
+ * Whether GitHub reports a repository as having no commits at all. Asked directly ("list one commit"), because
+ * the size GitHub reports is approximate and updated later.
+ */
+export async function isEmpty(config: GitHubConfig, auth: { kind: 'token'; token: string }, repoPath: string): Promise<boolean> {
+  try {
+    const commits = await gh(config, auth, 'GET', `${repoPath}/commits?per_page=1`);
+    return Array.isArray(commits) && commits.length === 0;
+  } catch (err) {
+    if (err instanceof GitHubError && err.status === 409) return true; // "Git Repository is empty."
+    throw err;
   }
 }
 
@@ -312,7 +343,8 @@ export async function createLockedRepository(
   description: string,
   prepared: PreparedCommit | null,
   uploadedFiles: number,
-  projectId: string
+  projectId: string,
+  isRecorded: (githubRepoId: number) => Promise<boolean>
 ): Promise<RepositoryResult> {
   // 1. Create it. The repository does not exist yet, so this token cannot be narrowed to it.
   let created: any;
@@ -332,7 +364,7 @@ export async function createLockedRepository(
   } catch (err: any) {
     // GitHub may have created it even though the answer did not arrive (a timeout, a 5xx), or an earlier
     // attempt created it and was never recorded. Only a repository carrying this project's marker is ours.
-    const own = await findOwnRepository(config, installationId, org, name, projectId);
+    const own = await findOwnRepository(config, installationId, org, name, projectId, isRecorded);
     if (!own) throw err;
     created = own;
     adopted = err instanceof GitHubError ? `GitHub answered ${err.status} when creating it, but reports it exists` : 'the answer to creating it was lost, but GitHub reports it exists';
@@ -344,7 +376,8 @@ export async function createLockedRepository(
   // "not created".
   try {
     const result = await finishRepository(config, installationId, name, role, fullName, branch, prepared, uploadedFiles);
-    return adopted ? { ...result, adopted } : result;
+    const withIds = result.github_repo_id ? result : { ...result, github_repo_id: Number(created.id), html_url: String(created.html_url) };
+    return adopted ? { ...withIds, adopted } : withIds;
   } catch (err: any) {
     return {
       role,
@@ -383,14 +416,63 @@ export async function finishRepository(
     }
   }
 
-  // 3. Lock it and read everything back (a token for this repository only).
+  // 3. Lock it and read everything back (a token for this repository only). If GitHub fails part way, the
+  //    result says so and keeps what did happen (for example that the code was pushed).
+  try {
+    return await lockAndReadBack(config, installationId, name, role, fullName, branch, initialCommit);
+  } catch (err: any) {
+    return {
+      role,
+      full_name: fullName,
+      github_repo_id: 0,
+      html_url: '',
+      default_branch: branch,
+      settings: [],
+      ruleset: { applied: false, refused: null, reported: null },
+      initial_commit: initialCommit,
+      incomplete: err instanceof GitHubError ? `GitHub answered ${err.status}: ${String(err.body?.message ?? err.message)}` : 'no answer from GitHub'
+    };
+  }
+}
+
+/** What a ruleset must say to count as the Custody Core lock: all branches, the three rules, only the app may bypass. */
+function rulesetMatches(back: any, appId: string): boolean {
+  const include = back?.conditions?.ref_name?.include ?? [];
+  const exclude = back?.conditions?.ref_name?.exclude ?? [];
+  const types = (back?.rules ?? []).map((r: any) => String(r.type));
+  const update = (back?.rules ?? []).find((r: any) => r.type === 'update');
+  const bypass = back?.bypass_actors ?? [];
+  return (
+    back?.enforcement === 'active' &&
+    back?.target === 'branch' &&
+    include.length === 1 &&
+    include[0] === '~ALL' &&
+    exclude.length === 0 &&
+    ['deletion', 'non_fast_forward', 'update'].every((t) => types.includes(t)) &&
+    update?.parameters?.update_allows_fetch_and_merge !== true &&
+    bypass.length === 1 &&
+    bypass[0].actor_type === 'Integration' &&
+    String(bypass[0].actor_id) === appId
+  );
+}
+
+async function lockAndReadBack(
+  config: GitHubConfig,
+  installationId: number,
+  name: string,
+  role: 'main' | 'core',
+  fullName: string,
+  branch: string,
+  initialCommit: RepositoryResult['initial_commit']
+): Promise<RepositoryResult> {
   return withInstallationToken(config, installationId, { repositories: [name], permissions: { administration: 'write', contents: 'read' } }, async (token) => {
     const auth = { kind: 'token' as const, token };
     const repoPath = `/repos/${fullName.split('/').map(encodeURIComponent).join('/')}`;
 
     let forkingError: string | null = null;
     try {
-      await gh(config, auth, 'PATCH', repoPath, { allow_forking: false });
+      // Private (again, if someone made it public) and not forkable.
+      await gh(config, auth, 'PATCH', repoPath, { private: true, visibility: 'private', allow_forking: false });
     } catch (err) {
       if (!(err instanceof GitHubError)) throw err;
       forkingError = String(err.body?.message ?? err.message);
@@ -398,10 +480,14 @@ export async function finishRepository(
 
     const ruleset: RulesetResult = { applied: false, refused: null, reported: null };
     try {
-      // When finishing an earlier attempt, the ruleset may already be there: read it rather than add another.
-      const existing: any[] = await gh(config, auth, 'GET', `${repoPath}/rulesets`).catch(() => []);
-      const mine = Array.isArray(existing) ? existing.find((r) => r?.name === RULESET_NAME) : null;
-      const made = mine ?? (await gh(config, auth, 'POST', `${repoPath}/rulesets`, rulesetFor(config.appId)));
+      // When finishing an earlier attempt, the ruleset may already be there (only this repository's own, not
+      // organization-wide ones). If it was loosened on GitHub, it is set back; never duplicated.
+      const existing: any[] = await gh(config, auth, 'GET', `${repoPath}/rulesets?includes_parents=false`).catch(() => []);
+      const mine = Array.isArray(existing) ? existing.find((r) => r?.name === RULESET_NAME && (r.source_type ?? 'Repository') === 'Repository') : null;
+      let made = mine ?? (await gh(config, auth, 'POST', `${repoPath}/rulesets`, rulesetFor(config.appId)));
+      if (mine && !rulesetMatches(await gh(config, auth, 'GET', `${repoPath}/rulesets/${Number(mine.id)}`), config.appId)) {
+        made = await gh(config, auth, 'PUT', `${repoPath}/rulesets/${Number(mine.id)}`, rulesetFor(config.appId));
+      }
       const back = await gh(config, auth, 'GET', `${repoPath}/rulesets/${Number(made.id)}`);
       ruleset.reported = {
         id: Number(back.id),
@@ -409,10 +495,8 @@ export async function finishRepository(
         rules: (back.rules ?? []).map((r: any) => String(r.type)).sort(),
         bypass_actors: (back.bypass_actors ?? []).map((b: any) => ({ actor_type: String(b.actor_type), actor_id: b.actor_id ?? null, bypass_mode: String(b.bypass_mode) }))
       };
-      ruleset.applied =
-        ruleset.reported.enforcement === 'active' &&
-        ['deletion', 'non_fast_forward', 'update'].every((t) => ruleset.reported!.rules.includes(t)) &&
-        ruleset.reported.bypass_actors.some((b) => b.actor_type === 'Integration' && String(b.actor_id) === config.appId);
+      ruleset.reported.branches = { include: back.conditions?.ref_name?.include ?? [], exclude: back.conditions?.ref_name?.exclude ?? [] };
+      ruleset.applied = rulesetMatches(back, config.appId);
     } catch (err) {
       if (!(err instanceof GitHubError)) throw err;
       const message = String(err.body?.message ?? err.message);
@@ -442,7 +526,8 @@ export async function finishRepository(
       default_branch: String(repo.default_branch || branch),
       settings,
       ruleset,
-      initial_commit: initialCommit
+      initial_commit: initialCommit,
+      github_state: { exists: true, full_name: repo.full_name, private: repo.private, archived: repo.archived ?? false }
     };
   });
 }

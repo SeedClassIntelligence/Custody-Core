@@ -10,7 +10,8 @@ CREATE TABLE github_installation (
   installation_id BIGINT NOT NULL UNIQUE,
   account_login TEXT NOT NULL,            -- the organization's name on GitHub
   account_id BIGINT NOT NULL,
-  owner_login TEXT,                       -- the GitHub user GitHub confirmed as an owner when connecting
+  owner_id BIGINT NOT NULL,               -- the GitHub user GitHub confirmed as an owner when connecting (permanent id)
+  owner_login TEXT NOT NULL,              -- that user's login, as last seen
   status TEXT NOT NULL CHECK (status IN ('active', 'suspended', 'removed')),
   connected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -38,6 +39,12 @@ CREATE TABLE github_webhook_delivery (
   outcome TEXT NOT NULL
 );
 
--- Repositories now come from GitHub: which installation created them, and GitHub's own id.
+-- Repositories now come from GitHub: which installation created them, GitHub's own id, and what GitHub last
+-- reported about them (so a webhook saying "something changed" is only recorded when GitHub's answer differs).
 ALTER TABLE repository ADD COLUMN installation_id BIGINT;
+ALTER TABLE repository ADD COLUMN github_state JSONB;
+
+-- One code-home operation per project at a time, without holding a database connection while GitHub works.
+-- Set while repositories are being created or re-locked; expires on its own if the server stops part way.
+ALTER TABLE project ADD COLUMN code_home_busy_until TIMESTAMPTZ;
 CREATE UNIQUE INDEX uq_repository_github_repo_id ON repository (github_repo_id) WHERE github_repo_id <> '';

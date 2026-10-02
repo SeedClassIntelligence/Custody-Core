@@ -5,10 +5,11 @@ import { CodeHomeStatus, createCodeHomeRepositories, finishRepositoryLock } from
 import { SettingsList } from './CodeHomePanel';
 
 const CHANGE_TEXT: Record<string, string> = {
-  'repository.deleted_on_github': 'GitHub reports this repository was deleted',
-  'repository.transferred_on_github': 'GitHub reports this repository was moved out of the organization',
+  'repository.no_longer_visible_on_github': 'GitHub no longer shows this repository to Custody Core (deleted, moved, or access removed)',
+  'repository.visible_again_on_github': 'GitHub shows this repository to Custody Core again',
+  'repository.transferred_on_github': 'GitHub reports this repository is now under another account',
   'repository.publicized_on_github': 'GitHub reports this repository was made public',
-  'repository.privatized_on_github': 'GitHub reports this repository was made private again',
+  'repository.privatized_on_github': 'GitHub reports this repository is private again',
   'repository.renamed_on_github': 'GitHub reports this repository was renamed',
   'repository.archived_on_github': 'GitHub reports this repository was archived',
   'repository.unarchived_on_github': 'GitHub reports this repository was unarchived'
@@ -192,7 +193,11 @@ export const RepositoriesCard: React.FC<{
       {repos.map((repo) => {
         const r = repo.latest;
         const rules = rulesLine(r.ruleset);
-        const gone = repo.changes.some((c) => c.action === 'repository.deleted_on_github' || c.action === 'repository.transferred_on_github');
+        // Whether GitHub's latest report about visibility says it is gone.
+        const visibility = repo.changes.filter((c) => c.action === 'repository.no_longer_visible_on_github' || c.action === 'repository.visible_again_on_github').pop();
+        const gone = visibility?.action === 'repository.no_longer_visible_on_github';
+        // A change GitHub reported after the last check means the settings shown may be out of date.
+        const changedSinceCheck = repo.changes.some((c) => c.timestamp > repo.checkedAt);
         const ic = repo.initialCommit;
         const needsCode = r.role === 'main' && ic && !ic.pushed;
         return (
@@ -206,8 +211,8 @@ export const RepositoriesCard: React.FC<{
             {repo.changes.map((c) => (
               <div key={c.seq} className="text-[11px] text-rose-300 font-medium" data-testid="github-change">
                 {CHANGE_TEXT[c.action] ?? c.action}
-                {c.action === 'repository.renamed_on_github' ? ` (now ${(c.payload as any).github_reports?.full_name})` : ''}
-                {(c.payload as any).by ? `, by ${(c.payload as any).by}` : ''}, {new Date(c.timestamp).toLocaleString()}.
+                {c.action === 'repository.renamed_on_github' || c.action === 'repository.transferred_on_github' ? ` (now ${(c.payload as any).github_reports?.full_name})` : ''},{' '}
+                {new Date(c.timestamp).toLocaleString()}.
               </div>
             ))}
             {!gone && (
@@ -240,8 +245,8 @@ export const RepositoriesCard: React.FC<{
               </div>
             )}
             {r.incomplete && <div className="text-[11px] text-rose-300">Created on GitHub, but not finished: {r.incomplete}</div>}
-            {connected && !gone && !r.fully_locked && fixable(r, ic) && (
-              <div className="space-y-2 pt-1" data-testid="finish-lock">
+            {connected && !gone && (
+              <div className="space-y-2 pt-1" data-testid={(!r.fully_locked && fixable(r, ic)) || changedSinceCheck ? 'finish-lock' : 'check-again'}>
                 {needsCode && (
                   <label className="block text-[11px] text-zinc-400">
                     Upload the code again (.zip):
@@ -254,7 +259,7 @@ export const RepositoriesCard: React.FC<{
                   className="bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-zinc-100 font-medium px-3 py-1.5 rounded-lg text-[11px] flex items-center gap-2"
                 >
                   {relocking === repo.id && <Loader2 className="w-3 h-3 animate-spin" />}
-                  Check again with GitHub and finish locking
+                  {(!r.fully_locked && fixable(r, ic)) || changedSinceCheck ? 'Check again with GitHub and finish locking' : 'Check again with GitHub'}
                 </button>
               </div>
             )}

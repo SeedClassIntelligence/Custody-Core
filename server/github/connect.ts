@@ -4,6 +4,7 @@ import { appendAccountEvent, getDbPool } from '../db';
 import { creatorOf } from '../auth';
 import { gh, githubConfig, GitHubConfig, GitHubError, GitHubNotConfigured } from './app';
 import { lockOrganization } from './organization';
+import { codeHomeFor } from './home';
 
 /**
  * Connecting a creator's GitHub organization (their "code home").
@@ -118,8 +119,10 @@ githubRouter.post('/organization/lock', safe(async (_req, res) => {
   const db = getDbPool();
   if (!db) return res.status(503).json({ error: 'Database not connected.' });
   const creator = creatorOf(res);
-  const inst = (await db.query(`SELECT installation_id, account_login FROM github_installation WHERE creator_id = $1 AND status = 'active'`, [creator.id])).rows[0];
-  if (!inst) return res.status(409).json({ error: 'Your code home is not connected.' });
+  // The same checks as before any other change: still installed, not suspended, renamed followed, owner still owner.
+  const home = await codeHomeFor(config, res);
+  if (!home) return;
+  const inst = { installation_id: home.installationId, account_login: home.org };
   try {
     const lock = await lockOrganization(config, Number(inst.installation_id), inst.account_login);
     await appendAccountEvent(creator.userId, 'creator', creator.id, 'github.organization_locked', { installation_id: Number(inst.installation_id), performed_by: 'github-app', ...lock });
@@ -263,6 +266,9 @@ githubPublicRouter.get('/callback', safe(async (req, res) => {
     }
     if (membership?.state !== 'active' || membership?.role !== 'admin') return backToApp(res, 'not_owner');
     const githubUser: string = membership.user?.login ?? null;
+    const githubUserId = Number(membership.user?.id);
+    // Without GitHub's id for the owner, ownership could not be re-checked later: refuse rather than link blind.
+    if (!githubUser || !Number.isSafeInteger(githubUserId) || githubUserId <= 0) return backToApp(res, 'github_error');
 
     // Linked. From here on only the app's own installation tokens are used.
     const creator = (await db.query('SELECT id, identity_id FROM creator WHERE id = $1', [claimed.creator_id])).rows[0];
@@ -278,12 +284,13 @@ githubPublicRouter.get('/callback', safe(async (req, res) => {
         return backToApp(res, 'linked_elsewhere');
       }
       const linked = await client.query(
-        `INSERT INTO github_installation (creator_id, installation_id, account_login, account_id, owner_login, status)
-         VALUES ($1, $2, $3, $4, $5, 'active')
-         ON CONFLICT (installation_id) DO UPDATE SET status = 'active', account_login = EXCLUDED.account_login, owner_login = EXCLUDED.owner_login, status_changed_at = now()
+        `INSERT INTO github_installation (creator_id, installation_id, account_login, account_id, owner_login, owner_id, status)
+         VALUES ($1, $2, $3, $4, $5, $6, 'active')
+         ON CONFLICT (installation_id) DO UPDATE SET status = 'active', account_login = EXCLUDED.account_login, owner_login = EXCLUDED.owner_login,
+           owner_id = EXCLUDED.owner_id, status_changed_at = now()
            WHERE github_installation.creator_id = EXCLUDED.creator_id
          RETURNING id`,
-        [creator.id, installationId, org, installation.account.id, githubUser]
+        [creator.id, installationId, org, installation.account.id, githubUser, githubUserId]
       );
       if (linked.rowCount !== 1) {
         await client.query('ROLLBACK');
@@ -294,7 +301,7 @@ githubPublicRouter.get('/callback', safe(async (req, res) => {
         'creator',
         creator.id,
         'github.connected',
-        { organization: org, organization_id: installation.account.id, installation_id: installationId, confirmed_by_github_user: githubUser },
+        { organization: org, organization_id: installation.account.id, installation_id: installationId, confirmed_by_github_user: githubUser, confirmed_by_github_user_id: githubUserId },
         client
       );
       await client.query('COMMIT');

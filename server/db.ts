@@ -87,7 +87,9 @@ export function getDbPool(): pg.Pool | null {
   if (!appPool) {
     appPool = new Pool({
       connectionString: databaseUrl,
-      ssl: databaseUrl.includes('localhost') ? false : { rejectUnauthorized: false }
+      ssl: databaseUrl.includes('localhost') ? false : { rejectUnauthorized: false },
+      // Never wait forever for a free connection: answer with an error instead of freezing every request.
+      connectionTimeoutMillis: 10_000
     });
   }
   return appPool;

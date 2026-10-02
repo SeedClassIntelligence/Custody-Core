@@ -151,7 +151,7 @@ async function handle(
                 : 'GitHub reports the app is installed and working again',
           github_reports: now.state,
           webhook_said: `${event}.${action ?? ''}`,
-          by: sender
+          webhook_sender_unconfirmed: sender
         },
         client
       );
@@ -159,15 +159,20 @@ async function handle(
     }
     if (now.login && now.login !== known.account_login) {
       await client.query('UPDATE github_installation SET account_login = $2 WHERE id = $1', [known.id, now.login]);
-      await appendAccountEvent(identity, 'system', 'github-webhook', 'github.organization_renamed', { installation_id: installationId, from: known.account_login, to: now.login, by: sender }, client);
+      await appendAccountEvent(identity, 'system', 'github-webhook', 'github.organization_renamed', { installation_id: installationId, from: known.account_login, to: now.login }, client);
       changes.push(`organization renamed to ${now.login}`);
     }
     return changes.length ? changes.join(', ') : `no change (GitHub reports ${now.state})`;
   }
 
-  if (event === 'repository' && action && ['deleted', 'renamed', 'transferred', 'publicized', 'privatized', 'archived', 'unarchived'].includes(action)) {
+  if (event === 'repository' && action && ['deleted', 'renamed', 'transferred', 'publicized', 'privatized', 'archived', 'unarchived', 'edited'].includes(action)) {
     const repoId = Number(payload.repository.id);
-    const ours = (await client.query('SELECT id, project_id, full_name FROM repository WHERE github_repo_id = $1 AND installation_id = $2', [String(repoId), installationId])).rows[0];
+    const ours = (
+      await client.query('SELECT id, project_id, full_name, github_state FROM repository WHERE github_repo_id = $1 AND installation_id = $2 FOR UPDATE', [
+        String(repoId),
+        installationId
+      ])
+    ).rows[0];
     if (!ours) return 'not one of our repositories';
 
     let repo: any = null;
@@ -182,38 +187,44 @@ async function handle(
       if (err instanceof GitHubError) return `could not check with GitHub (${err.status}); nothing changed`;
       throw err;
     }
-    const exists = repo !== null;
-    const confirmed: Record<string, boolean> = {
-      deleted: !exists,
-      transferred: !exists || String(repo.full_name).split('/')[0] !== String(ours.full_name).split('/')[0],
-      renamed: exists && repo.full_name !== ours.full_name,
-      publicized: exists && repo.private === false,
-      privatized: exists && repo.private === true,
-      archived: exists && repo.archived === true,
-      unarchived: exists && repo.archived === false
-    };
-    if (!confirmed[action]) return `ignored: GitHub does not report the repository as ${action}`;
-    await insertEvent(
-      {
-        project_id: ours.project_id,
-        actor_type: 'system',
-        actor_id: 'github-webhook',
-        action: `repository.${action}_on_github`,
-        subject_type: 'repository',
-        subject_id: ours.id,
-        payload: {
-          full_name_before: ours.full_name,
-          github_reports: exists ? { exists: true, full_name: repo.full_name, private: repo.private, archived: repo.archived ?? null } : { exists: false },
-          by: sender
-        }
-      },
-      client
-    );
-    if (exists && repo.full_name !== ours.full_name) {
-      await client.query('UPDATE repository SET full_name = $2, updated_at = now() WHERE id = $1', [ours.id, repo.full_name]);
+    // What GitHub reports now, compared with what was last recorded. Only a real difference is recorded, so the
+    // same webhook sent again (or an old one) adds nothing. The webhook's own words are not used as facts.
+    const before = ours.github_state ?? { exists: true, full_name: ours.full_name, private: true, archived: false };
+    const now = repo ? { exists: true, full_name: String(repo.full_name), private: repo.private === true, archived: repo.archived === true } : { exists: false };
+    const changes: string[] = [];
+    if (!now.exists) {
+      if (before.exists !== false) changes.push('no_longer_visible');
+    } else {
+      if (before.exists === false) changes.push('visible_again');
+      if (now.full_name !== before.full_name) {
+        changes.push(String(now.full_name).split('/')[0] !== String(before.full_name).split('/')[0] ? 'transferred' : 'renamed');
+      }
+      if (before.private !== undefined && now.private !== before.private) changes.push(now.private ? 'privatized' : 'publicized');
+      if (before.archived !== undefined && now.archived !== before.archived) changes.push(now.archived ? 'archived' : 'unarchived');
     }
-    return `recorded repository ${action}`;
+    if (!changes.length) return 'no change (GitHub reports the same as last recorded)';
+    for (const change of changes) {
+      await insertEvent(
+        {
+          project_id: ours.project_id,
+          actor_type: 'system',
+          actor_id: 'github-webhook',
+          action: `repository.${change}_on_github`,
+          subject_type: 'repository',
+          subject_id: ours.id,
+          payload: { before, github_reports: now, webhook_sender_unconfirmed: sender }
+        },
+        client
+      );
+    }
+    await client.query('UPDATE repository SET github_state = $2::jsonb, full_name = COALESCE($3, full_name), updated_at = now() WHERE id = $1', [
+      ours.id,
+      JSON.stringify(now),
+      now.exists ? (now as any).full_name : null
+    ]);
+    return `recorded ${changes.join(', ')}`;
   }
 
-  return 'recorded';
+  return 'received, not acted on';
 }
+

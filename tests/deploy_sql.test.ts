@@ -41,6 +41,11 @@ describe('Dashboard SQL Editor scripts (docs/deploy)', () => {
     url.pathname = `/${name}`;
     assertSafeTestDatabaseUrl(url.toString(), collectProtectedUrls());
     const pool = new pg.Pool({ connectionString: url.toString() });
+    // pool.end() can resolve before the server has closed the connections; DROP DATABASE ... WITH (FORCE) then
+    // terminates them (57P01). That one is expected during cleanup; anything else still surfaces.
+    pool.on('error', (err: any) => {
+      if (err?.code !== '57P01') throw err;
+    });
     scratch.push({ name, pool });
     return pool;
   }

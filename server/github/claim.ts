@@ -1,12 +1,13 @@
 import type { NextFunction, Request, Response } from 'express';
-import type pg from 'pg';
-import { appendAccountEvent, getDbPool, insertEvent } from '../db';
+import { getDbPool, insertEvent } from '../db';
 import { creatorOf } from '../auth';
-import { appJwt, gh, githubConfig, GitHubConfig, GitHubError, GitHubNotConfigured, withInstallationToken } from './app';
+import { gh, githubConfig, GitHubConfig, GitHubError, GitHubNotConfigured, withInstallationToken } from './app';
+import { codeHomeFor } from './home';
 import {
   BadUpload,
   createLockedRepository,
   finishRepository,
+  isEmpty,
   prepareInitialCommit,
   PreparedCommit,
   readZip,
@@ -26,75 +27,13 @@ import {
  * Creates the project's private repositories in the creator's connected organization, locks them, and records
  * one event per repository with what GitHub reported. A setting GitHub refused is recorded as not applied.
  * Every event is recorded with the creator who asked as its actor; the GitHub App only carries it out.
+ *
+ * No database connection is held while GitHub is being asked (that would let a handful of simultaneous requests
+ * use up every connection and freeze the server). One operation per project at a time is ensured instead by a
+ * short-lived "busy" mark on the project, which expires on its own if the server stops part way.
  */
 
-interface CodeHome {
-  installationId: number;
-  org: string;
-}
-
-/**
- * Before acting on GitHub, ask GitHub (not our own record) whether the installation is still there and not
- * suspended, follow a renamed organization, and check that the GitHub user who connected it is still an owner.
- * Answers with an error and returns null when the creator may not act.
- */
-async function codeHomeFor(config: GitHubConfig, db: pg.Pool, res: Response): Promise<CodeHome | null> {
-  const creator = creatorOf(res);
-  const row = (
-    await db.query(`SELECT id, installation_id, account_login, owner_login, status FROM github_installation WHERE creator_id = $1 AND status <> 'removed'`, [
-      creator.id
-    ])
-  ).rows[0];
-  if (!row) {
-    res.status(409).json({ error: 'Connect your code home first.' });
-    return null;
-  }
-  const installationId = Number(row.installation_id);
-  let inst: any;
-  try {
-    inst = await gh(config, { kind: 'app', token: appJwt(config) }, 'GET', `/app/installations/${installationId}`);
-  } catch (err) {
-    if (err instanceof GitHubError && err.status === 404) {
-      await db.query(`UPDATE github_installation SET status = 'removed', status_changed_at = now() WHERE id = $1 AND status <> 'removed'`, [row.id]);
-      await appendAccountEvent(creator.userId, 'system', 'github-app', 'github.connection_broken', {
-        installation_id: installationId,
-        organization: row.account_login,
-        reason: 'GitHub reports the app is no longer installed',
-        by: null
-      });
-      res.status(409).json({ error: 'Your code home connection is broken: the app is no longer installed on GitHub.' });
-      return null;
-    }
-    throw err;
-  }
-  if (inst.suspended_at) {
-    res.status(409).json({ error: 'Your code home connection is not working: the app is suspended on GitHub.' });
-    return null;
-  }
-  let org: string = row.account_login;
-  if (typeof inst.account?.login === 'string' && inst.account.login !== org) {
-    await db.query('UPDATE github_installation SET account_login = $2 WHERE id = $1', [row.id, inst.account.login]);
-    await appendAccountEvent(creator.userId, 'system', 'github-app', 'github.organization_renamed', {
-      installation_id: installationId,
-      from: org,
-      to: inst.account.login
-    });
-    org = inst.account.login;
-  }
-  if (row.owner_login) {
-    const membership = await withInstallationToken(config, installationId, { permissions: { members: 'read' } }, (token) =>
-      gh(config, { kind: 'token', token }, 'GET', `/orgs/${encodeURIComponent(org)}/memberships/${encodeURIComponent(row.owner_login)}`).catch((err) => {
-        if (err instanceof GitHubError && err.status === 404) return null;
-        throw err;
-      })
-    );
-    if (membership?.state !== 'active' || membership?.role !== 'admin') {
-      res.status(403).json({ error: `The GitHub account that connected this code home (${row.owner_login}) is no longer an owner of ${org}.` });
-      return null;
-    }
-  }
-  return { installationId, org };
-}
+const BUSY_MINUTES = 10;
 
 function describe(err: any) {
   // GitHub's own words, including its detailed reasons (for example "name already exists on this account").
@@ -127,6 +66,29 @@ function configOr503(res: Response): GitHubConfig | null {
   }
 }
 
+/** Marks the project busy for a code-home operation. Returns false (and answers) if it is not the creator's or already busy. */
+async function markBusy(projectId: string, creatorId: string, res: Response): Promise<boolean> {
+  const db = getDbPool()!;
+  const marked = await db.query(
+    `UPDATE project SET code_home_busy_until = now() + make_interval(mins => $3)
+      WHERE id = $1 AND creator_id = $2 AND (code_home_busy_until IS NULL OR code_home_busy_until < now())
+      RETURNING id`,
+    [projectId, creatorId, BUSY_MINUTES]
+  );
+  if (marked.rowCount === 1) return true;
+  const exists = await db.query('SELECT 1 FROM project WHERE id = $1 AND creator_id = $2', [projectId, creatorId]);
+  if (!exists.rowCount) res.status(404).json({ error: 'Project not found.' });
+  else res.status(409).json({ error: 'Repositories are already being created or checked for this project. Try again in a moment.' });
+  return false;
+}
+
+async function clearBusy(projectId: string) {
+  await getDbPool()!.query('UPDATE project SET code_home_busy_until = NULL WHERE id = $1', [projectId]).catch(() => undefined);
+}
+
+const isRecorded = async (githubRepoId: number) =>
+  ((await getDbPool()!.query('SELECT 1 FROM repository WHERE github_repo_id = $1', [String(githubRepoId)])).rowCount ?? 0) > 0;
+
 export async function createCodeHome(req: Request, res: Response, next: NextFunction) {
   const config = configOr503(res);
   if (!config) return;
@@ -141,11 +103,10 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
     return res.status(400).json({ error: 'split_core must be true or false.' });
   }
 
-  let client: pg.PoolClient | null = null;
-  let locked = false;
+  let busy = false;
   let prepared: PreparedCommit | null = null;
   try {
-    const project = (await db.query('SELECT id, name, purpose FROM project WHERE id = $1 AND creator_id = $2', [projectId, creator.id])).rows[0];
+    const project = (await db.query('SELECT id, name FROM project WHERE id = $1 AND creator_id = $2', [projectId, creator.id])).rows[0];
     if (!project) return res.status(404).json({ error: 'Project not found.' });
 
     let files: Awaited<ReturnType<typeof readZip>> | null = null;
@@ -158,17 +119,16 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
       }
     }
 
-    client = await db.connect();
-    // One code-home creation per project at a time.
-    await client.query('SELECT pg_advisory_lock(hashtextextended($1, 0))', [`code_home:${projectId}`]);
-    locked = true;
+    busy = await markBusy(projectId, creator.id, res);
+    if (!busy) return;
+
     const base = repositoryName(project.name);
     const wanted: Array<{ name: string; role: 'main' | 'core' }> = [{ name: base, role: 'main' }];
     if (splitCore) wanted.push({ name: `${base}-core`, role: 'core' });
     // A claim that stopped half way (for example the core repository failed) can be finished: only what is
     // missing is created.
     const existingRoles = new Set(
-      (await client.query('SELECT is_core FROM repository WHERE project_id = $1', [projectId])).rows.map((r) => (r.is_core ? 'core' : 'main'))
+      (await db.query('SELECT is_core FROM repository WHERE project_id = $1', [projectId])).rows.map((r) => (r.is_core ? 'core' : 'main'))
     );
     const missing = wanted.filter((w) => !existingRoles.has(w.role));
     if (missing.length === 0) return res.status(409).json({ error: 'This project already has its repositories.' });
@@ -187,7 +147,7 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
       }
     }
 
-    const home = await codeHomeFor(config, db, res);
+    const home = await codeHomeFor(config, res);
     if (!home) return;
 
     const results: RepositoryResult[] = [];
@@ -203,7 +163,8 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
           want.role === 'core' ? `${project.name} (core)` : project.name,
           want.role === 'main' ? prepared : null,
           want.role === 'main' && files ? files.length : 0,
-          projectId
+          projectId,
+          isRecorded
         );
       } catch (err: any) {
         const failure = describe(err);
@@ -222,45 +183,62 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
       }
 
       const fullyLocked = isFullyLocked(result);
-      await client.query('BEGIN');
-      const row = (
-        await client.query(
-          `INSERT INTO repository (project_id, github_repo_id, full_name, default_branch, is_core, installation_id, locked_at)
-           VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $7 THEN now() END) RETURNING id`,
-          [projectId, String(result.github_repo_id), result.full_name, result.default_branch, result.role === 'core', home.installationId, fullyLocked]
-        )
-      ).rows[0];
-      await insertEvent(
-        {
-          project_id: projectId,
-          actor_type: 'creator',
-          actor_id: creator.id,
-          action: 'repository.created',
-          subject_type: 'repository',
-          subject_id: row.id,
-          payload: { ...result, organization: home.org, performed_by: 'github-app', fully_locked: fullyLocked }
-        },
-        client
-      );
-      await client.query('COMMIT');
+      const client = await db.connect(); // only for this short transaction, never while GitHub is asked
+      try {
+        await client.query('BEGIN');
+        const row = (
+          await client.query(
+            `INSERT INTO repository (project_id, github_repo_id, full_name, default_branch, is_core, installation_id, github_state, locked_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, CASE WHEN $8 THEN now() END) RETURNING id`,
+            [
+              projectId,
+              String(result.github_repo_id),
+              result.full_name,
+              result.default_branch,
+              result.role === 'core',
+              home.installationId,
+              JSON.stringify(result.github_state ?? null),
+              fullyLocked
+            ]
+          )
+        ).rows[0];
+        await insertEvent(
+          {
+            project_id: projectId,
+            actor_type: 'creator',
+            actor_id: creator.id,
+            action: 'repository.created',
+            subject_type: 'repository',
+            subject_id: row.id,
+            payload: { ...result, organization: home.org, performed_by: 'github-app', fully_locked: fullyLocked }
+          },
+          client
+        );
+        await client.query('COMMIT');
+      } catch (err: any) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        if (err?.code === '23505') {
+          return res.status(409).json({ error: `GitHub's repository ${result.full_name} is already recorded for a project.`, repositories: results });
+        }
+        throw err;
+      } finally {
+        client.release();
+      }
       results.push(result);
     }
     res.status(201).json({ repositories: results });
   } catch (err: any) {
-    await client?.query('ROLLBACK').catch(() => undefined);
     next(err);
   } finally {
     prepared?.cleanup();
-    if (client) {
-      if (locked) await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [`code_home:${projectId}`]).catch(() => undefined);
-      client.release();
-    }
+    if (busy) await clearBusy(projectId);
   }
 }
 
 /**
- * Finishes an existing repository's lock: re-applies forking off and the branch rules where they are missing,
- * reads everything back, and (with a zip) pushes code to a main repository that GitHub reports as still empty.
+ * Finishes an existing repository's lock: re-applies privacy, forking off and the branch rules where they are
+ * missing or were loosened, reads everything back, and (with a zip) pushes code to a main repository that GitHub
+ * reports as having no commits.
  */
 export async function relockRepository(req: Request, res: Response, next: NextFunction) {
   const config = configOr503(res);
@@ -271,13 +249,12 @@ export async function relockRepository(req: Request, res: Response, next: NextFu
   const { id: projectId, repoId } = req.params;
   const isZip = Buffer.isBuffer(req.body);
 
+  let busy = false;
   let prepared: PreparedCommit | null = null;
-  let client: pg.PoolClient | null = null;
-  let locked = false;
   try {
     const repo = (
       await db.query(
-        `SELECT r.id, r.full_name, r.is_core, r.default_branch, r.github_repo_id FROM repository r JOIN project p ON p.id = r.project_id
+        `SELECT r.id, r.full_name, r.is_core, r.default_branch, r.github_repo_id, r.installation_id FROM repository r JOIN project p ON p.id = r.project_id
           WHERE r.id = $1 AND r.project_id = $2 AND p.creator_id = $3`,
         [repoId, projectId, creator.id]
       )
@@ -296,22 +273,28 @@ export async function relockRepository(req: Request, res: Response, next: NextFu
       }
     }
 
-    client = await db.connect();
-    await client.query('SELECT pg_advisory_lock(hashtextextended($1, 0))', [`code_home:${projectId}`]);
-    locked = true;
+    busy = await markBusy(projectId, creator.id, res);
+    if (!busy) return;
 
-    const home = await codeHomeFor(config, db, res);
+    const home = await codeHomeFor(config, res);
     if (!home) return;
+    if (Number(repo.installation_id) !== home.installationId) {
+      return res.status(409).json({ error: 'This repository belongs to an earlier code home connection, which Custody Core can no longer act on.' });
+    }
 
-    // Where the repository is now, according to GitHub (it may have been renamed).
-    const now = await withInstallationToken(config, home.installationId, { permissions: { metadata: 'read' } }, (token) =>
-      gh(config, { kind: 'token', token }, 'GET', `/repositories/${Number(repo.github_repo_id)}`).catch((err) => {
+    // Where the repository is now, according to GitHub (it may have been renamed), and whether it has commits.
+    const now = await withInstallationToken(config, home.installationId, { permissions: { metadata: 'read', contents: 'read' } }, async (token) => {
+      const auth = { kind: 'token' as const, token };
+      const found = await gh(config, auth, 'GET', `/repositories/${Number(repo.github_repo_id)}`).catch((err) => {
         if (err instanceof GitHubError && err.status === 404) return null;
         throw err;
-      })
-    );
-    if (!now) return res.status(409).json({ error: 'GitHub reports this repository no longer exists.' });
-    if (prepared && Number(now.size) !== 0) return res.status(409).json({ error: 'GitHub reports this repository already has code in it.' });
+      });
+      if (!found) return null;
+      const repoPath = `/repos/${String(found.full_name).split('/').map(encodeURIComponent).join('/')}`;
+      return { ...found, empty: prepared ? await isEmpty(config, auth, repoPath) : null };
+    });
+    if (!now) return res.status(409).json({ error: 'GitHub no longer shows this repository to Custody Core (deleted, moved, or access removed).' });
+    if (prepared && !now.empty) return res.status(409).json({ error: 'GitHub reports this repository already has commits.' });
 
     const [, name] = String(now.full_name).split('/');
     const result: RepositoryResult = await finishRepository(
@@ -323,46 +306,42 @@ export async function relockRepository(req: Request, res: Response, next: NextFu
       String(now.default_branch || repo.default_branch || 'main'),
       prepared,
       files ? files.length : 0
-    ).catch((err) => ({
-      role: (repo.is_core ? 'core' : 'main') as 'main' | 'core',
-      full_name: String(now.full_name),
-      github_repo_id: Number(now.id),
-      html_url: String(now.html_url),
-      default_branch: String(now.default_branch || 'main'),
-      settings: [],
-      ruleset: { applied: false, refused: null, reported: null },
-      initial_commit: null,
-      incomplete: err instanceof GitHubError ? `GitHub answered ${err.status}: ${String(err.body?.message ?? err.message)}` : 'no answer from GitHub'
-    }));
+    );
+    if (!result.github_repo_id) Object.assign(result, { github_repo_id: Number(now.id), html_url: String(now.html_url) });
     const fullyLocked = isFullyLocked(result);
 
-    await client.query('BEGIN');
-    await client.query(
-      `UPDATE repository SET full_name = $2, locked_at = CASE WHEN $3 THEN COALESCE(locked_at, now()) END, updated_at = now() WHERE id = $1`,
-      [repo.id, result.full_name, fullyLocked]
-    );
-    await insertEvent(
-      {
-        project_id: projectId,
-        actor_type: 'creator',
-        actor_id: creator.id,
-        action: 'repository.lock_checked',
-        subject_type: 'repository',
-        subject_id: repo.id,
-        payload: { ...result, organization: home.org, performed_by: 'github-app', fully_locked: fullyLocked }
-      },
-      client
-    );
-    await client.query('COMMIT');
+    const client = await db.connect(); // only for this short transaction
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE repository SET full_name = $2, github_state = COALESCE($4::jsonb, github_state),
+                locked_at = CASE WHEN $3 THEN COALESCE(locked_at, now()) END, updated_at = now() WHERE id = $1`,
+        [repo.id, result.full_name, fullyLocked, result.github_state ? JSON.stringify(result.github_state) : null]
+      );
+      await insertEvent(
+        {
+          project_id: projectId,
+          actor_type: 'creator',
+          actor_id: creator.id,
+          action: 'repository.lock_checked',
+          subject_type: 'repository',
+          subject_id: repo.id,
+          payload: { ...result, organization: home.org, performed_by: 'github-app', fully_locked: fullyLocked }
+        },
+        client
+      );
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
     res.json({ repository: result, fully_locked: fullyLocked });
   } catch (err: any) {
-    await client?.query('ROLLBACK').catch(() => undefined);
     next(err);
   } finally {
     prepared?.cleanup();
-    if (client) {
-      if (locked) await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [`code_home:${projectId}`]).catch(() => undefined);
-      client.release();
-    }
+    if (busy) await clearBusy(projectId);
   }
 }

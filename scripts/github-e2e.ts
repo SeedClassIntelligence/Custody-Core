@@ -61,6 +61,7 @@ async function main() {
     }
   })();
   const org = process.env.GITHUB_E2E_ORG || fail('Set GITHUB_E2E_ORG to the name of your dedicated test organization.');
+  const ownerLogin = process.env.GITHUB_E2E_OWNER || fail('Set GITHUB_E2E_OWNER to your GitHub username (an owner of the test organization).');
   const installationId = Number(process.env.GITHUB_E2E_INSTALLATION_ID || 0) || fail('Set GITHUB_E2E_INSTALLATION_ID (the number at the end of the installation\'s settings page address).');
 
   // ---- Safety: this must be the test organization, and it must look like one.
@@ -176,9 +177,14 @@ async function main() {
     } else {
       // The connection step needs a person in a browser (--connect). Here the installation is linked directly in
       // this throwaway database, so everything after it runs against real GitHub through the real API.
+      // The owner as GitHub knows them (permanent id), so the "still an owner?" check runs against real GitHub.
+      const owner = await withInstallationToken(config, installationId, { permissions: { members: 'read' } }, (token) =>
+        gh(config, { kind: 'token', token }, 'GET', `/orgs/${org}/memberships/${encodeURIComponent(ownerLogin)}`)
+      );
+      if (owner?.role !== 'admin') fail(`${ownerLogin} is not an owner of ${org} according to GitHub.`);
       await db.query(
-        `INSERT INTO github_installation (creator_id, installation_id, account_login, account_id, status) VALUES ($1, $2, $3, $4, 'active')`,
-        [creatorRow.id, installationId, org, installation.account.id]
+        `INSERT INTO github_installation (creator_id, installation_id, account_login, account_id, owner_login, owner_id, status) VALUES ($1, $2, $3, $4, $5, $6, 'active')`,
+        [creatorRow.id, installationId, org, installation.account.id, owner.user.login, owner.user.id]
       );
       const lock = await call('POST', '/github/organization/lock', {});
       if (lock.status !== 200) fail(`locking the organization failed: ${JSON.stringify(lock.body)}`);
@@ -220,6 +226,7 @@ async function startSelfTest() {
   const { startGitHubStandIn } = await import('../tests/support/githubStandIn');
   const standIn = await startGitHubStandIn();
   standIn.addOrg('cc-selftest-org', { owners: ['selftest'] });
+  standIn.userId('selftest');
   const id = standIn.install('cc-selftest-org');
   Object.assign(process.env, {
     GITHUB_APP_ID: standIn.appId,
@@ -231,6 +238,7 @@ async function startSelfTest() {
     GITHUB_API_URL: standIn.url,
     GITHUB_WEB_URL: standIn.url,
     GITHUB_E2E_ORG: 'cc-selftest-org',
+    GITHUB_E2E_OWNER: 'selftest',
     GITHUB_E2E_INSTALLATION_ID: String(id)
   });
   console.log('*** SELF-TEST against the local GitHub stand-in: checks this script, NOT GitHub. ***');
