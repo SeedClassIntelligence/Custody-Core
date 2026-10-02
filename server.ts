@@ -11,6 +11,7 @@ import {
   verifyServerProjectEvents,
   insertEvent
 } from './server/db';
+import { authenticate, creatorOf } from './server/auth';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -56,8 +57,15 @@ const apiRouter = express.Router();
     });
   });
 
-  // TODO: Milestone 2 creator check - authenticate creator session and filter projects by session creator_id
-  apiRouter.get('/projects', async (_req, res) => {
+  // Everything below requires a verified multifactor login. Only /health above is open.
+  apiRouter.use(authenticate);
+
+  apiRouter.get('/me', (_req, res) => {
+    const creator = creatorOf(res);
+    res.json({ creator: { id: creator.id, email: creator.email } });
+  });
+
+  apiRouter.get('/projects', async (req, res) => {
     const db = getDbPool();
     if (!db) {
       return res.json({
@@ -83,8 +91,10 @@ const apiRouter = express.Router();
           ) as repositories
          FROM project p
          LEFT JOIN repository r ON r.project_id = p.id
+         WHERE p.creator_id = $1
          GROUP BY p.id
-         ORDER BY p.created_at DESC`
+         ORDER BY p.created_at DESC`,
+        [creatorOf(res).id]
       );
 
       res.json({
@@ -96,7 +106,6 @@ const apiRouter = express.Router();
     }
   });
 
-  // TODO: Milestone 2 creator check - assign project ownership to authenticated creator_id from session
   apiRouter.post('/projects', async (req, res) => {
     const db = getDbPool();
     if (!db) {
@@ -105,7 +114,9 @@ const apiRouter = express.Router();
       });
     }
 
-    const { name, purpose, creator_id, repositories, split_core } = req.body;
+    // Whatever the client sends as creator_id is ignored: the owner is the logged-in creator.
+    const { name, purpose, repositories, split_core } = req.body;
+    const creatorId = creatorOf(res).id;
     if (!name || !purpose) {
       return res.status(400).json({ error: 'Project name and purpose are required.' });
     }
@@ -114,29 +125,12 @@ const apiRouter = express.Router();
     try {
       await client.query('BEGIN');
 
-      // Default creator fallback if not provided
-      let actualCreatorId = creator_id;
-      if (!actualCreatorId) {
-        const creatorRes = await client.query('SELECT id FROM creator LIMIT 1');
-        if (creatorRes.rows.length > 0) {
-          actualCreatorId = creatorRes.rows[0].id;
-        } else {
-          // Provision default creator
-          const newCreator = await client.query(
-            `INSERT INTO creator (identity_id, display_name, email)
-             VALUES ('default_creator', 'Primary Creator', 'creator@custodycore.internal')
-             RETURNING id`
-          );
-          actualCreatorId = newCreator.rows[0].id;
-        }
-      }
-
       // Insert Project
       const projRes = await client.query(
         `INSERT INTO project (creator_id, name, purpose, status)
          VALUES ($1, $2, $3, 'active')
          RETURNING *`,
-        [actualCreatorId, name, purpose]
+        [creatorId, name, purpose]
       );
       const project = projRes.rows[0];
 
@@ -159,7 +153,7 @@ const apiRouter = express.Router();
       const event = await insertEvent({
         project_id: project.id,
         actor_type: 'creator',
-        actor_id: actualCreatorId,
+        actor_id: creatorId,
         action: 'project.claimed',
         subject_type: 'project',
         subject_id: project.id,
@@ -198,7 +192,15 @@ const apiRouter = express.Router();
     next();
   });
 
-  // TODO: Milestone 2 creator check - verify session creator owns or has granted access to project
+  // A project that does not exist and a project that belongs to someone else get the same answer,
+  // so the response cannot be used to find out whether a project exists.
+  async function ownsProject(projectId: string, creatorId: string): Promise<boolean> {
+    const db = getDbPool();
+    if (!db) return false;
+    const r = await db.query('SELECT 1 FROM project WHERE id = $1 AND creator_id = $2', [projectId, creatorId]);
+    return r.rowCount === 1;
+  }
+
   apiRouter.get('/projects/:id/events', async (req, res) => {
     const db = getDbPool();
     if (!db) {
@@ -210,6 +212,9 @@ const apiRouter = express.Router();
     }
 
     try {
+      if (!(await ownsProject(req.params.id, creatorOf(res).id))) {
+        return res.status(404).json({ error: 'Project not found.' });
+      }
       const events = await getProjectEvents(req.params.id);
       res.json({
         project_id: req.params.id,
@@ -222,7 +227,6 @@ const apiRouter = express.Router();
     }
   });
 
-  // TODO: Milestone 2 creator check - verify session creator owns or has granted access to project
   apiRouter.get('/projects/:id/events/verify', async (req, res) => {
     const db = getDbPool();
     if (!db) {
@@ -235,6 +239,9 @@ const apiRouter = express.Router();
     }
 
     try {
+      if (!(await ownsProject(req.params.id, creatorOf(res).id))) {
+        return res.status(404).json({ error: 'Project not found.' });
+      }
       const result = await verifyServerProjectEvents(req.params.id);
       res.json({
         valid: result.isValid,
