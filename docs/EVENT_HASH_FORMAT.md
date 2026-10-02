@@ -98,3 +98,33 @@ their order, are what the database hashed. It does not prove more than that:
   other writers to the same project.
 - Any caller allowed to execute the function can write to any existing project. Per-creator authorization
   arrives with login (Milestone 2).
+
+## Account events (migration 005)
+
+Some things belong to a login rather than to one project, for example "this account's authenticator was
+locked after too many wrong codes". They go in a separate chain per account, table `account_event`, written
+only by the database function `append_account_event()` (the application's database account has no `INSERT`,
+`UPDATE` or `DELETE` on the table, and the table rejects updates, deletes and truncation for everyone).
+
+Each account's chain starts with `prev_hash` = 64 zeros and `seq` = 1. The hash is SHA-256 (lower-case hex) of
+these UTF-8 bytes, with no whitespace, keys in this fixed order:
+
+```
+{"account_id":<JSON string>,"action":<JSON string>,"actor_id":<JSON string>,"actor_type":<JSON string>,
+ "payload":<canonical_payload, byte for byte>,"prev_hash":<JSON string>,"seq":<integer>,"timestamp":<JSON string>}
+```
+
+(shown on two lines here; the real input is one line). `timestamp` is `hashed_timestamp`
+(`YYYY-MM-DDTHH:MM:SS.mmmZ`, UTC), `canonical_payload` is produced by the same `canonical_jsonb()` as project
+events. `account_id` is the login system's user id. `verifyAccountChain` in `shared/crypto.ts` checks a chain;
+`GET /api/v1/account/events` returns the signed-in creator's chain and the result of that check.
+
+Actions written so far:
+
+| action | actor | payload |
+|---|---|---|
+| `account.second_factor_enrolled` | `creator` (the user id) | `{ factor_id }` |
+| `account.second_factor_locked` | `system` / `second-factor-guard` | `{ factor_id, wrong_codes, window_minutes, locked_minutes, locked_until }` |
+
+The same limits apply as for project events: deleting the newest events is not detected, and the table owner
+can still bypass the triggers (the chain then reveals the change).

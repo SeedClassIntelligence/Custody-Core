@@ -34,9 +34,9 @@ hash format, so anyone can verify a chain, is in `docs/EVENT_HASH_FORMAT.md`.
 
 ## Login tests (Supabase Auth, local)
 
-Login is tested against a real Supabase Auth server running locally in Docker (the Supabase CLI's local stack, with
-TOTP multifactor enabled in `supabase/config.toml`). Nothing is mocked: users are created, authenticator codes are
-generated with `otplib`, and the auth server verifies them. Tests never touch a hosted Supabase project or its users.
+Login is tested against a real Supabase Auth server running locally in Docker (the Supabase CLI's local stack).
+Nothing is mocked: users are created and signed in by the auth server, authenticator codes are generated with
+`otplib`, and this app's own server checks them, including the wrong-code limit (`tests/second_factor.test.ts`). Tests never touch a hosted Supabase project or its users.
 
 - `npm test` starts the stack by itself if Docker is running (the first start downloads images and takes a few minutes).
 - If Docker is not available, only the login tests fail, with that reason; the rest of the suite still runs.

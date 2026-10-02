@@ -51,9 +51,11 @@ $${tag}$;
 -- What it does:
 --   * records migration 001 (already applied to this database by the app) after checking it is really there
 --   * applies every later migration in order: 002 (hashed_timestamp constraint), 003 (database-built event chain,
---     append_event), 004 (creator email no longer unique)
+--     append_event), 004 (creator email no longer unique), 005 (authenticator-code step run by the app, with
+--     the wrong-code limit, and the per-account record account_event)
 --   * records each in schema_migrations exactly as \`npm run migrate\` does
---   * applies the custody_app grants (server/roles.sql): no INSERT on event, EXECUTE on append_event
+--   * applies the custody_app grants (server/roles.sql): no INSERT on event or account_event, EXECUTE on
+--     append_event and append_account_event, attempts can be added but never changed or deleted
 -- It does NOT add, change or delete any event, project or creator.
 --
 -- Safe to run twice: a migration already recorded is skipped, and the grants are idempotent.
@@ -144,6 +146,19 @@ WITH checks(sort, name, expected, actual) AS (
   (65, 'creator.email is not unique (a login''s email can change and be reused)', 'true',
        (SELECT (count(*) = 0)::text FROM pg_constraint con JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ANY (con.conkey)
          WHERE con.conrelid = to_regclass('public.creator') AND con.contype = 'u' AND array_length(con.conkey, 1) = 1 AND a.attname = 'email')),
+  (66, 'custody_app has NO INSERT on account_event', 'false',
+       CASE WHEN ${ROLE_OK} AND to_regclass('public.account_event') IS NOT NULL THEN has_table_privilege('custody_app', 'public.account_event', 'INSERT')::text ELSE 'table or role missing' END),
+  (67, 'custody_app has NO UPDATE or DELETE on mfa_attempt (wrong-code count)', 'false',
+       CASE WHEN ${ROLE_OK} AND to_regclass('public.mfa_attempt') IS NOT NULL
+            THEN (has_table_privilege('custody_app', 'public.mfa_attempt', 'UPDATE') OR has_table_privilege('custody_app', 'public.mfa_attempt', 'DELETE'))::text ELSE 'table or role missing' END),
+  (68, 'custody_app can EXECUTE append_account_event, the public can not', 'true',
+       CASE WHEN ${ROLE_OK} AND to_regprocedure('public.append_account_event(text,text,text,text,jsonb)') IS NOT NULL
+            THEN (has_function_privilege('custody_app', to_regprocedure('public.append_account_event(text,text,text,text,jsonb)'), 'EXECUTE')
+                  AND NOT has_function_privilege('public', to_regprocedure('public.append_account_event(text,text,text,text,jsonb)'), 'EXECUTE'))::text
+            ELSE 'function or role missing' END),
+  (69, 'account_event is append-only (both triggers exist)', 'true',
+       (SELECT (count(*) = 2)::text FROM pg_trigger WHERE tgrelid = to_regclass('public.account_event')
+           AND tgname IN ('trg_account_event_append_only', 'trg_account_event_prevent_truncate') AND NOT tgisinternal)),
   (70, 'custody_app has NO access to schema_migrations', 'false',
        CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN 'table schema_migrations is missing'
             ELSE CASE WHEN ${ROLE_OK} THEN has_table_privilege('custody_app', 'public.schema_migrations', 'SELECT')::text ELSE 'role missing' END END),

@@ -8,10 +8,10 @@
 -- =============================================================================
 WITH checks(sort, name, expected, actual) AS (
   VALUES
-  (10, 'schema_migrations lists every migration (001, 002, 003, 004)',
-       '001_initial_schema.sql, 002_hashed_timestamp_constraint.sql, 003_database_built_event_chain.sql, 004_creator_email_not_unique.sql',
+  (10, 'schema_migrations lists every migration (001, 002, 003, 004, 005)',
+       '001_initial_schema.sql, 002_hashed_timestamp_constraint.sql, 003_database_built_event_chain.sql, 004_creator_email_not_unique.sql, 005_own_second_factor.sql',
        CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN 'table schema_migrations is missing'
-            ELSE COALESCE((xpath('/row/v/text()', query_to_xml('SELECT string_agg(version, '', '' ORDER BY version) AS v FROM public.schema_migrations WHERE version IN (''001_initial_schema.sql'', ''002_hashed_timestamp_constraint.sql'', ''003_database_built_event_chain.sql'', ''004_creator_email_not_unique.sql'')', false, true, '')))[1]::text, 'none') END),
+            ELSE COALESCE((xpath('/row/v/text()', query_to_xml('SELECT string_agg(version, '', '' ORDER BY version) AS v FROM public.schema_migrations WHERE version IN (''001_initial_schema.sql'', ''002_hashed_timestamp_constraint.sql'', ''003_database_built_event_chain.sql'', ''004_creator_email_not_unique.sql'', ''005_own_second_factor.sql'')', false, true, '')))[1]::text, 'none') END),
   (20, 'custody_app role exists', 'true', (SELECT (count(*) = 1)::text FROM pg_roles WHERE rolname = 'custody_app')),
   (30, 'custody_app has NO INSERT on event', 'false', CASE WHEN (SELECT count(*) = 1 FROM pg_roles WHERE rolname = 'custody_app') THEN has_table_privilege('custody_app', 'public.event', 'INSERT')::text ELSE 'role missing' END),
   (31, 'custody_app has NO UPDATE on event', 'false', CASE WHEN (SELECT count(*) = 1 FROM pg_roles WHERE rolname = 'custody_app') THEN has_table_privilege('custody_app', 'public.event', 'UPDATE')::text ELSE 'role missing' END),
@@ -42,6 +42,19 @@ WITH checks(sort, name, expected, actual) AS (
   (65, 'creator.email is not unique (a login''s email can change and be reused)', 'true',
        (SELECT (count(*) = 0)::text FROM pg_constraint con JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ANY (con.conkey)
          WHERE con.conrelid = to_regclass('public.creator') AND con.contype = 'u' AND array_length(con.conkey, 1) = 1 AND a.attname = 'email')),
+  (66, 'custody_app has NO INSERT on account_event', 'false',
+       CASE WHEN (SELECT count(*) = 1 FROM pg_roles WHERE rolname = 'custody_app') AND to_regclass('public.account_event') IS NOT NULL THEN has_table_privilege('custody_app', 'public.account_event', 'INSERT')::text ELSE 'table or role missing' END),
+  (67, 'custody_app has NO UPDATE or DELETE on mfa_attempt (wrong-code count)', 'false',
+       CASE WHEN (SELECT count(*) = 1 FROM pg_roles WHERE rolname = 'custody_app') AND to_regclass('public.mfa_attempt') IS NOT NULL
+            THEN (has_table_privilege('custody_app', 'public.mfa_attempt', 'UPDATE') OR has_table_privilege('custody_app', 'public.mfa_attempt', 'DELETE'))::text ELSE 'table or role missing' END),
+  (68, 'custody_app can EXECUTE append_account_event, the public can not', 'true',
+       CASE WHEN (SELECT count(*) = 1 FROM pg_roles WHERE rolname = 'custody_app') AND to_regprocedure('public.append_account_event(text,text,text,text,jsonb)') IS NOT NULL
+            THEN (has_function_privilege('custody_app', to_regprocedure('public.append_account_event(text,text,text,text,jsonb)'), 'EXECUTE')
+                  AND NOT has_function_privilege('public', to_regprocedure('public.append_account_event(text,text,text,text,jsonb)'), 'EXECUTE'))::text
+            ELSE 'function or role missing' END),
+  (69, 'account_event is append-only (both triggers exist)', 'true',
+       (SELECT (count(*) = 2)::text FROM pg_trigger WHERE tgrelid = to_regclass('public.account_event')
+           AND tgname IN ('trg_account_event_append_only', 'trg_account_event_prevent_truncate') AND NOT tgisinternal)),
   (70, 'custody_app has NO access to schema_migrations', 'false',
        CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN 'table schema_migrations is missing'
             ELSE CASE WHEN (SELECT count(*) = 1 FROM pg_roles WHERE rolname = 'custody_app') THEN has_table_privilege('custody_app', 'public.schema_migrations', 'SELECT')::text ELSE 'role missing' END END),
