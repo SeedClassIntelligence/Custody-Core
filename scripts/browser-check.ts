@@ -1,5 +1,5 @@
 import { spawn, ChildProcess } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,7 +26,15 @@ const shotsDir = path.resolve(root, process.env.SCREENSHOT_DIR || 'browser-check
 const failures: string[] = [];
 const consoleErrors: string[] = [];
 const expectedErrors: string[] = [];
-let expectingWrongCode = false;
+// Statuses the code-check endpoint is expected to answer at this moment (a deliberate wrong code, or a lock).
+let expectedCodeStatuses: number[] = [];
+const isCodeCheck = (url: string) => /\/api\/v1\/mfa\/verify$/.test(url);
+const wrongCodeFor = (secret: string) => {
+  const near = [-1, 0, 1].map((o) => generateSync({ secret, epoch: Math.floor(Date.now() / 1000) + o * 30 }));
+  let c = 0;
+  while (near.includes(String(c).padStart(6, '0'))) c++;
+  return String(c).padStart(6, '0');
+};
 const pageErrors: string[] = [];
 const failedRequests: string[] = [];
 const checks: string[] = [];
@@ -81,6 +89,8 @@ async function main() {
       ADMIN_DATABASE_URL: '',
       APP_DATABASE_URL: '',
       SUPABASE_URL: authStack.apiUrl,
+      // A throwaway key for stored authenticator keys (server only; never the real one).
+      MFA_ENCRYPTION_KEY: randomBytes(32).toString('base64'),
       SUPABASE_ANON_KEY: authStack.anonKey,
       VITE_SUPABASE_URL: authStack.apiUrl,
       VITE_SUPABASE_ANON_KEY: authStack.anonKey
@@ -100,8 +110,9 @@ async function main() {
     page.on('console', (m) => {
       if (m.type() !== 'error') return;
       const line = `${m.text()} (${m.location().url})`;
-      // The deliberate wrong authenticator code makes the auth server answer 422; that is the behaviour under test.
-      if (expectingWrongCode && /status of 422/.test(m.text()) && /\/factors\/.+\/verify/.test(m.location().url)) expectedErrors.push(line);
+      // A deliberate wrong code (422) or a lock (429) from our code check is the behaviour under test.
+      const status = Number(/status of (\d{3})/.exec(m.text())?.[1]);
+      if (expectedCodeStatuses.includes(status) && isCodeCheck(m.location().url)) expectedErrors.push(line);
       else consoleErrors.push(line);
     });
     page.on('pageerror', (e) => pageErrors.push(String(e)));
@@ -112,7 +123,7 @@ async function main() {
       failedRequests.push(`${r.method()} ${r.url()} ${r.failure()?.errorText}`);
     });
     page.on('response', (r) => {
-      if (r.status() >= 400 && !(expectingWrongCode && r.status() === 422)) failedRequests.push(`${r.status()} ${r.request().method()} ${r.url()}`);
+      if (r.status() >= 400 && !(expectedCodeStatuses.includes(r.status()) && isCodeCheck(r.url()))) failedRequests.push(`${r.status()} ${r.request().method()} ${r.url()}`);
     });
 
     // 1. Empty state: no invented project, and old demo data is not resurrected.
@@ -148,13 +159,13 @@ async function main() {
     await shot(page, '00c-authenticator-setup');
 
     const first = generateSync({ secret });
-    const wrong = first === '000000' ? '000001' : '000000';
-    expectingWrongCode = true;
-    await page.getByLabel('6-digit code').fill(wrong);
+    expectedCodeStatuses = [422];
+    await page.getByLabel('6-digit code').fill(wrongCodeFor(secret));
     await page.getByRole('button', { name: 'Confirm and continue' }).click();
     await page.getByRole('alert').waitFor();
-    expectingWrongCode = false;
-    check(expectedErrors.length === 1, 'the auth server refused the wrong code with a 422 (expected, not counted as an error)');
+    expectedCodeStatuses = [];
+    check(expectedErrors.length === 1, 'our server refused the wrong code with a 422 (expected, not counted as an error)');
+    check(/4 tries left/.test(await page.getByRole('alert').innerText()), 'the screen says how many tries are left (4)');
     check((await page.getByText('Project Home').count()) === 0, 'a wrong code does not let you in');
     await shot(page, '00d-wrong-code');
 
@@ -309,7 +320,48 @@ async function main() {
     const keys = await page.evaluate(() => Object.keys(localStorage));
     check(keys.every((k) => k.startsWith('sb-')), `only the login session is stored in the browser (keys: ${keys.join(', ') || 'none'})`);
 
+    // 11. Wrong-code limit: sign out, sign in again, enter 5 wrong codes. The screen says code entry is paused,
+    //     and even the right code is refused.
+    await page.getByRole('button', { name: 'Sign out' }).click();
+    await page.getByRole('heading', { name: 'Sign in' }).waitFor();
+    await page.getByLabel('Email').fill(email);
+    await page.getByLabel('Password').fill(password);
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await page.getByRole('heading', { name: 'Enter your authenticator code' }).waitFor();
+    expectedCodeStatuses = [422, 429];
+    const before = expectedErrors.length;
+    for (let i = 1; i <= 5; i++) {
+      await page.getByLabel('6-digit code').fill(wrongCodeFor(secret));
+      const answered = page.waitForResponse((r) => isCodeCheck(r.url()));
+      await page.getByRole('button', { name: 'Verify' }).click();
+      await answered;
+    }
+    check(/paused until/.test(await page.getByRole('alert').innerText()), 'after 5 wrong codes the screen says code entry is paused');
+    await shot(page, '17-code-locked');
+    const right = generateSync({ secret, epoch: Math.floor(Date.now() / 1000) + 30 });
+    await page.getByLabel('6-digit code').fill(right);
+    const lockedAnswer = page.waitForResponse((r) => isCodeCheck(r.url()));
+    await page.getByRole('button', { name: 'Verify' }).click();
+    check((await lockedAnswer).status() === 429, 'while paused, even the right code is refused (429)');
+    check((await page.getByText('Browser Check Project').count()) === 0, 'while paused, no project data is shown');
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.getByRole('heading', { name: 'Enter your authenticator code' }).waitFor();
+    check(/paused until/.test(await page.getByRole('alert').innerText()), 'after reloading the page, the pause is still shown (it comes from the server)');
+    expectedCodeStatuses = [];
+    check(expectedErrors.length - before === 6, `the 4 wrong-code (422) and 2 locked (429) answers were the only errors (got ${expectedErrors.length - before})`);
+
     await context.close();
+  } catch (err) {
+    // Show what the page looked like when it went wrong, then fail as before.
+    for (const ctx of browser.contexts()) {
+      for (const p of ctx.pages()) {
+        await p.screenshot({ path: path.join(shotsDir, 'crash.png'), fullPage: true }).catch(() => undefined);
+        console.error('Page text at the crash:\n' + (await p.innerText('body').catch(() => '(unavailable)')));
+      }
+    }
+    console.error('Server log:\n' + serverLog.slice(-3000));
+    console.error('Console errors so far:', consoleErrors, 'Failed requests so far:', failedRequests);
+    throw err;
   } finally {
     await browser.close();
     server.kill('SIGTERM');
