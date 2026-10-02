@@ -14,7 +14,10 @@
     "lint": "tsc --noEmit",
     "test:db": "tsx scripts/test-db.ts",
     "browser-check": "tsx scripts/browser-check.ts",
-    "verify-live": "tsx scripts/verify-live-db.ts"
+    "verify-live": "tsx scripts/verify-live-db.ts",
+    "auth-stack:start": "tsx scripts/auth-stack.ts start",
+    "auth-stack:stop": "tsx scripts/auth-stack.ts stop",
+    "auth-stack:status": "tsx scripts/auth-stack.ts status"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
@@ -38,7 +41,9 @@
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
     "embedded-postgres": "^18.4.0-beta.17",
+    "otplib": "^13.5.0",
     "playwright": "^1.56.1",
+    "supabase": "^2.119.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2",
