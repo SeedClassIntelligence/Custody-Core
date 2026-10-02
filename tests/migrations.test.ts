@@ -188,7 +188,9 @@ describe('Versioned migrations (schema_migrations + 002_hashed_timestamp_constra
       "-- COMMIT;\nSELECT 1;",
       "/* BEGIN; /* nested */ COMMIT; */ SELECT 1;",
       'SELECT 1 AS "commit";',
-      "SELECT 1;"
+      "SELECT 1;",
+      "CREATE FUNCTION one() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT CASE WHEN true THEN 1 ELSE 2 END; END;",
+      "CREATE TABLE t (\"end\" int, commit_at int);\nCREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; END;"
     ];
     for (const sql of ok) expect(findTransactionControl(sql), sql).toBeNull();
 
@@ -198,7 +200,12 @@ describe('Versioned migrations (schema_migrations + 002_hashed_timestamp_constra
       ['SELECT 1;\nROLLBACK;', 'ROLLBACK'],
       ['start   transaction;', 'START TRANSACTION'],
       ["SELECT 'x'; BEGIN\n;", 'BEGIN'],
-      ['COMMIT', 'COMMIT']
+      ['COMMIT', 'COMMIT'],
+      ['abort;', 'ABORT'],
+      ['SELECT 1; -- note\nCOMMIT;', 'COMMIT'],
+      ['-- COMMIT;\nROLLBACK;', 'ROLLBACK'],
+      ['COMMIT AND CHAIN;', 'COMMIT'],
+      ['BEGIN ISOLATION LEVEL SERIALIZABLE;', 'BEGIN']
     ];
     for (const [sql, expected] of bad) expect(findTransactionControl(sql), sql).toBe(expected);
   });
@@ -261,5 +268,18 @@ describe('Versioned migrations (schema_migrations + 002_hashed_timestamp_constra
     })));
     expect(verified.isValid).toBe(true);
     expect(verified.totalEvents).toBe(3);
+  });
+
+  it('roles.sql takes CREATE on schema public away from everyone, including the app role', async () => {
+    const pool = await freshDatabase();
+    await applyMigrations(pool, REAL_MIGRATIONS);
+    // Start from the permissive state older PostgreSQL versions have by default.
+    await pool.query('GRANT CREATE ON SCHEMA public TO PUBLIC');
+    await pool.query(fs.readFileSync(path.resolve(REAL_MIGRATIONS, '..', 'roles.sql'), 'utf8'));
+    const priv = await pool.query(
+      `SELECT has_schema_privilege('custody_app', 'public', 'CREATE') AS app_create,
+              has_schema_privilege('public', 'public', 'CREATE') AS public_create`
+    );
+    expect(priv.rows[0]).toEqual({ app_create: false, public_create: false });
   });
 });

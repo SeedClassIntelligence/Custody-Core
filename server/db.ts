@@ -174,13 +174,14 @@ export interface DbEventRow {
  * Records an event. The database assigns the sequence number, previous hash, timestamp and hash
  * (the append_event() function); this code can only say what happened.
  */
-export async function insertEvent(params: InsertEventParams): Promise<DbEventRow> {
-  const db = getDbPool();
-  if (!db) {
+export async function insertEvent(params: InsertEventParams, client?: pg.PoolClient): Promise<DbEventRow> {
+  // Pass `client` to record the event inside a transaction the caller controls.
+  const runner = client ?? getDbPool();
+  if (!runner) {
     throw new Error('Database is not connected. Set DATABASE_URL to record events.');
   }
 
-  const res = await db.query(
+  const res = await runner.query(
     'SELECT * FROM append_event($1, $2, $3, $4, $5, $6, $7::jsonb)',
     [
       params.project_id,

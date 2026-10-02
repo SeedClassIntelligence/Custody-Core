@@ -100,7 +100,7 @@ const SPEC_SCENARIOS: AcceptanceTestResult[] = [
   {
     id: 10,
     name: 'Append-Only Database Rule & Tamper-Evident Hash Chain',
-    description: 'Direct SQL UPDATE or DELETE is rejected by DB trigger, and any forced data modification is caught by "Check this record".',
+    description: 'Direct SQL UPDATE or DELETE is rejected by DB trigger, and a change to an event\'s recorded fields is caught by "Check this record" (deleting the newest events is not).',
     status: 'idle',
     log: [
       'Spec Requirement: PostgreSQL BEFORE UPDATE OR DELETE trigger on event table.',

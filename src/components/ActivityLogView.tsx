@@ -109,7 +109,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
             brokenAtSeq: data.broken_at_seq,
             totalEvents: data.count,
             reason: data.valid
-              ? `The server recomputed ${data.count} event hash${data.count === 1 ? '' : 'es'} from the first event. Every hash matches its stored fields and links to the previous event. This does not include signatures, which are not connected yet.`
+              ? `The server recomputed ${data.count} event hash${data.count === 1 ? '' : 'es'} from the first event. Every hash matches its stored fields and links to the previous event. This does not detect events deleted from the end of the log, and signatures are not connected yet.`
               : `Server detected invalid hash at sequence #${data.broken_at_seq}.`
           });
           return;
@@ -169,7 +169,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
               </h2>
             </div>
             <p className="text-xs text-zinc-400 leading-relaxed max-w-2xl">
-              Custody Core stores every action in an immutable, append-only PostgreSQL table with a database trigger rejecting updates and deletions.
+              Custody Core stores every action in an append-only PostgreSQL table: the app's database account can add and read events but cannot change or delete them.
               No events are shown until the database is connected.
             </p>
           </div>
@@ -258,9 +258,10 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
             </h2>
           </div>
           <p className="text-xs text-zinc-400 leading-relaxed max-w-2xl">
-            Every custody action is linked into an immutable hash chain: <code className="text-zinc-300 font-mono">Hash(n) = SHA-256(all_fields + prev_hash)</code>.
-            The hash covers every field (seq, action, timestamp, payload, prev_hash, project_id, actor_type, actor_id, subject_type, subject_id).
-            Database triggers reject updates or deletions. Events carry an empty signature field ready for <strong>Seed Signature (Phase 2)</strong>.
+            Every custody action is linked into a tamper-evident hash chain: <code className="text-zinc-300 font-mono">Hash(n) = SHA-256(fields + prev_hash)</code>.
+            The database assigns the sequence number, time and hash. The hash covers the project, actor, action, subject, payload, time and previous hash,
+            so changing any of those breaks the chain. It cannot detect events deleted from the end of the log, and signatures
+            (<strong>Seed Signature</strong>) are not connected yet.
           </p>
         </div>
 
@@ -314,7 +315,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
                 <>
                   <span>Hash chain verified</span>
                   <span className="text-[10px] bg-emerald-900/80 px-2 py-0.5 rounded text-emerald-300 font-mono">
-                    {verificationResult.totalEvents} Blocks Checked
+                    {verificationResult.totalEvents} {verificationResult.totalEvents === 1 ? 'event' : 'events'} checked
                   </span>
                   <span className="text-[10px] bg-indigo-900/80 px-2 py-0.5 rounded text-indigo-200 font-mono flex items-center gap-1">
                     <Server className="w-3 h-3" /> Server Recomputed
@@ -416,7 +417,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
                     <div className="mt-1.5 flex items-center justify-between text-[11px] text-zinc-400">
                       <span className="flex items-center gap-1.5">
                         <span className="text-zinc-500">Actor:</span>
-                        <span className="text-zinc-300 capitalize">{evt.actor_name || evt.actor_id} ({evt.actor_type})</span>
+                        <span className="text-zinc-300 break-all">{evt.actor_name || evt.actor_id} ({evt.actor_type})</span>
                       </span>
                       <span className="font-mono text-zinc-500 text-[10px]">
                         hash: {formatHash(evt.hash, 6, 4)}
@@ -476,7 +477,7 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
                       </span>
                     </div>
                     <div className="text-zinc-500 italic text-[10px]">
-                      {selectedEvent.seed_signature_id || '"" (Ready for Phase 2 Seed Signature)'}
+                      {selectedEvent.seed_signature_id || '"" (none: Seed Signature is not connected yet)'}
                     </div>
                   </div>
                 </div>

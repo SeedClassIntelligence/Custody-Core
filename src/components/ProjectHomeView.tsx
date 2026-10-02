@@ -36,7 +36,7 @@ export const ProjectHomeView: React.FC<ProjectHomeViewProps> = ({
         <div className="max-w-md mx-auto space-y-2">
           <h2 className="text-xl font-bold text-zinc-100">No projects yet</h2>
           <p className="text-xs text-zinc-400 leading-relaxed">
-            Claiming a project records it, with your own statement of its purpose, in a permanent tamper-evident log.
+            Claiming a project records it, with your own statement of its purpose, in a tamper-evident event log.
           </p>
         </div>
         <div className="flex justify-center gap-3 pt-2">

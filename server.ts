@@ -155,9 +155,7 @@ const apiRouter = express.Router();
         }
       }
 
-      await client.query('COMMIT');
-
-      // Record first event in the append-only log on the server
+      // Record the first event in the same transaction, so a project never exists without its claim event.
       const event = await insertEvent({
         project_id: project.id,
         actor_type: 'creator',
@@ -171,7 +169,9 @@ const apiRouter = express.Router();
           split_core: !!split_core,
           repositories: createdRepos.map(r => r.full_name)
         }
-      });
+      }, client);
+
+      await client.query('COMMIT');
 
       res.status(201).json({
         project: {

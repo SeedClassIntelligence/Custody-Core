@@ -81,8 +81,33 @@ const TRANSACTION_CONTROL =
  * restarts it would escape the all-or-nothing guarantee. BEGIN/END inside function bodies
  * (dollar-quoted or quoted strings) are not transaction control and are ignored.
  */
+/** Removes SQL-standard function bodies (BEGIN ATOMIC ... END), whose END is not transaction control. */
+function stripAtomicBlocks(code: string): string {
+  const start = /\bbegin\s+atomic\b/gi;
+  let out = '';
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = start.exec(code))) {
+    const word = /\b(case|end)\b/gi;
+    word.lastIndex = m.index + m[0].length;
+    let depth = 0;
+    let w: RegExpExecArray | null;
+    let endAt = -1;
+    while ((w = word.exec(code))) {
+      if (w[1].toLowerCase() === 'case') depth++;
+      else if (depth === 0) { endAt = w.index + w[0].length; break; }
+      else depth--;
+    }
+    if (endAt === -1) break; // unterminated: leave as is, the server will reject it
+    out += code.slice(last, m.index) + ' ';
+    last = endAt;
+    start.lastIndex = endAt;
+  }
+  return out + code.slice(last);
+}
+
 export function findTransactionControl(sql: string): string | null {
-  for (const statement of stripNonCode(sql).split(';')) {
+  for (const statement of stripAtomicBlocks(stripNonCode(sql)).split(';')) {
     const match = TRANSACTION_CONTROL.exec(statement.trim());
     if (match) return match[1].toUpperCase().replace(/\s+/g, ' ');
   }

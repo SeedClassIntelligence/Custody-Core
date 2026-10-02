@@ -76,9 +76,12 @@ BEGIN
   IF p_actor_type NOT IN ('creator', 'developer', 'system', 'gateway') THEN
     RAISE EXCEPTION 'append_event: unknown actor_type %', p_actor_type USING ERRCODE = 'check_violation';
   END IF;
-  IF p_actor_id = '' OR p_action = '' OR p_subject_type = '' OR p_subject_id = '' THEN
+  IF p_actor_id ~ '^[[:space:]]*$' OR p_action ~ '^[[:space:]]*$' OR p_subject_type ~ '^[[:space:]]*$' OR p_subject_id ~ '^[[:space:]]*$' THEN
     RAISE EXCEPTION 'append_event: actor_id, action, subject_type and subject_id must not be empty'
       USING ERRCODE = 'check_violation';
+  END IF;
+  IF octet_length(p_payload::text) > 1048576 THEN
+    RAISE EXCEPTION 'append_event: payload is larger than 1 MiB' USING ERRCODE = 'program_limit_exceeded';
   END IF;
   IF jsonb_typeof(p_payload) <> 'object' THEN
     RAISE EXCEPTION 'append_event: payload must be a JSON object' USING ERRCODE = 'check_violation';

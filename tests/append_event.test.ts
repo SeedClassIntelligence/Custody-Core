@@ -234,6 +234,7 @@ describe('Database-built event chain (append_event)', () => {
       jsAgrees: true
     },
     { name: 'keys needing escapes, empty key, accents', json: String.raw`{"k\"ey":1,"ké":2,"é":3,"Z":4,"a":5,"":6,"k":7}`, expected: String.raw`{"":6,"Z":4,"a":5,"k":7,"k\"ey":1,"ké":2,"é":3}`, jsAgrees: true },
+    { name: 'key order is by byte value, not by the database locale (underscore, upper and lower case)', json: '{"b":4,"a":2,"_":1,"B":5,"A":3,"Z":6}', expected: '{"A":3,"B":5,"Z":6,"_":1,"a":2,"b":4}', jsAgrees: true },
     { name: 'key order: an emoji key sorts after a U+FF5E key (code point order)', json: String.raw`{"😀":2,"～":1}`, expected: '{"～":1,"\u{1F600}":2}', jsAgrees: true },
     { name: 'integers including +/- 2^53-1', json: '{"n":[0,1,-1,42,-42,9007199254740991,-9007199254740991]}', expected: '{"n":[0,1,-1,42,-42,9007199254740991,-9007199254740991]}', jsAgrees: true },
     { name: 'decimals, trailing zeros, negative zero', json: '{"d":[0.1,1.5,-2.25,3.14159,100.0,1.50,0.000001,-0.0,-0,2.50e0]}', expected: '{"d":[0.1,1.5,-2.25,3.14159,100,1.5,0.000001,0,0,2.5]}', jsAgrees: true },
@@ -294,5 +295,73 @@ describe('Database-built event chain (append_event)', () => {
     const rows = (await adminDb.query('SELECT seq FROM event WHERE project_id = $1 ORDER BY seq', [projectB])).rows;
     expect(rows.map((r) => Number(r.seq))).toEqual(Array.from({ length: rows.length }, (_, i) => i + 1));
     expect((await verifyServerProjectEvents(projectB)).isValid).toBe(true);
+  });
+
+  it('runs on a UTF8 database with a non-C collation, like production, so ordering bugs cannot hide', async () => {
+    const info = (await adminDb.query(
+      `SELECT current_setting('server_encoding') AS enc, datlocprovider AS provider, datcollate FROM pg_database WHERE datname = current_database()`
+    )).rows[0];
+    expect(info.enc).toBe('UTF8');
+    // With the C collation, "C" and the default ordering are identical and the sort test proves nothing.
+    expect(info.provider === 'i' || info.datcollate !== 'C').toBe(true);
+    const [a, b] = (await adminDb.query(`SELECT 'a' < 'B' AS lt`)).rows[0].lt ? [true, true] : [false, false];
+    expect(a && b).toBe(true); // 'a' sorts before 'B' only under a locale-aware collation
+  });
+
+  it('accepts a non-ASCII payload written with \\u escapes (needs a UTF8 database)', async () => {
+    const row = await appendRaw(projectA, String.raw`{"k":"caf\u00e9 \u65e5\u672c \ud83d\ude00"}`);
+    expect(row.canonical_payload).toBe('{"k":"café 日本 😀"}');
+    expect(independentHash(row)).toBe(row.hash);
+  });
+
+  it('rejects whitespace-only fields and payloads larger than 1 MiB, and records nothing', async () => {
+    const before = await eventCount(projectA);
+    await expect(db.query(`SELECT * FROM append_event($1::uuid, 'system', '   ', 'a', 'project', 'a', '{}'::jsonb)`, [projectA]))
+      .rejects.toThrow(/must not be empty/);
+    await expect(db.query(`SELECT * FROM append_event($1::uuid, 'system', 'a', E'\\t', 'project', 'a', '{}'::jsonb)`, [projectA]))
+      .rejects.toThrow(/must not be empty/);
+    const big = JSON.stringify({ blob: 'x'.repeat(1_100_000) });
+    await expect(appendRaw(projectA, big)).rejects.toThrow(/larger than 1 MiB/);
+    expect(await eventCount(projectA)).toBe(before);
+    const ok = await appendRaw(projectA, JSON.stringify({ blob: 'x'.repeat(200_000) }));
+    expect(ok.canonical_payload.length).toBeGreaterThan(200_000);
+  });
+
+  it('only hash versions 1 and 2 exist (chk_event_hash_version)', async () => {
+    const client = await adminDb.connect();
+    try {
+      await client.query('BEGIN');
+      await expect(client.query(
+        `INSERT INTO event (seq, project_id, actor_type, actor_id, action, subject_type, subject_id, payload, prev_hash, hash, hashed_timestamp, hash_version)
+         VALUES (900, $1, 'system', 'a', 'a', 'project', 'a', '{}'::jsonb, repeat('0', 64), repeat('1', 64), '2026-01-01T00:00:00.000Z', 3)`,
+        [projectB]
+      )).rejects.toThrow(/chk_event_hash_version/);
+    } finally {
+      try { await client.query('ROLLBACK'); } finally { client.release(); }
+    }
+  });
+
+  it('an event recorded inside a caller transaction disappears with it: a claim cannot leave a project without its event', async () => {
+    const creator = (await adminDb.query(`SELECT creator_id FROM project WHERE id = $1`, [projectA])).rows[0].creator_id;
+    const eventsBefore = await eventCount(projectA);
+    const client = await db.connect();
+    let newProject = '';
+    try {
+      await client.query('BEGIN');
+      newProject = (await client.query(
+        `INSERT INTO project (creator_id, name, purpose) VALUES ($1, 'Rolled back', 'never committed') RETURNING id`, [creator]
+      )).rows[0].id;
+      const ev = await insertEvent({
+        project_id: newProject, actor_type: 'creator', actor_id: creator, action: 'project.claimed',
+        subject_type: 'project', subject_id: newProject, payload: { name: 'Rolled back' }
+      }, client);
+      expect(ev.seq).toBe(1);
+      await client.query('ROLLBACK');
+    } finally {
+      client.release();
+    }
+    expect((await adminDb.query('SELECT COUNT(*)::int AS n FROM project WHERE id = $1', [newProject])).rows[0].n).toBe(0);
+    expect((await adminDb.query('SELECT COUNT(*)::int AS n FROM event WHERE project_id = $1', [newProject])).rows[0].n).toBe(0);
+    expect(await eventCount(projectA)).toBe(eventsBefore);
   });
 });

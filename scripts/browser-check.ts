@@ -13,11 +13,13 @@ import { verifyHashChain } from '../shared/crypto';
 /**
  * Drives the real app in a headless browser against the local throwaway database: loads every screen,
  * claims a project, views its event record, runs verify (valid, then after tampering), and downloads
- * and independently verifies an export. Screenshots go to docs/screenshots/milestone-1/.
+ * and independently verifies an export. Screenshots go to browser-check-output/ (see SCREENSHOT_DIR).
  * Run with: npm run browser-check
  */
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const shotsDir = path.join(root, 'docs', 'screenshots', 'milestone-1');
+// Screenshots go to an ignored folder by default so runs do not dirty the repo.
+// To refresh the committed set: SCREENSHOT_DIR=docs/screenshots/milestone-1 npm run browser-check
+const shotsDir = path.resolve(root, process.env.SCREENSHOT_DIR || 'browser-check-output');
 
 const failures: string[] = [];
 const consoleErrors: string[] = [];

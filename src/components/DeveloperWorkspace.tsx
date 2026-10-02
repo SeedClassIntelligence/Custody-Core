@@ -82,7 +82,7 @@ export const DeveloperWorkspace: React.FC<DeveloperWorkspaceProps> = ({
               <span>Mirror Snapshots</span>
             </div>
             <p className="text-xs text-zinc-400 leading-relaxed">
-              Every verified push is bundled and backed up directly to creator-owned cloud storage.
+              Once connected, each accepted push will be bundled and backed up to creator-owned cloud storage.
             </p>
           </div>
         </div>

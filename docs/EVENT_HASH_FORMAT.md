@@ -70,3 +70,31 @@ and a database constraint (`chk_event_v2_canonical_payload`) keeps the two equal
 Written by application code. The hash covers the same fields, serialised with `canonicalJson` (keys sorted
 by UTF-16 code unit, numbers as JavaScript prints them) over an object that includes the parsed
 `payload`. These events are never changed, and `verifyHashChain` still checks them this way.
+
+## What the hash does not cover, and what verification cannot detect
+
+Verification recomputes every hash and checks each link. It proves that the stored fields of an event, and
+their order, are what the database hashed. It does not prove more than that:
+
+- **Not covered by the hash:** `id`, `created_at`, `updated_at`, `hash_version`, `seed_signature_id`, and
+  `hash` itself. Changing `created_at` or `updated_at` is not detected. (`hash_version` is fixed per row;
+  flipping a version 2 event to 1 is harmless for ordinary payloads because both versions then hash the
+  same bytes.)
+- **Deleting the newest events is not detected.** Hash links only point backwards, so a chain with its last
+  N events removed is still a valid chain. Detecting this needs something outside the table, such as the
+  latest hash recorded elsewhere or signed by Seed Signature. That does not exist yet.
+- **Only the application's database account is locked out.** The table owner or a superuser can disable
+  the triggers and rewrite rows; the chain then reveals the change, but cannot prevent it.
+- **Seed Signature has no path to attach to an existing event yet.** `append_event` writes
+  `seed_signature_id` empty and updates are blocked, so signatures will need a separate table or a
+  dedicated function in a later milestone.
+
+## Limits of `append_event`
+
+- The payload must be a JSON object of at most 1 MiB (text form). A NUL character, a lone surrogate or a
+  number outside PostgreSQL's `numeric` range is rejected before anything is written.
+- Very deeply nested payloads (somewhere between 300 and 1000 levels) fail with a stack-depth error.
+- Every call locks the project row for the duration of the insert, so a very large payload briefly blocks
+  other writers to the same project.
+- Any caller allowed to execute the function can write to any existing project. Per-creator authorization
+  arrives with login (Milestone 2).
