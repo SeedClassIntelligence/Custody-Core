@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium, Page } from 'playwright';
+import { generateSync } from 'otplib';
+import { ensureAuthStack } from './auth-stack';
 import JSZip from 'jszip';
 import pg from 'pg';
 import { startDatabaseProcess, freePort } from '../tests/support/dbProcess';
@@ -23,6 +25,8 @@ const shotsDir = path.resolve(root, process.env.SCREENSHOT_DIR || 'browser-check
 
 const failures: string[] = [];
 const consoleErrors: string[] = [];
+const expectedErrors: string[] = [];
+let expectingWrongCode = false;
 const pageErrors: string[] = [];
 const failedRequests: string[] = [];
 const checks: string[] = [];
@@ -59,6 +63,7 @@ async function main() {
   fs.rmSync(shotsDir, { recursive: true, force: true });
   fs.mkdirSync(shotsDir, { recursive: true });
 
+  const authStack = ensureAuthStack(); // local Supabase Auth (Docker); never a hosted project
   const database = await startDatabaseProcess();
   assertSafeTestDatabaseUrl(database.url, collectProtectedUrls());
 
@@ -69,11 +74,16 @@ async function main() {
     env: {
       ...process.env,
       NODE_ENV: 'development',
+      DISABLE_HMR: 'true', // Vite's HMR uses a fixed port; the check does not need hot reload
       PORT: String(port),
       // Point the app at the local test database only. Empty strings stop .env from supplying others.
       DATABASE_URL: database.url,
       ADMIN_DATABASE_URL: '',
-      APP_DATABASE_URL: ''
+      APP_DATABASE_URL: '',
+      SUPABASE_URL: authStack.apiUrl,
+      SUPABASE_ANON_KEY: authStack.anonKey,
+      VITE_SUPABASE_URL: authStack.apiUrl,
+      VITE_SUPABASE_ANON_KEY: authStack.anonKey
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -88,12 +98,21 @@ async function main() {
     const context = await browser.newContext({ viewport: { width: 1366, height: 900 }, acceptDownloads: true });
     const page = await context.newPage();
     page.on('console', (m) => {
-      if (m.type() === 'error') consoleErrors.push(`${m.text()} (${m.location().url})`);
+      if (m.type() !== 'error') return;
+      const line = `${m.text()} (${m.location().url})`;
+      // The deliberate wrong authenticator code makes the auth server answer 422; that is the behaviour under test.
+      if (expectingWrongCode && /status of 422/.test(m.text()) && /\/factors\/.+\/verify/.test(m.location().url)) expectedErrors.push(line);
+      else consoleErrors.push(line);
     });
     page.on('pageerror', (e) => pageErrors.push(String(e)));
-    page.on('requestfailed', (r) => failedRequests.push(`${r.method()} ${r.url()} ${r.failure()?.errorText}`));
+    page.on('requestfailed', (r) => {
+      // The browser drops its read of the logout response; that the sign-out really happened is checked
+      // separately (the old token must stop working), so this one is not counted as a failure.
+      if (/\/auth\/v1\/logout/.test(r.url()) && r.failure()?.errorText === 'net::ERR_ABORTED') return;
+      failedRequests.push(`${r.method()} ${r.url()} ${r.failure()?.errorText}`);
+    });
     page.on('response', (r) => {
-      if (r.status() >= 400) failedRequests.push(`${r.status()} ${r.request().method()} ${r.url()}`);
+      if (r.status() >= 400 && !(expectingWrongCode && r.status() === 422)) failedRequests.push(`${r.status()} ${r.request().method()} ${r.url()}`);
     });
 
     // 1. Empty state: no invented project, and old demo data is not resurrected.
@@ -105,9 +124,47 @@ async function main() {
       }
     });
     await page.goto(base, { waitUntil: 'networkidle' });
+
+    // 0. Signed out: no project screen, and the API refuses anonymous callers.
+    await page.getByRole('heading', { name: 'Sign in' }).waitFor();
+    check((await page.getByText('Project Home').count()) === 0 && !(await page.content()).includes('STALE DEMO PROJECT'), 'signed out: no project screen is shown');
+    check((await page.request.get(`${base}/api/v1/projects`)).status() === 401, 'the API answers an anonymous caller with 401');
+    await shot(page, '00-sign-in');
+
+    // Create an account.
+    const email = `browser_${Date.now()}@example.com`;
+    const password = 'Browser-Check-Passw0rd!';
+    await page.getByRole('button', { name: 'New here? Create an account' }).click();
+    await page.getByLabel('Email').fill(email);
+    await page.getByLabel('Password').fill(password);
+    await shot(page, '00b-create-account');
+    await page.getByRole('button', { name: 'Create account' }).click();
+
+    // Authenticator setup is required before anything else.
+    await page.getByRole('heading', { name: 'Set up your authenticator app' }).waitFor();
+    check((await page.getByText('Project Home').count()) === 0, 'after sign-up but before a verified code, no project screen is shown');
+    const secret = (await page.getByTestId('totp-secret').innerText()).trim();
+    check(secret.length >= 16, 'the setup screen shows the authenticator key');
+    await shot(page, '00c-authenticator-setup');
+
+    const first = generateSync({ secret });
+    const wrong = first === '000000' ? '000001' : '000000';
+    expectingWrongCode = true;
+    await page.getByLabel('6-digit code').fill(wrong);
+    await page.getByRole('button', { name: 'Confirm and continue' }).click();
+    await page.getByRole('alert').waitFor();
+    expectingWrongCode = false;
+    check(expectedErrors.length === 1, 'the auth server refused the wrong code with a 422 (expected, not counted as an error)');
+    check((await page.getByText('Project Home').count()) === 0, 'a wrong code does not let you in');
+    await shot(page, '00d-wrong-code');
+
+    await page.getByLabel('6-digit code').fill(first);
+    await page.getByRole('button', { name: 'Confirm and continue' }).click();
+
+    // 1. Empty state: no invented project, and old demo data is not resurrected.
     await page.getByText('No projects yet').waitFor();
-    check(!(await page.content()).includes('STALE DEMO PROJECT'), 'old demo data in localStorage is ignored and removed');
     check(await page.getByText('PostgreSQL Connected').isVisible(), 'header reports the database as connected');
+    check(await page.getByText(email).isVisible(), 'the header shows who is signed in');
     await shot(page, '01-project-home-empty');
 
     // 2. Setup guide: three steps, none connected.
@@ -218,9 +275,39 @@ async function main() {
     check(verification.isValid && verification.totalEvents === 1, 'the exported event log verifies on its own, outside the database');
     check(manifest.git_bundles_included === false && manifest.events_with_seed_signature === 0, 'export does not claim bundles or signatures');
 
-    // 9. Nothing in the browser stores custody data.
-    const stored = await page.evaluate(() => JSON.stringify({ ...localStorage }));
-    check(stored === '{}', 'localStorage is empty');
+    // 9. Sign out, sign back in with only the password: the code is required again, and the data is still there.
+    const tokenBefore = await page.evaluate(() => {
+      const key = Object.keys(localStorage).find((k) => k.startsWith('sb-'));
+      return key ? JSON.parse(localStorage.getItem(key)!).access_token : null;
+    });
+    check((await fetch(`${base}/api/v1/projects`, { headers: { Authorization: `Bearer ${tokenBefore}` } })).status === 200, 'before signing out, the session token works against the API');
+    await page.getByRole('button', { name: 'Sign out' }).click();
+    await page.getByRole('heading', { name: 'Sign in' }).waitFor();
+    await new Promise((r) => setTimeout(r, 1500)); // let the sign-out request reach the server
+    const afterSignOut = await fetch(`${base}/api/v1/projects`, { headers: { Authorization: `Bearer ${tokenBefore}` } });
+    check(afterSignOut.status === 401, `after signing out, the old session token no longer works (API answered ${afterSignOut.status})`);
+    check((await page.getByText('Browser Check Project').count()) === 0, 'after signing out, no project data is shown');
+    await shot(page, '15-signed-out-again');
+    await page.getByLabel('Email').fill(email);
+    await page.getByLabel('Password').fill(password);
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await page.getByRole('heading', { name: 'Enter your authenticator code' }).waitFor();
+    check((await page.getByText('Browser Check Project').count()) === 0, 'password alone does not open the app: the code is required again');
+    await shot(page, '16-code-challenge');
+    // A code that was already accepted a moment ago may be refused; wait for the next one.
+    let next = generateSync({ secret });
+    for (let i = 0; i < 70 && next === first; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      next = generateSync({ secret });
+    }
+    await page.getByLabel('6-digit code').fill(next);
+    await page.getByRole('button', { name: 'Verify' }).click();
+    await page.getByRole('heading', { name: 'Browser Check Project' }).waitFor();
+    check(true, 'with the code, the same creator sees the project they claimed');
+
+    // 10. The browser keeps no custody data; only the login session is stored.
+    const keys = await page.evaluate(() => Object.keys(localStorage));
+    check(keys.every((k) => k.startsWith('sb-')), `only the login session is stored in the browser (keys: ${keys.join(', ') || 'none'})`);
 
     await context.close();
   } finally {

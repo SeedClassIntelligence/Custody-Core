@@ -2,7 +2,6 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { app } from '../server';
 import {
   getDbPool,
   getAdminPool,
@@ -12,6 +11,8 @@ import {
 } from '../server/db';
 import { assertPoolTargetsTestDb } from './support/safety';
 import { withTriggersBypassed } from './support/cleanup';
+import { api, startApp } from './support/api';
+import { authStack, createMfaUser, tokenClaims } from './support/authStack';
 
 const migrationsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'server', 'migrations');
 
@@ -445,61 +446,64 @@ describe('PostgreSQL Schema, Append-Only Triggers, Restricted Roles & Multi-Tena
     }
   });
 
-  // Tenant isolation against the real HTTP endpoint. The caller sends NO identity at all (no header,
-  // no query parameter), because identity must come from a verified login session (Milestone 2).
-  // Until then the endpoint returns every creator's projects, so this test is EXPECTED TO FAIL.
-  it('enforces multi-tenant API isolation: creator A cannot read creator B projects through GET /api/v1/projects (fails until Milestone 2)', async () => {
-    const client = await db.connect();
-    const server = app.listen(0);
-    await new Promise<void>((resolve) => server.on('listening', resolve));
-    const addr = server.address();
-    const port = typeof addr === 'object' && addr ? addr.port : 3000;
-    const creatorIds: string[] = [];
-
+  // Tenant isolation through the real API: two real people, each with a verified authenticator-app code,
+  // each signed in with their own session. Identity comes only from the session.
+  it('enforces multi-tenant API isolation: creator A cannot list or read creator B\'s project or events', async () => {
+    authStack();
+    const running = await startApp();
+    const alice = await createMfaUser('tenantA');
+    const bob = await createMfaUser('tenantB');
     try {
-      const creatorBRes = await client.query(
-        `INSERT INTO creator (identity_id, display_name, email)
-         VALUES ('tenant_bob_' || gen_random_uuid(), 'Bob Creator', 'bob_' || gen_random_uuid() || '@custody.io')
-         RETURNING id`
-      );
-      creatorIds.push(creatorBRes.rows[0].id);
-      const projBRes = await client.query(
-        `INSERT INTO project (creator_id, name, purpose)
-         VALUES ($1, 'Bob Proprietary AI', 'Proprietary')
-         RETURNING id`,
-        [creatorIds[0]]
-      );
-      const projBId = projBRes.rows[0].id;
+      expect(tokenClaims(alice.session.accessToken).aal).toBe('aal2');
+      expect(tokenClaims(bob.session.accessToken).aal).toBe('aal2');
+      expect(alice.session.userId).not.toBe(bob.session.userId);
 
-      const creatorARes = await client.query(
-        `INSERT INTO creator (identity_id, display_name, email)
-         VALUES ('tenant_alice_' || gen_random_uuid(), 'Alice Creator', 'alice_' || gen_random_uuid() || '@custody.io')
-         RETURNING id`
-      );
-      creatorIds.push(creatorARes.rows[0].id);
-      await client.query(
-        `INSERT INTO project (creator_id, name, purpose)
-         VALUES ($1, 'Alice Confidential Core', 'Confidential')`,
-        [creatorIds[1]]
-      );
+      const aliceClaim = await api(running.base, alice.session, '/projects', { method: 'POST', body: { name: 'Alice Confidential Core', purpose: 'Confidential' } });
+      const bobClaim = await api(running.base, bob.session, '/projects', { method: 'POST', body: { name: 'Bob Proprietary AI', purpose: 'Proprietary' } });
+      expect(aliceClaim.status).toBe(201);
+      expect(bobClaim.status).toBe(201);
+      const aliceProject: string = aliceClaim.body.project.id;
+      const bobProject: string = bobClaim.body.project.id;
 
-      // Anonymous request: no x-creator-id header, no creator_id query parameter.
-      const res = await fetch(`http://127.0.0.1:${port}/api/v1/projects`);
-      expect(res.status).toBe(200); // an error response must not let this test pass by accident
-      const data: any = await res.json();
-      const returnedProjects = data.projects;
-      expect(Array.isArray(returnedProjects)).toBe(true);
+      // A cannot LIST B's project; each sees exactly their own.
+      const aliceList = await api(running.base, alice.session, '/projects');
+      expect(aliceList.status).toBe(200);
+      expect(aliceList.body.projects.map((p: any) => p.id)).toEqual([aliceProject]);
+      const bobList = await api(running.base, bob.session, '/projects');
+      expect(bobList.body.projects.map((p: any) => p.id)).toEqual([bobProject]);
 
-      const bobProjectLeaked = returnedProjects.some((p: any) => p.id === projBId);
-      expect(bobProjectLeaked).toBe(false);
-    } finally {
-      await new Promise<void>((resolve, reject) => {
-        server.close((err) => (err ? reject(err) : resolve()));
+      // A cannot READ B's events or verify B's record, and the answer is identical to "no such project",
+      // so it cannot be used to discover that B's project exists.
+      const unknown = '00000000-0000-4000-8000-0000000000aa';
+      const nothing = await api(running.base, alice.session, `/projects/${unknown}/events`);
+      for (const suffix of ['/events', '/events/verify']) {
+        const theirs = await api(running.base, alice.session, `/projects/${bobProject}${suffix}`);
+        const missing = await api(running.base, alice.session, `/projects/${unknown}${suffix}`);
+        expect(theirs.status).toBe(404);
+        expect(theirs).toEqual(missing);
+      }
+      expect(nothing.status).toBe(404);
+
+      // The same requests work for the owner, so the 404 above is about ownership and not a broken route.
+      const bobEvents = await api(running.base, bob.session, `/projects/${bobProject}/events`);
+      expect(bobEvents.status).toBe(200);
+      expect(bobEvents.body.count).toBe(1);
+      expect((await api(running.base, bob.session, `/projects/${bobProject}/events/verify`)).body.valid).toBe(true);
+      expect((await api(running.base, alice.session, `/projects/${aliceProject}/events`)).body.count).toBe(1);
+
+      // No client-chosen identity changes any of this.
+      const spoof = await api(running.base, alice.session, `/projects?creator_id=${bobClaim.body.project.creator_id}`, {
+        headers: { 'x-creator-id': bobClaim.body.project.creator_id }
       });
-      client.release();
+      expect(spoof.body.projects.map((p: any) => p.id)).toEqual([aliceProject]);
+    } finally {
+      await running.stop();
       await withTriggersBypassed(adminDb, async (admin) => {
-        await admin.query('DELETE FROM project WHERE creator_id = ANY($1::uuid[])', [creatorIds]);
-        await admin.query('DELETE FROM creator WHERE id = ANY($1::uuid[])', [creatorIds]);
+        const creators = (await admin.query('SELECT id FROM creator WHERE identity_id = ANY($1::text[])', [[alice.session.userId, bob.session.userId]])).rows.map((r) => r.id);
+        const projects = (await admin.query('SELECT id FROM project WHERE creator_id = ANY($1::uuid[])', [creators])).rows.map((r) => r.id);
+        await admin.query('DELETE FROM event WHERE project_id = ANY($1::uuid[])', [projects]);
+        await admin.query('DELETE FROM project WHERE id = ANY($1::uuid[])', [projects]);
+        await admin.query('DELETE FROM creator WHERE id = ANY($1::uuid[])', [creators]);
       });
     }
   });

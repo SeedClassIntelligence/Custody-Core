@@ -1,4 +1,5 @@
 import { CustodyEvent, Project } from '../types/custody';
+import { authFetch } from '../auth/supabase';
 
 /** Thin wrappers over the server API. Nothing here invents data: failures throw. */
 
@@ -9,7 +10,7 @@ export interface ProjectsResponse {
 }
 
 export async function fetchProjects(): Promise<ProjectsResponse> {
-  const res = await fetch('/api/v1/projects');
+  const res = await authFetch('/api/v1/projects');
   if (!res.ok) throw new Error(`Could not load projects (server returned ${res.status}).`);
   const data = await res.json();
   return {
@@ -40,14 +41,14 @@ export function mapServerEvent(e: any): CustodyEvent {
 }
 
 export async function fetchProjectEvents(projectId: string): Promise<CustodyEvent[]> {
-  const res = await fetch(`/api/v1/projects/${projectId}/events`);
+  const res = await authFetch(`/api/v1/projects/${projectId}/events`);
   if (!res.ok) throw new Error(`Could not load the event log (server returned ${res.status}).`);
   const data = await res.json();
   return (data.events || []).map(mapServerEvent);
 }
 
 export async function claimProject(input: { name: string; purpose: string }): Promise<Project> {
-  const res = await fetch('/api/v1/projects', {
+  const res = await authFetch('/api/v1/projects', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: input.name, purpose: input.purpose })

@@ -32,6 +32,21 @@ Events are written only through the database function `append_event()`. The data
 number, timestamp and hash; the application's database account has no `INSERT` on the `event` table. The exact
 hash format, so anyone can verify a chain, is in `docs/EVENT_HASH_FORMAT.md`.
 
+## Login tests (Supabase Auth, local)
+
+Login is tested against a real Supabase Auth server running locally in Docker (the Supabase CLI's local stack, with
+TOTP multifactor enabled in `supabase/config.toml`). Nothing is mocked: users are created, authenticator codes are
+generated with `otplib`, and the auth server verifies them. Tests never touch a hosted Supabase project or its users.
+
+- `npm test` starts the stack by itself if Docker is running (the first start downloads images and takes a few minutes).
+- If Docker is not available, only the login tests fail, with that reason; the rest of the suite still runs.
+- `npm run auth-stack:start | auth-stack:stop | auth-stack:status` control it by hand.
+
+## Deploying the database upgrade without network access
+
+`docs/deploy/README.md` has two scripts to paste into the Supabase dashboard's SQL Editor (one applies the upgrade, one
+checks it) with click-by-click steps and the result to expect from each.
+
 ## Checking a deployed database
 
 `npm run migrate` applies pending migrations as the admin role. `npm run verify-live` then checks, as the application's
