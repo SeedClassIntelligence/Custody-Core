@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { app } from '../server';
 import {
   getDbPool,
@@ -9,6 +12,8 @@ import {
 } from '../server/db';
 import { assertPoolTargetsTestDb } from './support/safety';
 import { withTriggersBypassed } from './support/cleanup';
+
+const migrationsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'server', 'migrations');
 
 describe('PostgreSQL Schema, Append-Only Triggers, Restricted Roles & Multi-Tenant Scoping', () => {
   const db = getDbPool();
@@ -28,10 +33,9 @@ describe('PostgreSQL Schema, Append-Only Triggers, Restricted Roles & Multi-Tena
 
   it('records every migration file in schema_migrations and provisions the restricted custody_app role', async () => {
     const recorded = await adminDb.query('SELECT version FROM schema_migrations ORDER BY version');
-    expect(recorded.rows.map((r) => r.version)).toEqual([
-      '001_initial_schema.sql',
-      '002_hashed_timestamp_constraint.sql'
-    ]);
+    const onDisk = fs.readdirSync(migrationsDir).filter((f) => /^\d+_.+\.sql$/.test(f)).sort();
+    expect(onDisk.length).toBeGreaterThanOrEqual(3);
+    expect(recorded.rows.map((r) => r.version)).toEqual(onDisk);
     const role = await adminDb.query(`SELECT rolname FROM pg_roles WHERE rolname = 'custody_app'`);
     expect(role.rows).toHaveLength(1);
   });
@@ -342,10 +346,11 @@ describe('PostgreSQL Schema, Append-Only Triggers, Restricted Roles & Multi-Tena
       expect(initialVerify.totalEvents).toBe(3);
       expect(initialVerify.brokenAtSeq).toBeUndefined();
 
-      // Tamper with event 2 behind the trigger's back (local test database only).
+      // Tamper with event 2 behind the trigger's back (local test database only). Changing the stored
+      // payload alone is also impossible, see append_event.test.ts; here we change who did it.
       await withTriggersBypassed(adminDb, async (admin) => {
         await admin.query(
-          `UPDATE event SET payload = '{"step": "repo_lock", "tampered": true}'::jsonb WHERE id = $1`,
+          `UPDATE event SET actor_id = 'someone_else' WHERE id = $1`,
           [e2.id]
         );
       });
@@ -369,7 +374,7 @@ describe('PostgreSQL Schema, Append-Only Triggers, Restricted Roles & Multi-Tena
 
   // Requirement 2 Test: hashed_timestamp has no DEFAULT and has CHECK (hashed_timestamp <> '')
   it('proves inserting into event without hashed_timestamp fails (NOT NULL and non-empty CHECK constraint)', async () => {
-    const client = await db.connect();
+    const client = await adminDb.connect(); // custody_app has no INSERT on event; test the table's own constraints as the owner
     try {
       await client.query('BEGIN');
 

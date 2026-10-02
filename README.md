@@ -22,6 +22,12 @@ app at it through `TEST_DATABASE_URL`, and runs the whole suite. The test setup 
 
 The tenant-isolation test is expected to fail until Milestone 2 (login) is built.
 
+## Event log
+
+Events are written only through the database function `append_event()`. The database assigns the sequence
+number, timestamp and hash; the application's database account has no `INSERT` on the `event` table. The exact
+hash format, so anyone can verify a chain, is in `docs/EVENT_HASH_FORMAT.md`.
+
 ## Migrations
 
 SQL files in `server/migrations/` are applied in order by the server on start (or `npm run migrate`).

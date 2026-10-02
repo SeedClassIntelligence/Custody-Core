@@ -19,7 +19,12 @@ GRANT USAGE ON SCHEMA public TO custody_app;
 GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO custody_app;
 
 -- Strictly revoke mutation privileges on event table
-REVOKE UPDATE, DELETE, TRUNCATE ON TABLE event FROM custody_app;
+-- Events are written only through append_event(), which assigns seq, prev_hash, timestamp and hash.
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE event FROM custody_app;
+GRANT EXECUTE ON FUNCTION append_event(uuid, text, text, text, text, text, jsonb) TO custody_app;
+
+-- The app role must not be able to create objects (for example look-alike functions) in this schema.
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 
 -- Grant sequence permissions for identity/auto-increment columns
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO custody_app;

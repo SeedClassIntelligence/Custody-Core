@@ -33,7 +33,9 @@ export function mapServerEvent(e: any): CustodyEvent {
     prev_hash: e.prev_hash,
     hash: e.hash,
     seed_signature_id: e.seed_signature_id || '',
-    timestamp: e.timestamp || e.created_at
+    timestamp: e.timestamp || e.hashed_timestamp || e.created_at,
+    hash_version: e.hash_version,
+    canonical_payload: e.canonical_payload
   };
 }
 

@@ -164,6 +164,10 @@ export interface CustodyEvent {
   hash: string;
   seed_signature_id: string; // Empty in Phase 1, ready for Phase 2
   timestamp: string;
+  /** 1 = hashed by application code, 2 = hashed by the database (see docs/EVENT_HASH_FORMAT.md). */
+  hash_version?: number;
+  /** Version 2 only: the exact payload text the database hashed. */
+  canonical_payload?: string | null;
 }
 
 export interface ClosingReport {

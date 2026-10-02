@@ -14,6 +14,10 @@ export interface EventHashInput {
   payload: Record<string, any>;
   prev_hash: string;
   timestamp: string;
+  /** 1 = hashed by application code (payload re-serialised here); 2 = hashed by the database. */
+  hash_version?: number;
+  /** Version 2 only: the exact payload text the database hashed. */
+  canonical_payload?: string | null;
 }
 
 /**
@@ -29,6 +33,35 @@ export function canonicalJson(obj: any): string {
   const keys = Object.keys(obj).sort();
   const pairs = keys.map(k => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`);
   return '{' + pairs.join(',') + '}';
+}
+
+function compareCodePoints(a: string, b: string): number {
+  const x = Array.from(a);
+  const y = Array.from(b);
+  const n = Math.min(x.length, y.length);
+  for (let i = 0; i < n; i++) {
+    const d = x[i].codePointAt(0)! - y[i].codePointAt(0)!;
+    if (d !== 0) return d;
+  }
+  return x.length - y.length;
+}
+
+/**
+ * Canonical JSON as the database writes it for hash_version 2 (see docs/EVENT_HASH_FORMAT.md):
+ * object keys sorted by Unicode code point (the v1 canonicalJson sorts by UTF-16 unit, which differs
+ * for characters above U+FFFF). Numbers use JavaScript's formatting, which matches the database
+ * only for integers up to 2^53 and decimals that survive a round trip through a double; for other
+ * numbers, trust the stored canonical_payload text, not this function.
+ */
+export function canonicalJsonV2(obj: any): string {
+  if (obj === null || typeof obj !== 'object') {
+    return JSON.stringify(obj);
+  }
+  if (Array.isArray(obj)) {
+    return '[' + obj.map(canonicalJsonV2).join(',') + ']';
+  }
+  const keys = Object.keys(obj).sort(compareCodePoints);
+  return '{' + keys.map(k => `${JSON.stringify(k)}:${canonicalJsonV2(obj[k])}`).join(',') + '}';
 }
 
 /**
@@ -59,6 +92,27 @@ export const GENESIS_PREV_HASH = '0000000000000000000000000000000000000000000000
  * specifically including project_id, actor_type, actor_id, subject_type, and subject_id.
  */
 export async function computeEventHash(event: EventHashInput): Promise<string> {
+  if (event.hash_version === 2) {
+    if (typeof event.canonical_payload !== 'string') {
+      throw new Error('A hash_version 2 event needs its canonical_payload text.');
+    }
+    // Same bytes the database hashes: keys in alphabetical order, payload embedded as its stored text.
+    const s = (v: string) => JSON.stringify(v);
+    return await sha256(
+      '{"action":' + s(event.action) +
+      ',"actor_id":' + s(event.actor_id) +
+      ',"actor_type":' + s(event.actor_type) +
+      ',"payload":' + event.canonical_payload +
+      ',"prev_hash":' + s(event.prev_hash) +
+      ',"project_id":' + s(event.project_id) +
+      ',"seq":' + String(event.seq) +
+      ',"subject_id":' + s(event.subject_id) +
+      ',"subject_type":' + s(event.subject_type) +
+      ',"timestamp":' + s(event.timestamp) +
+      '}'
+    );
+  }
+
   const canonical = canonicalJson({
     action: event.action,
     actor_id: event.actor_id,
@@ -128,8 +182,29 @@ export async function verifyHashChain(
       subject_id: event.subject_id,
       payload: event.payload,
       prev_hash: event.prev_hash,
-      timestamp: event.timestamp
+      timestamp: event.timestamp,
+      hash_version: event.hash_version,
+      canonical_payload: event.canonical_payload
     });
+
+    // A version 2 hash covers canonical_payload; the separate payload column must say the same thing.
+    if (event.hash_version === 2) {
+      let consistent = false;
+      try {
+        consistent = canonicalJsonV2(JSON.parse(event.canonical_payload as string)) === canonicalJsonV2(event.payload);
+      } catch {
+        consistent = false;
+      }
+      if (!consistent) {
+        return {
+          isValid: false,
+          totalEvents: events.length,
+          brokenAtSeq: event.seq,
+          reason: `The stored payload of event #${event.seq} (${event.action}) does not match the payload that was hashed.`,
+          verifiedAt: now
+        };
+      }
+    }
 
     if (computedHash !== event.hash) {
       return {

@@ -6,7 +6,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { applyMigrations } from './migrationRunner';
-import { computeEventHash, GENESIS_PREV_HASH, verifyHashChain, VerificationResult } from '../shared/crypto';
+import { verifyHashChain, VerificationResult } from '../shared/crypto';
 
 const { Pool } = pg;
 
@@ -148,7 +148,6 @@ export interface InsertEventParams {
   subject_type: string;
   subject_id: string;
   payload: Record<string, any>;
-  timestamp?: string;
 }
 
 export interface DbEventRow {
@@ -165,14 +164,15 @@ export interface DbEventRow {
   hash: string;
   seed_signature_id: string;
   hashed_timestamp: string;
+  hash_version: number;
+  canonical_payload: string | null;
   created_at: string;
   updated_at: string;
 }
 
 /**
- * Inserts an event into the append-only event log.
- * Sequence and previous hash are assigned inside a database transaction
- * so two concurrent events for the same project cannot receive the same seq or branch.
+ * Records an event. The database assigns the sequence number, previous hash, timestamp and hash
+ * (the append_event() function); this code can only say what happened.
  */
 export async function insertEvent(params: InsertEventParams): Promise<DbEventRow> {
   const db = getDbPool();
@@ -180,82 +180,20 @@ export async function insertEvent(params: InsertEventParams): Promise<DbEventRow
     throw new Error('Database is not connected. Set DATABASE_URL to record events.');
   }
 
-  const client = await db.connect();
-  try {
-    await client.query('BEGIN');
-
-    // Lock the project row or latest event to prevent race conditions on sequence
-    // First, lock project row if available
-    await client.query(
-      `SELECT id FROM project WHERE id = $1 FOR UPDATE`,
-      [params.project_id]
-    );
-
-    // Get the latest event for this project
-    const lastEventRes = await client.query(
-      `SELECT seq, hash FROM event WHERE project_id = $1 ORDER BY seq DESC LIMIT 1`,
-      [params.project_id]
-    );
-
-    let nextSeq = 1;
-    let prevHash = GENESIS_PREV_HASH;
-
-    if (lastEventRes.rows.length > 0) {
-      nextSeq = Number(lastEventRes.rows[0].seq) + 1;
-      prevHash = lastEventRes.rows[0].hash;
-    }
-
-    const timestamp = params.timestamp || new Date().toISOString();
-
-    const hash = await computeEventHash({
-      seq: nextSeq,
-      project_id: params.project_id,
-      actor_type: params.actor_type,
-      actor_id: params.actor_id,
-      action: params.action,
-      subject_type: params.subject_type,
-      subject_id: params.subject_id,
-      payload: params.payload,
-      prev_hash: prevHash,
-      timestamp
-    });
-
-    const insertRes = await client.query(
-      `INSERT INTO event (
-        seq, project_id, actor_type, actor_id, action, subject_type, subject_id,
-        payload, prev_hash, hash, seed_signature_id, hashed_timestamp, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-      RETURNING *`,
-      [
-        nextSeq,
-        params.project_id,
-        params.actor_type,
-        params.actor_id,
-        params.action,
-        params.subject_type,
-        params.subject_id,
-        JSON.stringify(params.payload),
-        prevHash,
-        hash,
-        '', // Empty in Phase 1, ready for Phase 2 Seed Signature
-        timestamp, // Exact ISO string preserved for verification
-        timestamp,
-        timestamp
-      ]
-    );
-
-    await client.query('COMMIT');
-    const row = insertRes.rows[0];
-    return {
-      ...row,
-      seq: Number(row.seq)
-    };
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
+  const res = await db.query(
+    'SELECT * FROM append_event($1, $2, $3, $4, $5, $6, $7::jsonb)',
+    [
+      params.project_id,
+      params.actor_type,
+      params.actor_id,
+      params.action,
+      params.subject_type,
+      params.subject_id,
+      JSON.stringify(params.payload)
+    ]
+  );
+  const row = res.rows[0];
+  return { ...row, seq: Number(row.seq) };
 }
 
 export async function getProjectEvents(projectId: string): Promise<DbEventRow[]> {
@@ -290,7 +228,9 @@ export async function verifyServerProjectEvents(projectId: string): Promise<Veri
       prev_hash: e.prev_hash,
       hash: e.hash,
       timestamp: e.hashed_timestamp || (typeof e.created_at === 'string' ? e.created_at : new Date(e.created_at).toISOString()),
-      seed_signature_id: e.seed_signature_id
+      seed_signature_id: e.seed_signature_id,
+      hash_version: e.hash_version,
+      canonical_payload: e.canonical_payload
     }))
   );
 }
