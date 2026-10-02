@@ -37,6 +37,26 @@ CREATE TABLE mfa_session (
   verified_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Logins that had a verified authenticator in Supabase's old code step when this migration ran. Setting up an
+-- authenticator here is refused for them until the operator clears the row (docs/LOGIN_SETUP.md): otherwise
+-- whoever holds the password could set up their own and take the account. Recorded here, at deploy time, so
+-- that removing the old authenticator on the Supabase side (possible after guessing its code there) does not
+-- lift the block. On a database without Supabase Auth (tests), there is nothing to record.
+CREATE TABLE mfa_legacy_reset (
+  identity_id TEXT PRIMARY KEY,
+  found_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  cleared_at TIMESTAMPTZ                  -- set by the operator after confirming the person
+);
+DO $legacy$
+BEGIN
+  IF to_regclass('auth.mfa_factors') IS NOT NULL THEN
+    EXECUTE $q$INSERT INTO mfa_legacy_reset (identity_id)
+               SELECT DISTINCT user_id::text FROM auth.mfa_factors WHERE status::text = 'verified'
+               ON CONFLICT (identity_id) DO NOTHING$q$;
+  END IF;
+END
+$legacy$;
+
 -- ---------------------------------------------------------------------------------------------------------
 -- Account record: an append-only, hash-chained log per login, for things that belong to the account rather
 -- than to one project (for example a lockout after too many wrong codes). Built by the database, exactly

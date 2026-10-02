@@ -149,8 +149,10 @@ describe('API login: 401 without a valid session, 403 without the code step, cre
   });
 
   it('the first verified login creates the creator row linked to the Supabase user; later logins reuse it', async () => {
+    // newCreator signs up and passes the code step: that first verified login creates the row (and records the
+    // setup with that creator as actor). A login that has not passed the code step gets none (tested below).
     const { session, email } = await newCreator('first');
-    expect((await adminDb.query('SELECT COUNT(*)::int AS n FROM creator WHERE identity_id = $1', [session.userId])).rows[0].n).toBe(0);
+    expect((await adminDb.query('SELECT COUNT(*)::int AS n FROM creator WHERE identity_id = $1', [session.userId])).rows[0].n).toBe(1);
 
     const me = await api(running.base, session, '/me');
     expect(me.status).toBe(200);

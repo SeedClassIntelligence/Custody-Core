@@ -118,8 +118,11 @@ export async function runMigrations(): Promise<{ success: boolean; message: stri
     return { success: true, message: 'Migrations already applied.' };
   }
 
+  // Closes Supabase's built-in REST API to our tables and functions (see the file). Runs inside every
+  // migration, and again after the roles below.
+  const lockdown = fs.readFileSync(path.join(__dirname, 'lockdown.sql'), 'utf8');
   try {
-    await applyMigrations(adminDb, path.join(__dirname, 'migrations'));
+    await applyMigrations(adminDb, path.join(__dirname, 'migrations'), lockdown);
   } catch (err: any) {
     return { success: false, message: err.message };
   }
@@ -129,6 +132,7 @@ export async function runMigrations(): Promise<{ success: boolean; message: stri
     const client = await adminDb.connect();
     try {
       await client.query(fs.readFileSync(rolesFile, 'utf8'));
+      await client.query(lockdown);
     } catch (roleErr: any) {
       return { success: false, message: `Migrations applied, but configuring the custody_app role failed: ${roleErr.message}` };
     } finally {

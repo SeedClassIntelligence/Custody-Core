@@ -287,4 +287,18 @@ describe('Versioned migrations (schema_migrations + 002_hashed_timestamp_constra
     );
     expect(priv.rows[0]).toEqual({ app_create: false, public_create: false });
   });
+
+  it('the lockdown runs inside each migration: if it fails, that migration is rolled back and not recorded; when it works, every table has row-level security', async () => {
+    const failing = await freshDatabase();
+    await expect(applyMigrations(failing, REAL_MIGRATIONS, 'SELECT 1/0')).rejects.toThrow(/001_initial_schema\.sql failed and was rolled back/);
+    expect((await failing.query(`SELECT to_regclass('public.event') AS t`)).rows[0].t).toBeNull();
+    expect((await failing.query('SELECT count(*)::int AS n FROM schema_migrations')).rows[0].n).toBe(0);
+
+    const pool = await freshDatabase();
+    const lockdown = fs.readFileSync(path.join(REAL_MIGRATIONS, '..', 'lockdown.sql'), 'utf8');
+    await applyMigrations(pool, REAL_MIGRATIONS, lockdown);
+    const open = (await pool.query(`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                                     WHERE n.nspname = 'public' AND c.relkind = 'r' AND NOT c.relrowsecurity AND c.relname <> 'schema_migrations'`)).rows;
+    expect(open).toEqual([]);
+  });
 });

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import { authStack } from './support/authStack';
+import { authStack, createSupabaseMfaUser, signUp, uniqueEmail } from './support/authStack';
 
 /**
  * Supabase serves every table and function in the `public` schema over its REST API (/rest/v1, /rest/v1/rpc)
@@ -23,7 +23,9 @@ const migrations = fs
   .filter((n) => /^\d+_.+\.sql$/.test(n))
   .sort()
   .map((n) => fs.readFileSync(path.join(root, 'server', 'migrations', n), 'utf8'));
-const roles = fs.readFileSync(path.join(root, 'server', 'roles.sql'), 'utf8');
+const lockdown = fs.readFileSync(path.join(root, 'server', 'lockdown.sql'), 'utf8');
+// What `npm run migrate` does: each migration with the lockdown in its transaction, then roles, then lockdown.
+const roles = fs.readFileSync(path.join(root, 'server', 'roles.sql'), 'utf8') + '\n' + lockdown;
 
 const DATA_API_ROLES = ['anon', 'authenticated'];
 const verifySql = fs.readFileSync(path.join(root, 'docs', 'deploy', 'verify-migrations.sql'), 'utf8');
@@ -90,7 +92,7 @@ describe('Supabase REST API roles have no access to Custody Core data (real Supa
 
   it('after the migrations and roles.sql: anon and authenticated can touch no table, view or function of ours', async () => {
     await inRolledBackTransaction(async (c) => {
-      for (const sql of migrations) await c.query(sql);
+      for (const sql of migrations) await c.query(sql + '\n' + lockdown);
       await c.query(roles);
       for (const role of DATA_API_ROLES) {
         const g = await grantsFor(c, role);
@@ -107,7 +109,7 @@ describe('Supabase REST API roles have no access to Custody Core data (real Supa
 
   it('acting as the REST API would: a password-only user cannot mark the code step passed, unlock, read keys, or forge records', async () => {
     await inRolledBackTransaction(async (c) => {
-      for (const sql of migrations) await c.query(sql);
+      for (const sql of migrations) await c.query(sql + '\n' + lockdown);
       await c.query(roles);
       const factor = (await c.query(`INSERT INTO mfa_factor (identity_id, secret_ciphertext, status) VALUES ('victim', 'v1.x', 'verified') RETURNING id`)).rows[0].id;
       const attempts: Array<[string, string, unknown[]]> = [
@@ -134,7 +136,7 @@ describe('Supabase REST API roles have no access to Custody Core data (real Supa
 
   it('row-level security is on for every table of ours, and the app account still has its rows', async () => {
     await inRolledBackTransaction(async (c) => {
-      for (const sql of migrations) await c.query(sql);
+      for (const sql of migrations) await c.query(sql + '\n' + lockdown);
       await c.query(roles);
       const off = (await c.query(`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                                    WHERE n.nspname = 'public' AND c.relkind = 'r' AND NOT c.relrowsecurity ORDER BY 1`)).rows.map((r) => r.relname);
@@ -143,6 +145,43 @@ describe('Supabase REST API roles have no access to Custody Core data (real Supa
       await c.query('GRANT custody_app TO CURRENT_USER'); // only so this test can act as the app (rolled back)
       await c.query('SET LOCAL ROLE custody_app');
       expect((await c.query(`SELECT count(*)::int AS n FROM mfa_factor WHERE identity_id = 'someone'`)).rows[0].n).toBe(1);
+    });
+  });
+
+  it('no gap: right after each migration (lockdown in its own transaction), before roles.sql, nothing is open', async () => {
+    await inRolledBackTransaction(async (c) => {
+      for (const [i, sql] of migrations.entries()) {
+        await c.query(sql + '\n' + lockdown);
+        for (const role of DATA_API_ROLES) {
+          const g = await grantsFor(c, role);
+          expect([...g.tableHits, ...g.functionHits], `${role} after migration ${i + 1}`).toEqual([]);
+        }
+      }
+    });
+  });
+
+  it('a table or function added later (without running anything again) is not open to the REST API roles', async () => {
+    await inRolledBackTransaction(async (c) => {
+      for (const sql of migrations) await c.query(sql + '\n' + lockdown);
+      await c.query(roles);
+      await c.query(`CREATE TABLE public.future_table (id int)`);
+      await c.query(`CREATE FUNCTION public.future_fn() RETURNS int LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'`);
+      for (const role of DATA_API_ROLES) {
+        const g = await grantsFor(c, role);
+        expect(g.tables).toContain('future_table');
+        expect([...g.tableHits, ...g.functionHits], role).toEqual([]);
+      }
+    });
+  });
+
+  it("migration 005 records every account that had a verified authenticator in Supabase's old code step", async () => {
+    const legacy = await createSupabaseMfaUser('snapshot');
+    const plain = await signUp(uniqueEmail('snapshot-plain'));
+    await inRolledBackTransaction(async (c) => {
+      for (const sql of migrations) await c.query(sql + '\n' + lockdown);
+      const ids = (await c.query('SELECT identity_id FROM mfa_legacy_reset')).rows.map((r) => r.identity_id);
+      expect(ids).toContain(legacy.session.userId);
+      expect(ids).not.toContain(plain.userId);
     });
   });
 });

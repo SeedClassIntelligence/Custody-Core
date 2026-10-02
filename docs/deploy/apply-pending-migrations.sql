@@ -334,6 +334,26 @@ CREATE TABLE mfa_session (
   verified_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Logins that had a verified authenticator in Supabase's old code step when this migration ran. Setting up an
+-- authenticator here is refused for them until the operator clears the row (docs/LOGIN_SETUP.md): otherwise
+-- whoever holds the password could set up their own and take the account. Recorded here, at deploy time, so
+-- that removing the old authenticator on the Supabase side (possible after guessing its code there) does not
+-- lift the block. On a database without Supabase Auth (tests), there is nothing to record.
+CREATE TABLE mfa_legacy_reset (
+  identity_id TEXT PRIMARY KEY,
+  found_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  cleared_at TIMESTAMPTZ                  -- set by the operator after confirming the person
+);
+DO $legacy$
+BEGIN
+  IF to_regclass('auth.mfa_factors') IS NOT NULL THEN
+    EXECUTE $q$INSERT INTO mfa_legacy_reset (identity_id)
+               SELECT DISTINCT user_id::text FROM auth.mfa_factors WHERE status::text = 'verified'
+               ON CONFLICT (identity_id) DO NOTHING$q$;
+  END IF;
+END
+$legacy$;
+
 -- ---------------------------------------------------------------------------------------------------------
 -- Account record: an append-only, hash-chained log per login, for things that belong to the account rather
 -- than to one project (for example a lockout after too many wrong codes). Built by the database, exactly
@@ -492,6 +512,8 @@ REVOKE UPDATE, DELETE, TRUNCATE ON TABLE mfa_attempt FROM custody_app;
 REVOKE UPDATE, DELETE, TRUNCATE ON TABLE mfa_session FROM custody_app;
 REVOKE DELETE, TRUNCATE ON TABLE mfa_factor FROM custody_app;
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE account_event FROM custody_app;
+-- Only the operator clears a reset requirement.
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE mfa_legacy_reset FROM custody_app;
 GRANT EXECUTE ON FUNCTION append_account_event(text, text, text, text, jsonb) TO custody_app;
 
 -- The app role must not be able to create objects (for example look-alike functions) in this schema.
@@ -513,6 +535,13 @@ BEGIN
 END
 $$;
 
+-- Supabase's built-in REST API is closed to all of the above by server/lockdown.sql, which runs after this file
+-- (and inside every migration).
+
+
+-- ---------------------------------------------------------------------------
+-- server/lockdown.sql  (closes Supabase's REST API to our tables and functions; safe to repeat)
+-- ---------------------------------------------------------------------------
 -- ---------------------------------------------------------------------------------------------------------
 -- Close Supabase's built-in REST API (Data API) to everything of ours.
 --
@@ -521,14 +550,18 @@ $$;
 -- Custody Core never uses that API: all access goes through our server as custody_app. So those roles get
 -- no access at all, and row-level security is on for every table (only custody_app has a policy; the
 -- table owner and SECURITY DEFINER functions are not affected). On a plain PostgreSQL without those roles
--- the role-specific part is skipped. Re-run after every migration, so new tables are covered too.
+-- the role-specific part is skipped.
+--
+-- It refers to no particular table or function, so it can run inside every migration's own transaction:
+-- nothing a migration creates is ever committed while open. It runs again after server/roles.sql.
 -- ---------------------------------------------------------------------------------------------------------
 
--- Functions are executable by PUBLIC (every role) unless revoked. Only custody_app needs any of ours.
+-- Functions are executable by PUBLIC (every role) unless revoked. Only custody_app needs any of ours, and
+-- server/roles.sql grants it exactly those. The default-privileges line has no IN SCHEMA on purpose: a per-schema
+-- default cannot take away PostgreSQL's global "PUBLIC may execute" default, so without this every function a
+-- later migration creates would be callable through the REST API.
 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION append_event(uuid, text, text, text, text, text, jsonb) TO custody_app;
-GRANT EXECUTE ON FUNCTION append_account_event(text, text, text, text, jsonb) TO custody_app;
+ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 DO $$
 DECLARE
@@ -552,7 +585,8 @@ BEGIN
      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
   LOOP
     EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t.relname);
-    IF NOT EXISTS (SELECT FROM pg_catalog.pg_policies WHERE schemaname = 'public' AND tablename = t.relname AND policyname = 'custody_app_access') THEN
+    -- (On the very first migration custody_app does not exist yet; roles.sql creates it and this runs again.)
+    IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'custody_app') AND NOT EXISTS (SELECT FROM pg_catalog.pg_policies WHERE schemaname = 'public' AND tablename = t.relname AND policyname = 'custody_app_access') THEN
       EXECUTE format('CREATE POLICY custody_app_access ON public.%I FOR ALL TO custody_app USING (true) WITH CHECK (true)', t.relname);
     END IF;
   END LOOP;

@@ -216,13 +216,19 @@ describe('Login hardening', () => {
   });
 
   it('an account whose email is not confirmed is refused (403), and gets in once it is', async () => {
-    const { session } = await newCreator('unconfirmed');
+    const session = await signUp(uniqueEmail('unconfirmed'));
     await withAuthDb((c) => c.query('UPDATE auth.users SET email_confirmed_at = NULL WHERE id = $1', [session.userId]));
-    const refused = await api(running.base, session, '/projects');
-    expect(refused.status).toBe(403);
-    expect(refused.body.required).toBe('confirmed_email');
+    // Not even the authenticator setup is available, and nothing is created for this account.
+    for (const [path, init] of [['/projects', {}], ['/mfa/status', {}], ['/mfa/enroll', { method: 'POST', body: {} }]] as const) {
+      const refused = await api(running.base, session, path, init);
+      expect(refused.status, path).toBe(403);
+      expect(refused.body.required, path).toBe('confirmed_email');
+    }
     expect((await adminDb.query('SELECT COUNT(*)::int AS n FROM creator WHERE identity_id = $1', [session.userId])).rows[0].n).toBe(0);
+    expect((await adminDb.query('SELECT COUNT(*)::int AS n FROM mfa_factor WHERE identity_id = $1', [session.userId])).rows[0].n).toBe(0);
     await withAuthDb((c) => c.query('UPDATE auth.users SET email_confirmed_at = now() WHERE id = $1', [session.userId]));
+    const { secret } = await enrollCode(running.base, session);
+    expect((await verifyCode(running.base, session, codeAt(secret))).status).toBe(200);
     expect((await api(running.base, session, '/projects')).status).toBe(200);
   });
 

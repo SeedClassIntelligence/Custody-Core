@@ -50,8 +50,11 @@ MFA_ENCRYPTION_KEY="<the output>"
 - If it is lost or changed, stored authenticator keys can no longer be read and everyone must set up their
   authenticator again. Keep a copy wherever you keep the database password.
 
-Supabase's own TOTP multifactor is **not used** by this app and does not need to be turned on. Even if a session
-has Supabase's `aal2` level, the API still requires the code step on this server.
+Supabase's own TOTP multifactor is **not used** by this app. **Turn it off** in the hosted project (Dashboard >
+**Authentication** > **Multi-Factor** > TOTP: disabled, for both enrolling and verifying): Supabase's own code check
+has no wrong-code limit on most plans, so leaving it on gives a guesser an unlimited door for any account that still
+has an old Supabase authenticator. Even if a session has Supabase's `aal2` level, this API ignores it and still
+requires the code step on this server. (The local test stack keeps it on, only so tests can prove exactly that.)
 
 **Turn Confirm email ON** (Authentication > Sign In / Providers > Email > *Confirm email*). This is required, not
 optional. With it on, a new account must click the link in an email before it can sign in, so nobody can register
@@ -65,7 +68,8 @@ record). If you want invitation-only, turn off **Allow new users to sign up** an
 
 ## Wrong-code limit
 
-- After **5 wrong codes within 15 minutes**, the authenticator is **locked for 15 minutes**. While locked, every
+- After **5 wrong codes within 15 minutes**, the authenticator is **locked for 15 minutes**. A right code in between
+  does not wipe out recent wrong ones: any 5 wrong codes inside 15 minutes lock it. While locked, every
   code is refused without being checked, even the right one, so guessing during a lock reveals nothing.
 - Every attempt (accepted, wrong, reused, refused while locked) is a row in `mfa_attempt` in the database, not in
   server memory. The lock is a timestamp on the authenticator (`mfa_factor.locked_until`). Both survive a server
@@ -105,25 +109,29 @@ It does not protect, and you should know:
 
 Authenticators set up with Supabase's own multifactor are not used any more. An account that has one is **not**
 offered a new setup automatically: otherwise whoever holds the password could set up their own authenticator and
-take the account. The app says the account must be reset, and the server refuses setup (409, `operator_reset`).
+take the account. When migration 005 runs, it records every such account in `mfa_legacy_reset`; the app says the
+account must be reset, and the server refuses setup (409, `operator_reset`). Removing the old authenticator on the
+Supabase side alone does not lift the block (someone guessing at Supabase's unlimited code check could do that).
 
-To reset such an account, after you have confirmed with the real person that they are ready to sign in right away:
+To reset such an account, after you have confirmed with the real person that they are ready to sign in right away,
+run this in the **SQL Editor** with their user id (Dashboard > **Authentication** > **Users**):
 
-1. Supabase dashboard > **Authentication** > **Users**, and copy that person's user id.
-2. **SQL Editor**, run (with their id):
-   ```sql
-   DELETE FROM auth.mfa_factors WHERE user_id = '<user id>';
-   ```
-3. Ask them to sign in now and set up their authenticator; until they do, the first person to sign in with the
-   password could.
+```sql
+DELETE FROM auth.mfa_factors WHERE user_id = '<user id>';
+UPDATE public.mfa_legacy_reset SET cleared_at = now() WHERE identity_id = '<user id>';
+```
+
+Then ask them to sign in now and set up their authenticator; until they do, the first person to sign in with the
+password could. The app's own database account cannot clear this table.
 
 ## Supabase's built-in REST API is closed to Custody Core's data
 
 Supabase serves every table in the `public` schema at `/rest/v1` to anyone holding the public key (which is in the
 browser), and on Supabase new tables are open to it by default. Custody Core never uses that API, so
-`server/roles.sql` (applied on every migration, and by the dashboard apply script) removes every right of the roles
-`anon` and `authenticated` on our tables and functions, and turns on row-level security with a policy only for the
-app account. `docs/deploy/verify-migrations.sql` checks this (rows 71 to 73), and
+`server/lockdown.sql` removes every right of the roles `anon` and `authenticated` on our tables and functions, stops
+new functions from being callable by everyone, and turns on row-level security with a policy only for the app
+account. It runs inside every migration's own transaction (so nothing a migration creates is ever committed open),
+again after `server/roles.sql`, and at the end of the dashboard apply script. `docs/deploy/verify-migrations.sql` checks this (rows 71 to 73), and
 `tests/data_api_exposure.test.ts` proves it on the real Supabase database image, including that without it a
 password-only user could mark the code step as passed.
 

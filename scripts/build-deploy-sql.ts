@@ -94,6 +94,11 @@ ${blocks.join('\n')}
 -- ---------------------------------------------------------------------------
 ${read('server/roles.sql')}
 
+-- ---------------------------------------------------------------------------
+-- server/lockdown.sql  (closes Supabase's REST API to our tables and functions; safe to repeat)
+-- ---------------------------------------------------------------------------
+${read('server/lockdown.sql')}
+
 COMMIT;
 `;
 }

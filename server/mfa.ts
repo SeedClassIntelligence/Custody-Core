@@ -65,7 +65,7 @@ mfaRouter.get('/status', async (_req, res) => {
       verified: passed.rowCount === 1,
       locked_until: lockedUntil,
       // An authenticator from Supabase's old code step that has not been reset: setup here is refused (see /enroll).
-      needs_reset: factor.rowCount === 0 && session.hasSupabaseFactor
+      needs_reset: factor.rowCount === 0 && (await needsOperatorReset(db, session))
     });
   } catch (err: any) {
     console.error('[mfa] status failed:', err?.message ?? err);
@@ -89,12 +89,9 @@ mfaRouter.post('/enroll', async (_req, res) => {
     }
     // The account already had an authenticator in Supabase's old code step. Letting whoever holds the password
     // set up a new one here would hand them the account, so the operator must reset it first.
-    if (session.hasSupabaseFactor) {
+    if (await needsOperatorReset(client, session)) {
       await client.query('ROLLBACK');
-      return res.status(409).json({
-        error: 'This account has an authenticator from the previous sign-in system. Ask the operator to reset it, then sign in again.',
-        required: 'operator_reset'
-      });
+      return res.status(409).json(RESET_NEEDED);
     }
     // A half-finished setup is replaced; it never counted as a second factor.
     await client.query(`UPDATE mfa_factor SET status = 'abandoned' WHERE identity_id = $1 AND status = 'unverified'`, [session.userId]);
@@ -128,6 +125,8 @@ mfaRouter.post('/verify', async (req, res) => {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
+    // The same lock as /enroll, so a setup cannot start while this check finishes another one.
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`mfa_enroll:${session.userId}`]);
     // The verified authenticator if there is one, otherwise the one being set up. Never chosen by the browser.
     const found = await client.query(
       `SELECT id, status, secret_ciphertext, last_used_step, locked_until, locked_until > clock_timestamp() AS is_locked
@@ -143,6 +142,10 @@ mfaRouter.post('/verify', async (req, res) => {
       return res.status(409).json({ error: 'Set up your authenticator app first.' });
     }
     const factor = found.rows[0];
+    if (factor.status === 'unverified' && (await needsOperatorReset(client, session))) {
+      await client.query('ROLLBACK');
+      return res.status(409).json(RESET_NEEDED);
+    }
 
     const record = (outcome: string) =>
       // clock_timestamp(): the moment of the attempt itself, not the start of its transaction.
@@ -164,8 +167,7 @@ mfaRouter.post('/verify', async (req, res) => {
       const wrong = Number((await client.query(
         `SELECT count(*) AS n FROM mfa_attempt
           WHERE factor_id = $1 AND outcome IN ('wrong_code', 'reused_code')
-            AND attempted_at > clock_timestamp() - make_interval(mins => $2)
-            AND attempted_at > COALESCE((SELECT max(attempted_at) FROM mfa_attempt WHERE factor_id = $1 AND outcome = 'accepted'), '-infinity')`,
+            AND attempted_at > clock_timestamp() - make_interval(mins => $2)`,
         [factor.id, WINDOW_MINUTES]
       )).rows[0].n);
 
@@ -211,9 +213,16 @@ mfaRouter.post('/verify', async (req, res) => {
       [session.sessionId, session.userId, factor.id]
     );
     if (factor.status === 'unverified') {
+      // The person who just finished setup is the actor: their creator record (created here on first setup).
+      const creator = await client.query(
+        `INSERT INTO creator (identity_id, display_name, email) VALUES ($1, $2, $3)
+         ON CONFLICT (identity_id) DO UPDATE SET email = EXCLUDED.email, updated_at = now()
+         RETURNING id`,
+        [session.userId, String(res.locals.displayName), session.email]
+      );
       await client.query(
-        `SELECT * FROM append_account_event($1, 'creator', $1, 'account.second_factor_enrolled', $2::jsonb)`,
-        [session.userId, JSON.stringify({ factor_id: factor.id })]
+        `SELECT * FROM append_account_event($1, 'creator', $2, 'account.second_factor_enrolled', $3::jsonb)`,
+        [session.userId, creator.rows[0].id, JSON.stringify({ factor_id: factor.id })]
       );
     }
     await client.query('COMMIT');
@@ -230,6 +239,21 @@ mfaRouter.post('/verify', async (req, res) => {
     client.release();
   }
 });
+
+const RESET_NEEDED = {
+  error: 'This account has an authenticator from the previous sign-in system. Ask the operator to reset it, then sign in again.',
+  required: 'operator_reset'
+};
+
+/**
+ * True when this login had an authenticator in Supabase's old code step that the operator has not reset:
+ * recorded at deploy time (mfa_legacy_reset), or still visible in Supabase's own record of the account.
+ */
+async function needsOperatorReset(db: pg.Pool | pg.PoolClient, session: { userId: string; hasSupabaseFactor: boolean }): Promise<boolean> {
+  if (session.hasSupabaseFactor) return true;
+  const r = await db.query('SELECT 1 FROM mfa_legacy_reset WHERE identity_id = $1 AND cleared_at IS NULL', [session.userId]);
+  return r.rowCount === 1;
+}
 
 /** What a stored key is bound to: this login and this authenticator row. */
 function sealOwner(identityId: string, factorId: string): string {

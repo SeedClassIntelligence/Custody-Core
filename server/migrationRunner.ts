@@ -125,8 +125,11 @@ export function listMigrationFiles(dir: string): string[] {
  * Applies every migration in `dir` that is not yet recorded in schema_migrations, in filename
  * order. Each migration runs in its own transaction together with its bookkeeping row, so a
  * failure leaves neither partial changes nor a record behind. Must run as the admin role.
+ *
+ * `inEachTransaction` (for example server/lockdown.sql) runs inside every migration's transaction, after the
+ * migration itself, so whatever a migration creates is never committed without it.
  */
-export async function applyMigrations(pool: pg.Pool, dir: string): Promise<MigrationRunResult> {
+export async function applyMigrations(pool: pg.Pool, dir: string, inEachTransaction?: string): Promise<MigrationRunResult> {
   const client = await pool.connect();
   const result: MigrationRunResult = { applied: [], alreadyApplied: [] };
 
@@ -164,6 +167,7 @@ export async function applyMigrations(pool: pg.Pool, dir: string): Promise<Migra
         try {
           await client.query('BEGIN');
           await client.query(sql);
+          if (inEachTransaction) await client.query(inEachTransaction);
           await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [file]);
           await client.query('COMMIT');
           result.applied.push(file);

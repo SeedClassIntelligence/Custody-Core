@@ -154,6 +154,9 @@ describe('Code step on the server: setup, lockout after 5 wrong codes, kept in t
     expect((await api(running.base, pw, '/projects')).status).toBe(200);
     expect((await mfaStatus(running.base, pw)).body).toEqual({ enrolled: true, verified: true, locked_until: null, needs_reset: false });
     expect(await accountActions(pw.userId)).toEqual(['account.second_factor_enrolled']);
+    // the actor is the person's creator record, as in project events
+    const creatorId = (await adminDb.query('SELECT id FROM creator WHERE identity_id = $1', [pw.userId])).rows[0].id;
+    expect((await adminDb.query('SELECT actor_type, actor_id FROM account_event WHERE account_id = $1', [pw.userId])).rows[0]).toEqual({ actor_type: 'creator', actor_id: creatorId });
 
     // Once an authenticator is verified, nobody can set up another one (including someone with only the password).
     const other = await signIn(pw.email);
@@ -291,15 +294,37 @@ describe('Code step on the server: setup, lockout after 5 wrong codes, kept in t
     expect((await verifyCode(running.base, p.fresh, wrong)).status).toBe(429);
   });
 
-  it('a right code clears the count: 4 wrong, 1 right, then 1 wrong is not a lock', async () => {
-    const p = await personWithFreshSession('reset');
+  it('a right code does not wipe out recent wrong codes: 4 wrong, 1 right, then 1 wrong within 15 minutes is a lock', async () => {
+    const p = await personWithFreshSession('strict');
     const wrong = wrongCodeFor(p.secret);
     for (let i = 0; i < MAX_WRONG - 1; i++) expect((await verifyCode(running.base, p.fresh, wrong)).status).toBe(422);
     expect((await verifyCode(running.base, p.fresh, codeAt(p.secret, 1))).status).toBe(200);
     const later = await signIn(p.email);
-    const r = await verifyCode(running.base, later, wrongCodeFor(p.secret));
-    expect(r.status).toBe(422);
-    expect(r.body.attempts_left).toBe(MAX_WRONG - 1);
+    expect((await verifyCode(running.base, later, wrongCodeFor(p.secret))).status).toBe(429);
+  });
+
+  it('an account recorded at deploy time as having an old authenticator stays blocked, even once Supabase no longer shows it', async () => {
+    // (On the hosted project, migration 005 fills mfa_legacy_reset from auth.mfa_factors; tests/data_api_exposure
+    // proves that on the real Supabase image. Here the row is added directly.)
+    const pw = await signUp(uniqueEmail('snapshot-http'));
+    const started = await enrollCode(running.base, pw); // a setup begun before the deploy
+    await adminDb.query('INSERT INTO mfa_legacy_reset (identity_id) VALUES ($1)', [pw.userId]);
+    expect((await mfaStatus(running.base, pw)).body.needs_reset).toBe(true);
+    const enroll = await api(running.base, pw, '/mfa/enroll', { method: 'POST', body: {} });
+    expect(enroll.status).toBe(409);
+    expect(enroll.body.required).toBe('operator_reset');
+    // finishing the half-done setup is refused too
+    const finish = await verifyCode(running.base, pw, codeAt(started.secret));
+    expect(finish.status).toBe(409);
+    expect(finish.body.required).toBe('operator_reset');
+    expect((await api(running.base, pw, '/projects')).status).toBe(403);
+    // the app's own database account cannot clear it
+    await expect(getDbPool()!.query('UPDATE mfa_legacy_reset SET cleared_at = now() WHERE identity_id = $1', [pw.userId])).rejects.toThrow(/permission denied/);
+    await expect(getDbPool()!.query('DELETE FROM mfa_legacy_reset WHERE identity_id = $1', [pw.userId])).rejects.toThrow(/permission denied/);
+
+    // The operator clears it; then setup works.
+    await adminDb.query('UPDATE mfa_legacy_reset SET cleared_at = now() WHERE identity_id = $1', [pw.userId]);
+    expect((await verifyCode(running.base, pw, codeAt(started.secret))).status).toBe(200);
   });
 
   it('a stored key moved to another authenticator row of the same person does not decrypt (error, not a pass)', async () => {

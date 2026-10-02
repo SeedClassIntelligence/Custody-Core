@@ -123,7 +123,7 @@ Actions written so far:
 
 | action | actor | payload |
 |---|---|---|
-| `account.second_factor_enrolled` | `creator` (the user id) | `{ factor_id }` |
+| `account.second_factor_enrolled` | `creator` (the person's `creator.id`) | `{ factor_id }` |
 | `account.second_factor_locked` | `system` / `second-factor-guard` | `{ factor_id, wrong_codes, window_minutes, locked_minutes, locked_until }` |
 
 The same limits apply as for project events: deleting the newest events is not detected, and the table owner
