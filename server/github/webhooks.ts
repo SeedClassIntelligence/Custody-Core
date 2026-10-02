@@ -56,8 +56,14 @@ export async function githubWebhook(req: Request, res: Response) {
   const action = typeof payload?.action === 'string' ? payload.action.slice(0, 100) : null;
 
   try {
+    // A delivery already handled is answered at once, before GitHub is asked anything.
+    if ((await db.query('SELECT 1 FROM github_webhook_delivery WHERE delivery_id = $1', [deliveryId])).rowCount) {
+      return res.status(200).json({ ok: true, duplicate: true });
+    }
     // 1. Decide what (if anything) this delivery could change, from our own record. Short queries only.
     const plan = await planFor(db, event, action, installationId, payload);
+    // The moment GitHub is asked (database clock), so an older answer never overwrites a newer one.
+    const askedAt: Date = (await db.query('SELECT clock_timestamp() AS t')).rows[0].t;
     // 2. Ask GitHub what is true now, holding no database connection while GitHub answers.
     const githubNow = plan.kind === 'installation' ? await installationNow(config, installationId!) : plan.kind === 'repository' ? await repositoryNow(config, installationId!, plan.repoId) : null;
     // 3. One short transaction: handle each delivery id once, compare with what is stored, record real changes.
@@ -72,9 +78,9 @@ export async function githubWebhook(req: Request, res: Response) {
       }
       const outcome =
         plan.kind === 'installation'
-          ? await applyInstallation(client, installationId!, githubNow as Installation, event, action, payload)
+          ? await applyInstallation(client, installationId!, githubNow as Installation, askedAt, event, action, payload)
           : plan.kind === 'repository'
-            ? await applyRepository(client, installationId!, plan.repoId, githubNow as RepoNow, payload)
+            ? await applyRepository(client, installationId!, plan.repoId, githubNow as RepoNow, askedAt, payload)
             : plan.outcome;
       await client.query('INSERT INTO github_webhook_delivery (delivery_id, event, action, installation_id, outcome) VALUES ($1, $2, $3, $4, $5)', [
         deliveryId,
@@ -156,9 +162,21 @@ async function repositoryNow(config: GitHubConfig, installationId: number, repoI
   }
 }
 
-async function applyInstallation(client: import('pg').PoolClient, installationId: number, now: Installation, event: string, action: string | null, payload: any): Promise<string> {
-  const known = (await client.query('SELECT id, creator_id, account_login, status FROM github_installation WHERE installation_id = $1 FOR UPDATE', [installationId])).rows[0];
+async function applyInstallation(
+  client: import('pg').PoolClient,
+  installationId: number,
+  now: Installation,
+  askedAt: Date,
+  event: string,
+  action: string | null,
+  payload: any
+): Promise<string> {
+  const known = (
+    await client.query('SELECT id, creator_id, account_login, status, status_asked_at FROM github_installation WHERE installation_id = $1 FOR UPDATE', [installationId])
+  ).rows[0];
   if (!known) return 'installation not linked to a creator';
+  if (new Date(known.status_asked_at) > askedAt) return 'ignored: a newer answer from GitHub is already recorded';
+  await client.query('UPDATE github_installation SET status_asked_at = $2 WHERE id = $1', [known.id, askedAt]);
   const identity = (await client.query('SELECT identity_id FROM creator WHERE id = $1', [known.creator_id])).rows[0]?.identity_id as string;
   const sender = typeof payload?.sender?.login === 'string' ? payload.sender.login : null;
   const changes: string[] = [];
@@ -198,14 +216,16 @@ async function applyInstallation(client: import('pg').PoolClient, installationId
  * What GitHub reports now, compared with what was last recorded. Only a real difference is recorded, so the same
  * webhook sent again (or an old one) adds nothing. The webhook's own words are not used as facts.
  */
-async function applyRepository(client: import('pg').PoolClient, installationId: number, repoId: number, now: RepoNow, payload: any): Promise<string> {
+async function applyRepository(client: import('pg').PoolClient, installationId: number, repoId: number, now: RepoNow, askedAt: Date, payload: any): Promise<string> {
   const ours = (
-    await client.query('SELECT id, project_id, full_name, github_state FROM repository WHERE github_repo_id = $1 AND installation_id = $2 FOR UPDATE', [
-      String(repoId),
-      installationId
-    ])
+    await client.query(
+      'SELECT id, project_id, full_name, github_state, github_state_asked_at FROM repository WHERE github_repo_id = $1 AND installation_id = $2 FOR UPDATE',
+      [String(repoId), installationId]
+    )
   ).rows[0];
   if (!ours) return 'not one of our repositories';
+  if (ours.github_state_asked_at && new Date(ours.github_state_asked_at) > askedAt) return 'ignored: a newer answer from GitHub is already recorded';
+  await client.query('UPDATE repository SET github_state_asked_at = $2 WHERE id = $1', [ours.id, askedAt]);
   const sender = typeof payload?.sender?.login === 'string' ? payload.sender.login : null;
   const before = ours.github_state ?? { exists: true, full_name: ours.full_name, private: true, archived: false };
   const changes: string[] = [];

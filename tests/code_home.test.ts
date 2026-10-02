@@ -252,7 +252,7 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
 
     const row = (await adminDb.query('SELECT * FROM github_installation WHERE installation_id = $1', [installationId])).rows[0];
     expect(row).toMatchObject({ account_login: org, status: 'active' });
-    expect(Object.keys(row).sort()).toEqual(['account_id', 'account_login', 'connected_at', 'creator_id', 'id', 'installation_id', 'owner_id', 'owner_login', 'status', 'status_changed_at']);
+    expect(Object.keys(row).sort()).toEqual(['account_id', 'account_login', 'connected_at', 'creator_id', 'id', 'installation_id', 'owner_id', 'owner_login', 'status', 'status_asked_at', 'status_changed_at']);
     // the GitHub user GitHub confirmed as an owner, by permanent id
     expect({ login: row.owner_login, id: Number(row.owner_id) }).toEqual({ login: 'alice', id: gh.userId('alice') });
 
@@ -1270,6 +1270,138 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
     } finally {
       gh.refuseForkingChange = false;
     }
+  });
+
+  // ---------------------------------------------------------------- sixth review
+
+  it('an older answer from GitHub that arrives late never overwrites a newer one (a public repository is not recorded as private)', async () => {
+    const c = await connectedCreator('late', { plan: 'team' });
+    const projectId = await claim(c.session, `Late ${randomBytes(2).toString('hex')}`);
+    const made = (await api(running.base, c.session, `/projects/${projectId}/code-home`, { method: 'POST', body: {} })).body.repositories[0];
+    const repo = gh.repos.get(made.full_name)!;
+    const body = (action: string) => ({ action, installation: { id: c.installationId }, repository: { id: made.github_repo_id, full_name: made.full_name }, sender: { login: 'x' } });
+    repo.private = false;
+    expect(((await (await deliver('repository', body('publicized'))).json()) as any).outcome).toBe('recorded publicized');
+    // It is made private again; this webhook's answer from GitHub ("private") arrives late...
+    repo.private = true;
+    gh.lateRepositoryAnswerMs = 2500;
+    const slow = deliver('repository', body('privatized'));
+    await new Promise((r) => setTimeout(r, 400));
+    gh.lateRepositoryAnswerMs = 0;
+    // ...meanwhile it is made public again, and that newer answer is recorded first.
+    repo.private = false;
+    expect(((await (await deliver('repository', body('publicized'))).json()) as any).outcome).toBe('no change (GitHub reports the same as last recorded)');
+    expect(((await (await slow).json()) as any).outcome).toBe('ignored: a newer answer from GitHub is already recorded');
+    const stored = (await adminDb.query('SELECT github_state FROM repository WHERE project_id = $1', [projectId])).rows[0].github_state;
+    expect(stored.private).toBe(false); // what GitHub reports now
+    const actions = (await adminDb.query('SELECT action FROM event WHERE project_id = $1 ORDER BY seq', [projectId])).rows.map((x) => x.action);
+    expect(actions).toEqual(['project.claimed', 'repository.created', 'repository.publicized_on_github']);
+  });
+
+  it('an older answer about the connection that arrives late never overwrites a newer one (a suspended app is not recorded as working)', async () => {
+    const c = await connectedCreator('lateinst');
+    const body = (action: string) => ({ action, installation: { id: c.installationId, account: { login: c.org, id: gh.orgs.get(c.org)!.id } }, sender: { login: 'x' } });
+    gh.suspend(c.installationId, true);
+    expect(((await (await deliver('installation', body('suspend'))).json()) as any).outcome).toBe('connection suspended');
+    // The app is unsuspended; this webhook's answer from GitHub ("working") arrives late...
+    gh.suspend(c.installationId, false);
+    gh.lateInstallationAnswerMs = 2500;
+    const slow = deliver('installation', body('unsuspend'));
+    await new Promise((r) => setTimeout(r, 400));
+    gh.lateInstallationAnswerMs = 0;
+    // ...meanwhile it is suspended again, and that newer answer is recorded first.
+    gh.suspend(c.installationId, true);
+    expect(((await (await deliver('installation', body('suspend'))).json()) as any).outcome).toBe('no change (GitHub reports suspended)');
+    expect(((await (await slow).json()) as any).outcome).toBe('ignored: a newer answer from GitHub is already recorded');
+    const row = (await adminDb.query('SELECT status FROM github_installation WHERE installation_id = $1', [c.installationId])).rows[0];
+    expect(row.status).toBe('suspended'); // what GitHub reports now
+    const connection = (await api(running.base, c.session, '/github/connection')).body;
+    expect(JSON.stringify(connection)).toContain('suspended');
+    gh.suspend(c.installationId, false);
+  });
+
+  it('uploads over the limit are refused before their body is read: one per creator, two in total', async () => {
+    const http = await import('node:http');
+    const [a, b, c2, d] = await Promise.all(['upA', 'upB', 'upC', 'upD'].map((l) => connectedCreator(l)));
+    const projects = await Promise.all([a, b, c2, d, a].map((x, i) => claim(x.session, `Upload ${i} ${randomBytes(2).toString('hex')}`)));
+    const port = Number(new URL(running.base).port);
+    /** Starts an upload that announces 40 MB but sends only the first bytes, and keeps it open. */
+    const hold = (session: AuthSession, projectId: string) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port,
+        method: 'POST',
+        path: `/api/v1/projects/${projectId}/code-home`,
+        headers: { Authorization: `Bearer ${session.accessToken}`, 'Content-Type': 'application/zip', 'Content-Length': String(40 * 1024 * 1024) }
+      });
+      req.on('error', () => undefined);
+      req.write(Buffer.alloc(1024));
+      return req;
+    };
+    /** An upload that announces 40 MB and sends nothing: answered before any body is read? */
+    const quickAnswer = (session: AuthSession, projectId: string) =>
+      new Promise<number>((resolve, reject) => {
+        const req = http.request({
+          host: '127.0.0.1',
+          port,
+          method: 'POST',
+          path: `/api/v1/projects/${projectId}/code-home`,
+          headers: { Authorization: `Bearer ${session.accessToken}`, 'Content-Type': 'application/zip', 'Content-Length': String(40 * 1024 * 1024) }
+        });
+        const timer = setTimeout(() => reject(new Error('no answer without the body')), 5000);
+        req.on('response', (r) => {
+          clearTimeout(timer);
+          r.resume();
+          resolve(r.statusCode!);
+          req.destroy();
+        });
+        req.on('error', () => undefined);
+        req.flushHeaders();
+      });
+    const heldA = hold(a.session, projects[0]);
+    await new Promise((r) => setTimeout(r, 1500)); // its login check is done and it holds a slot
+    expect(await quickAnswer(a.session, projects[4])).toBe(429); // same creator, second upload
+    const heldB = hold(b.session, projects[1]);
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(await quickAnswer(d.session, projects[3])).toBe(429); // two in total are already being received
+    heldA.destroy();
+    heldB.destroy();
+    await new Promise((r) => setTimeout(r, 500)); // slots are given back when those connections close
+    const z = new JSZip();
+    z.file('ok.txt', 'ok');
+    const ok = await postZip(c2.session, projects[2], await z.generateAsync({ type: 'nodebuffer' }));
+    expect(ok.status).toBe(201);
+  }, 60_000);
+
+  it("a creator's upload waiting on a slow GitHub does not block other creators' uploads", async () => {
+    const [a, b] = await Promise.all([connectedCreator('slowA'), connectedCreator('slowB')]);
+    const [pa, pa2, pb] = await Promise.all([claim(a.session, `Slow A ${randomBytes(2).toString('hex')}`), claim(a.session, `Slow A2 ${randomBytes(2).toString('hex')}`), claim(b.session, `Slow B ${randomBytes(2).toString('hex')}`)]);
+    const z = new JSZip();
+    z.file('x.txt', 'x');
+    const zip = await z.generateAsync({ type: 'nodebuffer' });
+    gh.slowInstallationReadMs = 3000;
+    try {
+      const first = postZip(a.session, pa, zip);
+      await new Promise((r) => setTimeout(r, 800)); // A's upload is unpacked, has given back its upload slot, and now waits on GitHub
+      const t0 = Date.now();
+      const second = postZip(a.session, pa2, zip); // A's next upload is received too: the slot covers receiving, not waiting on GitHub
+      const fromB = postZip(b.session, pb, zip);
+      const statuses = await Promise.all([first, second, fromB].map(async (p) => (await p).status));
+      expect(statuses).toEqual([201, 201, 201]);
+      expect(Date.now() - t0).toBeLessThan(15_000);
+    } finally {
+      gh.slowInstallationReadMs = 0;
+    }
+  }, 60_000);
+
+  it('the same delivery sent again is answered as a duplicate without asking GitHub anything', async () => {
+    const c = await connectedCreator('dupcalls');
+    const body = { action: 'new_permissions_accepted', installation: { id: c.installationId, account: { login: c.org, id: gh.orgs.get(c.org)!.id } }, sender: { login: 'x' } };
+    const id = randomUUID();
+    expect((await deliver('installation', body, { id })).status).toBe(200);
+    const before = gh.calls.length;
+    for (let i = 0; i < 5; i++) expect(((await (await deliver('installation', body, { id })).json()) as any).duplicate).toBe(true);
+    expect(gh.calls.length).toBe(before);
   });
 
   // ---------------------------------------------------------------- tokens are never kept

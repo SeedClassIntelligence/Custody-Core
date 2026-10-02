@@ -36,9 +36,39 @@ import {
 
 const BUSY_MINUTES = 10;
 
-// Uploads are unpacked in memory (up to 100 MB each), so only a few at a time; others are asked to retry.
+// Uploads are received and unpacked in memory (up to 50 MB in, 100 MB unpacked), so only a few at a time, and
+// one per creator. The slot is taken BEFORE the body is read (uploadGate, ahead of the body parser), and given
+// back as soon as the files are unpacked and the commit is prepared on disk, not while waiting on GitHub.
 const MAX_UPLOADS_AT_ONCE = 2;
 let uploadsInProgress = 0;
+const uploadsByCreator = new Map<string, number>();
+
+export function uploadGate(req: Request, res: Response, next: NextFunction) {
+  if (!req.is('application/zip')) return next();
+  const creatorId = creatorOf(res).id;
+  if (uploadsByCreator.get(creatorId)) {
+    res.set('Connection', 'close');
+    return res.status(429).json({ error: 'You already have an upload in progress. Try again when it has finished.' });
+  }
+  if (uploadsInProgress >= MAX_UPLOADS_AT_ONCE) {
+    res.set('Connection', 'close');
+    return res.status(429).json({ error: 'Other uploads are being processed. Try again in a moment.' });
+  }
+  uploadsInProgress++;
+  uploadsByCreator.set(creatorId, 1);
+  let held = true;
+  const release = () => {
+    if (!held) return;
+    held = false;
+    uploadsInProgress--;
+    uploadsByCreator.delete(creatorId);
+  };
+  res.locals.releaseUpload = release;
+  res.on('close', release);
+  next();
+}
+
+const releaseUpload = (res: Response) => (res.locals.releaseUpload as (() => void) | undefined)?.();
 
 function describe(err: any) {
   // GitHub's own words, including its detailed reasons (for example "name already exists on this account").
@@ -92,6 +122,14 @@ async function markBusy(projectId: string, creatorId: string, res: Response): Pr
   return null;
 }
 
+/** Extends this operation's busy mark (only its own), so a slow operation is never overtaken by a second one. */
+async function refreshBusy(projectId: string, token: string) {
+  await getDbPool()!.query(
+    'UPDATE project SET code_home_busy_until = now() + make_interval(mins => $3) WHERE id = $1 AND code_home_busy_token = $2',
+    [projectId, token, BUSY_MINUTES]
+  );
+}
+
 async function clearBusy(projectId: string, token: string) {
   try {
     await getDbPool()!.query('UPDATE project SET code_home_busy_until = NULL, code_home_busy_token = NULL WHERE id = $1 AND code_home_busy_token = $2', [projectId, token]);
@@ -125,7 +163,6 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
   }
 
   let busy: string | null = null;
-  let counted = false;
   let prepared: PreparedCommit | null = null;
   // Every answer given while the project is marked busy clears the mark first, so a follow-up request is not
   // told "already in progress" by an operation that has finished.
@@ -138,16 +175,21 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
     const project = (await db.query('SELECT id, name FROM project WHERE id = $1 AND creator_id = $2', [projectId, creator.id])).rows[0];
     if (!project) return res.status(404).json({ error: 'Project not found.' });
 
-    let files: Awaited<ReturnType<typeof readZip>> | null = null;
+    // The upload is unpacked and its first commit made locally right away, before anything is created on
+    // GitHub, so a problem with the files (a name git refuses, an object GitHub would reject) is found while
+    // nothing exists yet. Then the upload's memory and slot are given back.
+    let uploadedFiles = 0;
     if (isZip) {
-      if (uploadsInProgress >= MAX_UPLOADS_AT_ONCE) return res.status(429).json({ error: 'Other uploads are being processed. Try again in a moment.' });
-      uploadsInProgress++;
-      counted = true;
       try {
-        files = await readZip(req.body);
+        const files = await readZip(req.body);
+        uploadedFiles = files.length;
+        prepared = await prepareInitialCommit(files, 'main');
       } catch (err) {
         if (err instanceof BadUpload) return res.status(400).json({ error: err.message });
         throw err;
+      } finally {
+        req.body = null;
+        releaseUpload(res);
       }
     }
 
@@ -175,24 +217,16 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
     if (splitCore) wanted.push({ name: `${base}-core`, role: 'core' });
     const missing = wanted.filter((w) => !existingRoles.has(w.role));
     if (missing.length === 0) return respond(409, { error: 'This project already has its repositories.' });
-    if (files && existingRoles.has('main')) {
+    if (prepared && existingRoles.has('main')) {
       return respond(400, { error: 'Existing code can only be added when the main repository is created; it already exists.' });
-    }
-
-    // The first commit is made locally before anything is created on GitHub, so a problem with the files
-    // (a name git refuses, an object GitHub would reject) is found while nothing exists yet.
-    if (files) {
-      try {
-        prepared = await prepareInitialCommit(files, 'main');
-      } catch (err) {
-        if (err instanceof BadUpload) return respond(400, { error: err.message });
-        throw err;
-      }
     }
 
     const results: RepositoryResult[] = [];
     for (const want of missing) {
       let result: RepositoryResult;
+      // Keep the busy mark alive across long steps, and note when GitHub is asked about this repository.
+      await refreshBusy(projectId, busy!);
+      const askedAt: Date = (await db.query('SELECT clock_timestamp() AS t')).rows[0].t;
       try {
         result = await createLockedRepository(
           config,
@@ -202,7 +236,7 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
           want.role,
           want.role === 'core' ? `${project.name} (core)` : project.name,
           want.role === 'main' ? prepared : null,
-          want.role === 'main' && files ? files.length : 0,
+          want.role === 'main' ? uploadedFiles : 0,
           projectId,
           isRecorded
         );
@@ -228,8 +262,8 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
         await client.query('BEGIN');
         const row = (
           await client.query(
-            `INSERT INTO repository (project_id, github_repo_id, full_name, default_branch, is_core, installation_id, github_state, locked_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, CASE WHEN $8 THEN now() END) RETURNING id`,
+            `INSERT INTO repository (project_id, github_repo_id, full_name, default_branch, is_core, installation_id, github_state, locked_at, github_state_asked_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, CASE WHEN $8 THEN now() END, $9) RETURNING id`,
             [
               projectId,
               String(result.github_repo_id),
@@ -238,7 +272,8 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
               result.role === 'core',
               home.installationId,
               JSON.stringify(result.github_state ?? null),
-              fullyLocked
+              fullyLocked,
+              askedAt
             ]
           )
         ).rows[0];
@@ -274,7 +309,7 @@ export async function createCodeHome(req: Request, res: Response, next: NextFunc
     next(err);
   } finally {
     prepared?.cleanup();
-    if (counted) uploadsInProgress--;
+    releaseUpload(res);
     if (busy) await clearBusy(projectId, busy);
   }
 }
@@ -294,7 +329,6 @@ export async function relockRepository(req: Request, res: Response, next: NextFu
   const isZip = Buffer.isBuffer(req.body);
 
   let busy: string | null = null;
-  let counted = false;
   let prepared: PreparedCommit | null = null;
   const respond = async (status: number, body: unknown) => {
     if (busy) await clearBusy(projectId, busy);
@@ -311,18 +345,19 @@ export async function relockRepository(req: Request, res: Response, next: NextFu
     ).rows[0];
     if (!repo) return res.status(404).json({ error: 'Repository not found.' });
 
-    let files: Awaited<ReturnType<typeof readZip>> | null = null;
+    let uploadedFiles = 0;
     if (isZip) {
       if (repo.is_core) return res.status(400).json({ error: 'Existing code goes into the main repository.' });
-      if (uploadsInProgress >= MAX_UPLOADS_AT_ONCE) return res.status(429).json({ error: 'Other uploads are being processed. Try again in a moment.' });
-      uploadsInProgress++;
-      counted = true;
       try {
-        files = await readZip(req.body);
+        const files = await readZip(req.body);
+        uploadedFiles = files.length;
         prepared = await prepareInitialCommit(files, repo.default_branch || 'main');
       } catch (err) {
         if (err instanceof BadUpload) return res.status(400).json({ error: err.message });
         throw err;
+      } finally {
+        req.body = null;
+        releaseUpload(res);
       }
     }
 
@@ -337,6 +372,7 @@ export async function relockRepository(req: Request, res: Response, next: NextFu
 
     // Where the repository is now, according to GitHub (it may have been renamed), and whether it has commits.
     // The token covers this one repository only.
+    const askedAt: Date = (await db.query('SELECT clock_timestamp() AS t')).rows[0].t;
     const now = await withInstallationToken(
       config,
       home.installationId,
@@ -356,6 +392,7 @@ export async function relockRepository(req: Request, res: Response, next: NextFu
     if (prepared && !now.empty) return respond(409, { error: 'GitHub reports this repository already has commits.' });
 
     const [, name] = String(now.full_name).split('/');
+    await refreshBusy(projectId, busy!);
     const result: RepositoryResult = await finishRepository(
       config,
       home.installationId,
@@ -364,7 +401,7 @@ export async function relockRepository(req: Request, res: Response, next: NextFu
       now.full_name,
       String(now.default_branch || repo.default_branch || 'main'),
       prepared,
-      files ? files.length : 0
+      uploadedFiles
     );
     if (!result.github_repo_id) Object.assign(result, { github_repo_id: Number(now.id), html_url: String(now.html_url) });
     const fullyLocked = isFullyLocked(result);
@@ -373,9 +410,12 @@ export async function relockRepository(req: Request, res: Response, next: NextFu
     try {
       await client.query('BEGIN');
       await client.query(
-        `UPDATE repository SET full_name = $2, github_state = COALESCE($4::jsonb, github_state),
+        `UPDATE repository SET full_name = $2,
+                -- GitHub's answer replaces the stored one only if no newer answer was recorded meanwhile.
+                github_state = CASE WHEN $4::jsonb IS NOT NULL AND (github_state_asked_at IS NULL OR github_state_asked_at <= $5) THEN $4::jsonb ELSE github_state END,
+                github_state_asked_at = CASE WHEN $4::jsonb IS NOT NULL AND (github_state_asked_at IS NULL OR github_state_asked_at <= $5) THEN $5 ELSE github_state_asked_at END,
                 locked_at = CASE WHEN $3 THEN COALESCE(locked_at, now()) END, updated_at = now() WHERE id = $1`,
-        [repo.id, result.full_name, fullyLocked, result.github_state ? JSON.stringify(result.github_state) : null]
+        [repo.id, result.full_name, fullyLocked, result.github_state ? JSON.stringify(result.github_state) : null, askedAt]
       );
       await insertEvent(
         {
@@ -403,7 +443,7 @@ export async function relockRepository(req: Request, res: Response, next: NextFu
     next(err);
   } finally {
     prepared?.cleanup();
-    if (counted) uploadsInProgress--;
+    releaseUpload(res);
     if (busy) await clearBusy(projectId, busy);
   }
 }

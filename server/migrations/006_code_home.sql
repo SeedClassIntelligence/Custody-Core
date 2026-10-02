@@ -13,6 +13,7 @@ CREATE TABLE github_installation (
   owner_id BIGINT NOT NULL,               -- the GitHub user GitHub confirmed as an owner when connecting (permanent id)
   owner_login TEXT NOT NULL,              -- that user's login, as last seen
   status TEXT NOT NULL CHECK (status IN ('active', 'suspended', 'removed')),
+  status_asked_at TIMESTAMPTZ NOT NULL DEFAULT now(),  -- when GitHub was asked for that status (database clock)
   connected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -43,6 +44,8 @@ CREATE TABLE github_webhook_delivery (
 -- reported about them (so a webhook saying "something changed" is only recorded when GitHub's answer differs).
 ALTER TABLE repository ADD COLUMN installation_id BIGINT;
 ALTER TABLE repository ADD COLUMN github_state JSONB;
+-- When GitHub was asked for that state (database clock): an older answer never overwrites a newer one.
+ALTER TABLE repository ADD COLUMN github_state_asked_at TIMESTAMPTZ;
 
 -- One code-home operation per project at a time, without holding a database connection while GitHub works.
 -- Set while repositories are being created or re-locked; expires on its own if the server stops part way.

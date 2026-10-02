@@ -86,6 +86,10 @@ export interface StandIn {
   slowInstallationReadMs: number;
   /** Refuse changing allow_forking (as an organization-level rule can). */
   refuseForkingChange: boolean;
+  /** Read a repository's state when asked, but deliver the answer this much later (an answer that arrives late). */
+  lateRepositoryAnswerMs: number;
+  /** Read an installation's state when asked, but deliver the answer this much later (an answer that arrives late). */
+  lateInstallationAnswerMs: number;
   /** Report file trees as truncated, as GitHub does for very large trees. */
   truncateTrees: boolean;
   /** Create the repository but lose GitHub's answer (502), as when a response times out. */
@@ -201,7 +205,9 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       const inst = s.installations.get(Number(match[1]));
       if (!inst || inst.appId !== s.appId) return send(res, 404, { message: 'Not Found' });
       const org = s.orgs.get(inst.org)!;
-      return send(res, 200, { id: Number(match[1]), app_id: Number(inst.appId), suspended_at: inst.suspendedAt ?? null, account: { login: org.login, id: org.id, type: 'Organization' } });
+      const view = { id: Number(match[1]), app_id: Number(inst.appId), suspended_at: inst.suspendedAt ?? null, account: { login: org.login, id: org.id, type: 'Organization' } }; // the state at the moment of asking
+      if (handle.lateInstallationAnswerMs) await new Promise((r) => setTimeout(r, handle.lateInstallationAnswerMs));
+      return send(res, 200, view);
     }
     if (m === 'GET' && p === '/installation/repositories') {
       const t = instToken(req);
@@ -263,7 +269,9 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       if (!t) return send(res, 401, { message: 'Bad credentials' });
       const repo = [...s.repos.values()].find((r) => r.id === Number(match![1]));
       if (!repo || !coversRepo(t, repo.org, repo.name)) return send(res, 404, { message: 'Not Found' });
-      return send(res, 200, repoView(repo));
+      const view = repoView(repo); // the state at the moment of asking
+      if (handle.lateRepositoryAnswerMs) await new Promise((r) => setTimeout(r, handle.lateRepositoryAnswerMs));
+      return send(res, 200, view);
     }
     if (m === 'GET' && (match = /^\/user\/(\d+)$/.exec(p))) {
       if (!instToken(req)) return send(res, 401, { message: 'Bad credentials' });
@@ -487,6 +495,8 @@ export async function startGitHubStandIn(): Promise<StandIn> {
     failOrgRead: false,
     slowInstallationReadMs: 0,
     refuseForkingChange: false,
+    lateRepositoryAnswerMs: 0,
+    lateInstallationAnswerMs: 0,
     truncateTrees: false,
     appPermissions: {
       administration: 'write',

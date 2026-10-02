@@ -74,7 +74,7 @@ export interface CodeHomeStatus {
   installation: { installation_id: number; organization: string; status: 'active' | 'suspended' | 'removed'; connected_at: string; status_changed_at: string } | null;
   organization_lock: { organization: string; plan: string | null; settings: SettingResult[]; all_applied: boolean; change_error: { status: number; message: string } | null; recorded_at: string } | null;
   organization_lock_failed: { organization: string; error: { status: number | null; message: string }; recorded_at: string } | null;
-  broken: { organization: string; reason: string; by: string | null; recorded_at: string } | null;
+  broken: { organization: string; reason: string; recorded_at: string } | null;
 }
 
 export async function fetchCodeHome(): Promise<CodeHomeStatus> {

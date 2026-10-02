@@ -163,9 +163,9 @@ export const CodeHomePanel: React.FC<{ onChange?: (s: CodeHomeStatus) => void }>
           </div>
           <div>
             {status.broken
-              ? `${status.broken.reason}${status.broken.by ? ` (by ${status.broken.by})` : ''}, ${new Date(status.broken.recorded_at).toLocaleString()}.`
+              ? `${status.broken.reason}, ${new Date(status.broken.recorded_at).toLocaleString()}.`
               : `The connection to ${inst.organization} is ${inst.status}.`}{' '}
-            Custody Core can no longer act on {inst.organization}. Your repositories there are untouched.
+            Custody Core can no longer act on {inst.organization}, and has made no changes there since.
           </div>
         </div>
       )}

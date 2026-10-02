@@ -15,7 +15,7 @@ import { authenticate, creatorOf } from './server/auth';
 import { mfaRouter } from './server/mfa';
 import { githubPublicRouter, githubRouter } from './server/github/connect';
 import { githubWebhook } from './server/github/webhooks';
-import { createCodeHome, relockRepository } from './server/github/claim';
+import { createCodeHome, relockRepository, uploadGate } from './server/github/claim';
 import { verifyAccountChain } from './shared/crypto';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -224,10 +224,11 @@ const apiRouter = express.Router();
   });
 
   // "Claim it": create the project's private repositories in the creator's connected organization.
-  apiRouter.post('/projects/:id/code-home', express.raw({ type: 'application/zip', limit: '50mb' }), createCodeHome);
+  // uploadGate decides before the body is read whether an upload may proceed (one per creator, two in total).
+  apiRouter.post('/projects/:id/code-home', uploadGate, express.raw({ type: 'application/zip', limit: '50mb' }), createCodeHome);
   // Finish an existing repository's lock (and, with a zip, add code to a main repository that is still empty).
   apiRouter.param('repoId', (req, res, next, id) => (UUID.test(id) ? next() : res.status(404).json({ error: 'Repository not found.' })));
-  apiRouter.post('/projects/:id/repositories/:repoId/lock', express.raw({ type: 'application/zip', limit: '50mb' }), relockRepository);
+  apiRouter.post('/projects/:id/repositories/:repoId/lock', uploadGate, express.raw({ type: 'application/zip', limit: '50mb' }), relockRepository);
 
   // A project that does not exist and a project that belongs to someone else get the same answer,
   // so the response cannot be used to find out whether a project exists.

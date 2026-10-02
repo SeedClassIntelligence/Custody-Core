@@ -36,7 +36,11 @@ export async function codeHomeFor(config: GitHubConfig, res: Response): Promise<
     inst = await gh(config, { kind: 'app', token: appJwt(config) }, 'GET', `/app/installations/${installationId}`);
   } catch (err) {
     if (err instanceof GitHubError && err.status === 404) {
-      const changed = await db.query(`UPDATE github_installation SET status = 'removed', status_changed_at = now() WHERE id = $1 AND status <> 'removed' RETURNING id`, [row.id]);
+      const changed = await db.query(
+        `UPDATE github_installation SET status = 'removed', status_changed_at = now(), status_asked_at = clock_timestamp()
+          WHERE id = $1 AND status <> 'removed' RETURNING id`,
+        [row.id]
+      );
       if (changed.rowCount) {
         await appendAccountEvent(creator.userId, 'system', 'github-app', 'github.connection_broken', {
           installation_id: installationId,
