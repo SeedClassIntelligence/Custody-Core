@@ -1,17 +1,19 @@
+import { createHmac } from 'node:crypto';
+import pg from 'pg';
 import { generateSync } from 'otplib';
 
 /**
  * Helpers for tests that talk to a real Supabase Auth server (the local stack). Nothing here is
  * mocked: users are really created, factors really enrolled, and codes really verified.
  */
-export function authStack(): { apiUrl: string; anonKey: string } {
+export function authStack(): { apiUrl: string; anonKey: string; jwtSecret: string; dbUrl: string } {
   if (process.env.AUTH_STACK_ERROR) {
     throw new Error(`The local Supabase Auth stack is not available: ${process.env.AUTH_STACK_ERROR}`);
   }
   const apiUrl = process.env.AUTH_API_URL;
   const anonKey = process.env.AUTH_ANON_KEY;
   if (!apiUrl || !anonKey) throw new Error('AUTH_API_URL / AUTH_ANON_KEY are not set; the auth stack was not started.');
-  return { apiUrl, anonKey };
+  return { apiUrl, anonKey, jwtSecret: process.env.AUTH_JWT_SECRET ?? '', dbUrl: process.env.AUTH_DB_URL ?? '' };
 }
 
 export interface AuthSession {
@@ -112,4 +114,29 @@ export async function createMfaUser(label: string): Promise<{ session: AuthSessi
 /** The auth server's own opinion of a token. */
 export async function getUser(token: string) {
   return call('/auth/v1/user', { token });
+}
+
+const b64 = (value: object | Buffer) => Buffer.from(value instanceof Buffer ? value : JSON.stringify(value)).toString('base64url');
+
+/** Signs a token with the local stack's secret, to test how the server treats tokens it did not hand out itself. */
+export function mintToken(claims: Record<string, unknown>, header: Record<string, unknown> = { alg: 'HS256', typ: 'JWT' }): string {
+  const { jwtSecret } = authStack();
+  const signingInput = `${b64(header)}.${b64(claims)}`;
+  return `${signingInput}.${b64(createHmac('sha256', jwtSecret).update(signingInput).digest())}`;
+}
+
+/** Runs `work` against the local stack's own database (its auth tables), to set up states a real flow cannot reach. */
+export async function withAuthDb<T>(work: (client: pg.Client) => Promise<T>): Promise<T> {
+  const client = new pg.Client({ connectionString: authStack().dbUrl });
+  await client.connect();
+  try {
+    return await work(client);
+  } finally {
+    await client.end();
+  }
+}
+
+/** Ends a session on the auth server (what Sign out does). */
+export async function signOut(session: AuthSession) {
+  return call('/auth/v1/logout?scope=global', { method: 'POST', token: session.accessToken, body: {} });
 }

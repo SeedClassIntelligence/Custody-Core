@@ -74,6 +74,7 @@ async function main() {
     env: {
       ...process.env,
       NODE_ENV: 'development',
+      DISABLE_HMR: 'true', // Vite's HMR uses a fixed port; the check does not need hot reload
       PORT: String(port),
       // Point the app at the local test database only. Empty strings stop .env from supplying others.
       DATABASE_URL: database.url,

@@ -81,6 +81,8 @@ export function AuthGate({ children }: { children: (auth: AuthInfo) => React.Rea
       if (verified) return setPhase({ kind: 'challenge', factorId: verified.id });
 
       // No verified authenticator yet: drop any half-finished enrollment, then start a fresh one.
+      // Whoever holds the password at this moment becomes the owner of the authenticator, which is why
+      // the project must require confirmed email addresses (docs/LOGIN_SETUP.md).
       for (const f of factors.all.filter((x) => x.factor_type === 'totp' && x.status === 'unverified')) {
         await supabase.auth.mfa.unenroll({ factorId: f.id });
       }

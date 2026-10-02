@@ -42,6 +42,11 @@ generated with `otplib`, and the auth server verifies them. Tests never touch a 
 - If Docker is not available, only the login tests fail, with that reason; the rest of the suite still runs.
 - `npm run auth-stack:start | auth-stack:stop | auth-stack:status` control it by hand.
 
+## Deploying the database upgrade without network access
+
+`docs/deploy/README.md` has two scripts to paste into the Supabase dashboard's SQL Editor (one applies the upgrade, one
+checks it) with click-by-click steps and the result to expect from each.
+
 ## Checking a deployed database
 
 `npm run migrate` applies pending migrations as the admin role. `npm run verify-live` then checks, as the application's

@@ -38,25 +38,26 @@ function tokenPayload(token: string): Record<string, any> | null {
 }
 
 // creator.id never changes for a given login, so remember it instead of asking the database each time.
-const creatorIdByUser = new Map<string, string>();
+// The email is remembered too, so a changed email is written through to the creator row once.
+const creatorByUser = new Map<string, { id: string; email: string }>();
 
 async function ensureCreator(userId: string, email: string, displayName: string): Promise<string> {
-  const known = creatorIdByUser.get(userId);
-  if (known) return known;
+  const known = creatorByUser.get(userId);
+  if (known && known.email === email) return known.id;
 
   const db = getDbPool();
   if (!db) throw new Error('Database not connected.');
-  // First verified login creates the creator row; later logins find it. The no-op update makes
-  // RETURNING work for the existing row without changing it.
+  // First verified login creates the creator row; later logins find it by identity_id (never by email,
+  // which people change and which Supabase may hand to someone else later) and keep its email current.
   const res = await db.query(
     `INSERT INTO creator (identity_id, display_name, email)
      VALUES ($1, $2, $3)
-     ON CONFLICT (identity_id) DO UPDATE SET identity_id = EXCLUDED.identity_id
+     ON CONFLICT (identity_id) DO UPDATE SET email = EXCLUDED.email, updated_at = now()
      RETURNING id`,
     [userId, displayName, email]
   );
   const id = res.rows[0].id as string;
-  creatorIdByUser.set(userId, id);
+  creatorByUser.set(userId, { id, email });
   return id;
 }
 
@@ -92,7 +93,8 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
   }
 
   const claims = tokenPayload(token);
-  if (!user?.id || !claims || claims.sub !== user.id) {
+  // Every real login token belongs to a session. A token without one was not issued by a sign-in.
+  if (!user?.id || !claims || claims.sub !== user.id || typeof claims.session_id !== 'string' || !claims.session_id) {
     return res.status(401).json({ error: 'Your session is not valid. Sign in again.' });
   }
 
@@ -104,6 +106,14 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
     });
   }
 
+  // The email is how a creator is shown and contacted, so it must belong to this person.
+  if (!user.email || !user.email_confirmed_at) {
+    return res.status(403).json({
+      error: 'Confirm your email address before using Custody Core.',
+      required: 'confirmed_email'
+    });
+  }
+
   try {
     const email = String(user.email || '');
     const displayName = String(user.user_metadata?.full_name || user.user_metadata?.name || email.split('@')[0] || 'Creator');
@@ -111,9 +121,7 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
     res.locals.creator = { id, userId: user.id, email } satisfies AuthenticatedCreator;
     next();
   } catch (err: any) {
-    if (err?.code === '23505') {
-      return res.status(409).json({ error: 'That email address is already linked to a different login.' });
-    }
+    console.error('[auth] could not load the creator record:', err?.message ?? err);
     return res.status(500).json({ error: 'Could not load your creator record.' });
   }
 }

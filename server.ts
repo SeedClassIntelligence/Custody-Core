@@ -19,6 +19,12 @@ const __dirname = path.dirname(__filename);
 const isProduction = process.env.NODE_ENV === 'production';
 const PORT = Number(process.env.PORT) || 3000;
 
+function serverError(res: express.Response, err: any, what: string) {
+  // Internal details (database messages, stack traces) stay in the server log, not in the response.
+  console.error(`[server] ${what}:`, err?.message ?? err);
+  return res.status(500).json({ error: 'Something went wrong on the server.' });
+}
+
 export const app = express();
 app.use(express.json());
 
@@ -47,7 +53,7 @@ const apiRouter = express.Router();
     res.json({
       status: 'ok',
       service: 'Custody Core Server',
-      milestone: 'Milestone 1: Foundation, Database & Append-Only Event Log',
+      milestone: 'Milestone 2: login with required multifactor authentication',
       database: {
         status: dbStatus,
         configured: hasDb,
@@ -102,7 +108,7 @@ const apiRouter = express.Router();
         connected: true
       });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      serverError(res, err, 'listing projects');
     }
   });
 
@@ -115,10 +121,21 @@ const apiRouter = express.Router();
     }
 
     // Whatever the client sends as creator_id is ignored: the owner is the logged-in creator.
-    const { name, purpose, repositories, split_core } = req.body;
+    const { name, purpose, repositories, split_core } = req.body ?? {};
     const creatorId = creatorOf(res).id;
     if (!name || !purpose) {
       return res.status(400).json({ error: 'Project name and purpose are required.' });
+    }
+    if (typeof name !== 'string' || typeof purpose !== 'string' || name.length > 200 || purpose.length > 5000) {
+      return res.status(400).json({ error: 'Project name (up to 200 characters) and purpose (up to 5000) must be text.' });
+    }
+    if (
+      repositories !== undefined &&
+      (!Array.isArray(repositories) ||
+        repositories.length > 20 ||
+        repositories.some((r: any) => !r || typeof r.full_name !== 'string' || !r.full_name.trim() || r.full_name.length > 200))
+    ) {
+      return res.status(400).json({ error: 'repositories must be a list of up to 20 items, each with a full_name.' });
     }
 
     const client = await db.connect();
@@ -176,7 +193,7 @@ const apiRouter = express.Router();
       });
     } catch (err: any) {
       await client.query('ROLLBACK');
-      res.status(500).json({ error: err.message });
+      serverError(res, err, 'recording a project');
     } finally {
       client.release();
     }
@@ -223,7 +240,7 @@ const apiRouter = express.Router();
         connected: true
       });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      serverError(res, err, 'reading events');
     }
   });
 
@@ -249,11 +266,19 @@ const apiRouter = express.Router();
         count: result.totalEvents
       });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      serverError(res, err, 'verifying events');
     }
   });
 
 app.use('/api/v1', apiRouter);
+
+// Bad requests get a short JSON answer; nothing internal (stack traces, database messages) is sent back.
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) return next(err);
+  if (err?.type === 'entity.parse.failed') return res.status(400).json({ error: 'The request body is not valid JSON.' });
+  if (err?.type === 'entity.too.large') return res.status(413).json({ error: 'The request body is too large.' });
+  return serverError(res, err, 'unhandled error');
+});
 
 export async function startServer() {
   // Try auto-running migrations if DATABASE_URL is provided
@@ -284,8 +309,11 @@ export async function startServer() {
     });
   }
 
-  return app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Custody Core server running on http://0.0.0.0:${PORT}`);
+  // Development serves the whole source tree through Vite, so it listens on this machine only.
+  // A production deployment listens on every interface (set HOST to change either).
+  const HOST = process.env.HOST || (isProduction ? '0.0.0.0' : '127.0.0.1');
+  return app.listen(PORT, HOST, () => {
+    console.log(`Custody Core server running on http://${HOST}:${PORT}`);
   });
 }
 

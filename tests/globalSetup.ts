@@ -24,6 +24,8 @@ export async function setup() {
     const auth = ensureAuthStack();
     process.env.AUTH_API_URL = auth.apiUrl;
     process.env.AUTH_ANON_KEY = auth.anonKey;
+    process.env.AUTH_JWT_SECRET = auth.jwtSecret;
+    process.env.AUTH_DB_URL = auth.dbUrl;
   } catch (err: any) {
     process.env.AUTH_STACK_ERROR = String(err.message ?? err);
   }

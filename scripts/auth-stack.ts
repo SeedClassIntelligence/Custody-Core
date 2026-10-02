@@ -14,6 +14,10 @@ const EXCLUDE = 'studio,imgproxy,edge-runtime,logflare,vector,supavisor,realtime
 export interface AuthStackConfig {
   apiUrl: string;
   anonKey: string;
+  /** Secret of the throwaway local stack, used only by tests that mint tokens. */
+  jwtSecret: string;
+  /** Direct database URL of the local stack, used only by tests that adjust its auth data. */
+  dbUrl: string;
 }
 
 function run(args: string[]) {
@@ -39,7 +43,7 @@ export function readAuthStack(): AuthStackConfig | null {
   );
   const anonKey = env.ANON_KEY || env.PUBLISHABLE_KEY;
   if (!env.API_URL || !anonKey) return null;
-  return { apiUrl: env.API_URL, anonKey };
+  return { apiUrl: env.API_URL, anonKey, jwtSecret: env.JWT_SECRET ?? '', dbUrl: env.DB_URL ?? '' };
 }
 
 /** Starts the stack if needed (takes a few minutes the first time, while images download). */

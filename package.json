@@ -17,7 +17,8 @@
     "verify-live": "tsx scripts/verify-live-db.ts",
     "auth-stack:start": "tsx scripts/auth-stack.ts start",
     "auth-stack:stop": "tsx scripts/auth-stack.ts stop",
-    "auth-stack:status": "tsx scripts/auth-stack.ts status"
+    "auth-stack:status": "tsx scripts/auth-stack.ts status",
+    "build:deploy-sql": "tsx scripts/build-deploy-sql.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.2",
