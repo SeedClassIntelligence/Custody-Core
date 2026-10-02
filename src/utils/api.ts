@@ -73,6 +73,7 @@ export interface CodeHomeStatus {
   configured: boolean;
   installation: { installation_id: number; organization: string; status: 'active' | 'suspended' | 'removed'; connected_at: string; status_changed_at: string } | null;
   organization_lock: { organization: string; plan: string | null; settings: SettingResult[]; all_applied: boolean; change_error: { status: number; message: string } | null; recorded_at: string } | null;
+  organization_lock_failed: { organization: string; error: { status: number | null; message: string }; recorded_at: string } | null;
   broken: { organization: string; reason: string; by: string | null; recorded_at: string } | null;
 }
 
@@ -124,4 +125,13 @@ export async function relockOrganization(): Promise<void> {
   const res = await authFetch('/api/v1/github/organization/lock', { method: 'POST' });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error || `Could not check with GitHub (server returned ${res.status}).`);
+}
+
+/** Re-applies whatever part of a repository's lock is missing (and, with a zip, adds code to an empty main repository). */
+export async function finishRepositoryLock(projectId: string, repoId: string, zip: File | null): Promise<void> {
+  const res = zip
+    ? await authFetch(`/api/v1/projects/${projectId}/repositories/${repoId}/lock`, { method: 'POST', headers: { 'Content-Type': 'application/zip' }, body: zip })
+    : await authFetch(`/api/v1/projects/${projectId}/repositories/${repoId}/lock`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `GitHub could not be checked (server returned ${res.status}).`);
 }

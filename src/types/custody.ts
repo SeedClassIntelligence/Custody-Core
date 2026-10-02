@@ -137,6 +137,7 @@ export type EventAction =
   | 'repository.locked'
   | 'repository.created'
   | 'repository.creation_failed'
+  | 'repository.lock_checked'
   | 'repository.deleted_on_github'
   | 'repository.renamed_on_github'
   | 'repository.transferred_on_github'

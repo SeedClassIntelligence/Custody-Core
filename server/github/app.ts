@@ -127,7 +127,7 @@ export async function gh(config: GitHubConfig, auth: { kind: 'app' | 'token'; to
   return parsed;
 }
 
-export type Permissions = Partial<Record<'administration' | 'contents' | 'pull_requests' | 'metadata' | 'organization_administration', 'read' | 'write'>>;
+export type Permissions = Partial<Record<'administration' | 'contents' | 'pull_requests' | 'metadata' | 'organization_administration' | 'members', 'read' | 'write'>>;
 
 /**
  * A short-lived installation token for one operation, narrowed to `repositories` (names in the installation's

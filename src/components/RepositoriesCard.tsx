@@ -1,12 +1,58 @@
 import React, { useState } from 'react';
 import { FolderLock, Loader2, CheckCircle2, XCircle, Upload } from 'lucide-react';
 import { CustodyEvent, Project } from '../types/custody';
-import { CodeHomeStatus, createCodeHomeRepositories } from '../utils/api';
+import { CodeHomeStatus, createCodeHomeRepositories, finishRepositoryLock } from '../utils/api';
 import { SettingsList } from './CodeHomePanel';
 
-/** What GitHub reported for each repository, read from the project's own event log. */
+const CHANGE_TEXT: Record<string, string> = {
+  'repository.deleted_on_github': 'GitHub reports this repository was deleted',
+  'repository.transferred_on_github': 'GitHub reports this repository was moved out of the organization',
+  'repository.publicized_on_github': 'GitHub reports this repository was made public',
+  'repository.privatized_on_github': 'GitHub reports this repository was made private again',
+  'repository.renamed_on_github': 'GitHub reports this repository was renamed',
+  'repository.archived_on_github': 'GitHub reports this repository was archived',
+  'repository.unarchived_on_github': 'GitHub reports this repository was unarchived'
+};
+
+/**
+ * Each repository as the project's own event log describes it: what GitHub reported when it was created or last
+ * checked, and every change GitHub has reported since.
+ */
 function repositoryRecords(events: CustodyEvent[]) {
-  return events.filter((e) => e.action === 'repository.created').map((e) => e.payload as any);
+  const byRepo = new Map<string, { id: string; latest: any; checkedAt: string; checked: boolean; initialCommit: any; changes: CustodyEvent[] }>();
+  for (const e of events) {
+    if (e.subject_type !== 'repository') continue;
+    const p = e.payload as any;
+    if (e.action === 'repository.created' || e.action === 'repository.lock_checked') {
+      const prev = byRepo.get(e.subject_id);
+      byRepo.set(e.subject_id, {
+        id: e.subject_id,
+        latest: p,
+        checkedAt: e.timestamp,
+        checked: e.action === 'repository.lock_checked',
+        initialCommit: p.initial_commit ?? prev?.initialCommit ?? null,
+        changes: prev?.changes ?? []
+      });
+    } else if (e.action.endsWith('_on_github')) {
+      byRepo.get(e.subject_id)?.changes.push(e);
+    }
+  }
+  return [...byRepo.values()];
+}
+
+/**
+ * Something the creator can fix by checking again: an unfinished step, a setting GitHub did not confirm, code
+ * that did not arrive, or branch rules refused for a reason other than the plan. Branch rules a free plan cannot
+ * have are not fixable here, so no button pretends otherwise.
+ */
+function fixable(r: any, ic: any): boolean {
+  return (
+    !!r.incomplete ||
+    (r.settings ?? []).length === 0 ||
+    (r.settings ?? []).some((x: any) => !x.applied) ||
+    (ic && !ic.matches) ||
+    (!r.ruleset?.applied && !r.ruleset?.refused?.needs_paid_plan)
+  );
 }
 
 export function rulesLine(ruleset: any): { ok: boolean; text: string } {
@@ -56,8 +102,24 @@ export const RepositoriesCard: React.FC<{
   const [zip, setZip] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const records = repositoryRecords(events);
+  const repos = repositoryRecords(events);
+  const records = repos.map((r) => r.latest);
   const recordedNames = new Set(records.map((r) => String(r.full_name).split('/')[1]));
+  const [relocking, setRelocking] = useState<string | null>(null);
+  const [retryZip, setRetryZip] = useState<File | null>(null);
+  const relock = async (repoId: string, zip: File | null) => {
+    setRelocking(repoId);
+    setError(null);
+    try {
+      await finishRepositoryLock(project.id, repoId, zip);
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setRelocking(null);
+      setRetryZip(null);
+      onCreated();
+    }
+  };
   // A failure stays on screen only while that repository still does not exist.
   const failures = events.filter((e) => e.action === 'repository.creation_failed' && !recordedNames.has(String((e.payload as any).name)));
   const connected = codeHome?.installation?.status === 'active';
@@ -127,42 +189,75 @@ export const RepositoriesCard: React.FC<{
         </div>
       )}
 
-      {records.map((r) => {
+      {repos.map((repo) => {
+        const r = repo.latest;
         const rules = rulesLine(r.ruleset);
+        const gone = repo.changes.some((c) => c.action === 'repository.deleted_on_github' || c.action === 'repository.transferred_on_github');
+        const ic = repo.initialCommit;
+        const needsCode = r.role === 'main' && ic && !ic.pushed;
         return (
-          <div key={r.full_name} className="border border-zinc-800 rounded-xl p-3 space-y-2" data-testid="repository-record">
+          <div key={repo.id} className="border border-zinc-800 rounded-xl p-3 space-y-2" data-testid="repository-record">
             <div className="flex items-center justify-between gap-2">
               <a href={r.html_url} target="_blank" rel="noreferrer" className="font-mono text-xs text-indigo-300 hover:text-indigo-200">
                 {r.full_name}
               </a>
               <span className="text-[10px] uppercase tracking-wider text-zinc-500">{r.role === 'core' ? 'core' : 'main'}</span>
             </div>
-            <p className="text-[11px] text-zinc-500">As GitHub reported after creating it:</p>
-            <SettingsList settings={r.settings} />
-            <div className="flex items-center gap-2 text-[11px]">
-              {rules.ok ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <XCircle className="w-3.5 h-3.5 text-amber-400" />}
-              <span className={rules.ok ? 'text-zinc-200' : 'text-amber-300'} data-testid="branch-rules">
-                {rules.text}
-              </span>
-            </div>
-            {r.initial_commit && (
+            {repo.changes.map((c) => (
+              <div key={c.seq} className="text-[11px] text-rose-300 font-medium" data-testid="github-change">
+                {CHANGE_TEXT[c.action] ?? c.action}
+                {c.action === 'repository.renamed_on_github' ? ` (now ${(c.payload as any).github_reports?.full_name})` : ''}
+                {(c.payload as any).by ? `, by ${(c.payload as any).by}` : ''}, {new Date(c.timestamp).toLocaleString()}.
+              </div>
+            ))}
+            {!gone && (
+              <>
+                <p className="text-[11px] text-zinc-500">
+                  {repo.checked ? `As GitHub reported when checked again on ${new Date(repo.checkedAt).toLocaleString()}:` : 'As GitHub reported after creating it:'}
+                </p>
+                <SettingsList settings={r.settings} />
+                <div className="flex items-center gap-2 text-[11px]">
+                  {rules.ok ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <XCircle className="w-3.5 h-3.5 text-amber-400" />}
+                  <span className={rules.ok ? 'text-zinc-200' : 'text-amber-300'} data-testid="branch-rules">
+                    {rules.text}
+                  </span>
+                </div>
+              </>
+            )}
+            {ic && (
               <div className="text-[11px] text-zinc-400">
-                {r.initial_commit.matches ? (
+                {ic.matches ? (
                   <>
-                    First commit: {r.initial_commit.reported_files} files,{' '}
-                    <span className="text-zinc-200">GitHub reports commit {String(r.initial_commit.reported_sha).slice(0, 12)}</span>
+                    First commit: {ic.reported_files} files, <span className="text-zinc-200">GitHub reports commit {String(ic.reported_sha).slice(0, 12)}</span>
                   </>
-                ) : r.initial_commit.pushed ? (
+                ) : ic.pushed ? (
                   <span className="text-rose-300">
-                    First commit: {r.initial_commit.files_uploaded} files uploaded, but GitHub reports{' '}
-                    {r.initial_commit.reported_files ?? 'no'} files{r.initial_commit.reported_sha ? '' : ' and no commit'}.
+                    First commit: {ic.files_uploaded} files uploaded, but GitHub reports {ic.reported_files ?? 'no'} files{ic.reported_sha ? '' : ' and no commit'}.
                   </span>
                 ) : (
-                  <span className="text-rose-300">The uploaded code was not pushed: {r.initial_commit.error}</span>
+                  <span className="text-rose-300">The uploaded code was not pushed: {ic.error}</span>
                 )}
               </div>
             )}
             {r.incomplete && <div className="text-[11px] text-rose-300">Created on GitHub, but not finished: {r.incomplete}</div>}
+            {connected && !gone && !r.fully_locked && fixable(r, ic) && (
+              <div className="space-y-2 pt-1" data-testid="finish-lock">
+                {needsCode && (
+                  <label className="block text-[11px] text-zinc-400">
+                    Upload the code again (.zip):
+                    <input type="file" accept=".zip,application/zip" onChange={(e) => setRetryZip(e.target.files?.[0] ?? null)} className="block mt-1 text-[11px]" />
+                  </label>
+                )}
+                <button
+                  onClick={() => void relock(repo.id, needsCode ? retryZip : null)}
+                  disabled={relocking !== null}
+                  className="bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-zinc-100 font-medium px-3 py-1.5 rounded-lg text-[11px] flex items-center gap-2"
+                >
+                  {relocking === repo.id && <Loader2 className="w-3 h-3 animate-spin" />}
+                  Check again with GitHub and finish locking
+                </button>
+              </div>
+            )}
           </div>
         );
       })}

@@ -252,7 +252,8 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
 
     const row = (await adminDb.query('SELECT * FROM github_installation WHERE installation_id = $1', [installationId])).rows[0];
     expect(row).toMatchObject({ account_login: org, status: 'active' });
-    expect(Object.keys(row).sort()).toEqual(['account_id', 'account_login', 'connected_at', 'creator_id', 'id', 'installation_id', 'status', 'status_changed_at']);
+    expect(Object.keys(row).sort()).toEqual(['account_id', 'account_login', 'connected_at', 'creator_id', 'id', 'installation_id', 'owner_login', 'status', 'status_changed_at']);
+    expect(row.owner_login).toBe('alice'); // the GitHub user GitHub confirmed as an owner
 
     // GitHub now has the locked settings, and the event records what GitHub reported.
     expect(gh.orgs.get(org)!.settings).toMatchObject({
@@ -476,7 +477,8 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
     // Tokens: one per step, each narrowed, all revoked.
     const used = gh.tokens.slice(before);
     expect(used.every((t) => t.revoked)).toBe(true);
-    expect(used.filter((t) => t.repositories === null).map((t) => t.permissions)).toEqual([{ administration: 'write' }, { administration: 'write' }]); // creating (cannot name a repo that does not exist yet)
+    // creating (cannot name a repo that does not exist yet), plus one read-only check that the owner is still an owner
+    expect(used.filter((t) => t.repositories === null).map((t) => t.permissions)).toEqual([{ members: 'read' }, { administration: 'write' }, { administration: 'write' }]);
     for (const t of used.filter((t) => t.repositories !== null)) expect(t.repositories).toHaveLength(1);
 
     // Doing it again is refused.
@@ -810,17 +812,19 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
 
   it('uninstalling the app on GitHub: the connection shows as broken and it is recorded, once even if GitHub delivers twice', async () => {
     const c = await connectedCreator('uninstall');
+    gh.uninstall(c.installationId); // the owner uninstalls it on GitHub; then GitHub sends the webhook
     const id = randomUUID();
     const payload = { action: 'deleted', installation: { id: c.installationId, account: { login: c.org, id: gh.orgs.get(c.org)!.id } }, sender: { login: c.owner } };
     const first = await deliver('installation', payload, { id });
     expect(first.status).toBe(200);
     expect(((await first.json()) as any).outcome).toBe('connection removed');
+    // GitHub's own state is what was recorded, not the webhook's word
     const again = await deliver('installation', payload, { id });
     expect(((await again.json()) as any).duplicate).toBe(true);
 
     const status = await api(running.base, c.session, '/github/connection');
     expect(status.body.installation.status).toBe('removed');
-    expect(status.body.broken).toMatchObject({ organization: c.org, reason: 'the app was uninstalled on GitHub', by: c.owner });
+    expect(status.body.broken).toMatchObject({ organization: c.org, reason: 'GitHub reports the app is no longer installed', github_reports: 'removed', by: c.owner });
     const broken = (await accountEvents(c.session.userId)).filter((e) => e.action === 'github.connection_broken');
     expect(broken).toHaveLength(1);
     expect(broken[0].actor_type).toBe('system');
@@ -847,16 +851,178 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
     const c = await connectedCreator('repodel', { plan: 'team' });
     const projectId = await claim(c.session, `Del ${randomBytes(2).toString('hex')}`);
     const made = (await api(running.base, c.session, `/projects/${projectId}/code-home`, { method: 'POST', body: {} })).body.repositories[0];
+    gh.repos.delete(made.full_name); // deleted on GitHub; then GitHub sends the webhook
     const r = await deliver('repository', { action: 'deleted', installation: { id: c.installationId }, repository: { id: made.github_repo_id, full_name: made.full_name, private: true }, sender: { login: 'someone' } });
     expect(((await r.json()) as any).outcome).toBe('recorded repository deleted');
     const last = (await adminDb.query(`SELECT action, payload FROM event WHERE project_id = $1 ORDER BY seq DESC LIMIT 1`, [projectId])).rows[0];
-    expect(last).toMatchObject({ action: 'repository.deleted_on_github', payload: { full_name_before: made.full_name, by: 'someone' } });
+    expect(last).toMatchObject({ action: 'repository.deleted_on_github', payload: { full_name_before: made.full_name, github_reports: { exists: false }, by: 'someone' } });
   });
 
   it('a webhook for an installation nobody connected is kept as received but changes nothing', async () => {
     const r = await deliver('push', { installation: { id: 987654321 }, ref: 'refs/heads/main' });
     expect(r.status).toBe(200);
     expect(((await r.json()) as any).outcome).toBe('installation not linked to a creator');
+  });
+
+  // ---------------------------------------------------------------- third review: GitHub is asked, not the message believed
+
+  it('replayed webhooks change nothing: a stored "suspend" or "deleted" sent again is checked against GitHub first', async () => {
+    const c = await connectedCreator('replay2');
+    const account = { login: c.org, id: gh.orgs.get(c.org)!.id };
+    const suspendBody = { action: 'suspend', installation: { id: c.installationId, account }, sender: { login: 'x' } };
+    gh.suspend(c.installationId, true);
+    expect(((await (await deliver('installation', suspendBody)).json()) as any).outcome).toBe('connection suspended');
+    gh.suspend(c.installationId, false);
+    expect(((await (await deliver('installation', { ...suspendBody, action: 'unsuspend' })).json()) as any).outcome).toBe('connection active');
+    // The old "suspend" again, under a new delivery id: GitHub says the app is working, so nothing changes.
+    expect(((await (await deliver('installation', suspendBody)).json()) as any).outcome).toBe('no change (GitHub reports active)');
+    expect(((await (await deliver('installation', { ...suspendBody, action: 'deleted' })).json()) as any).outcome).toBe('no change (GitHub reports active)');
+    expect((await adminDb.query('SELECT status FROM github_installation WHERE installation_id = $1', [c.installationId])).rows[0].status).toBe('active');
+    const actions = (await accountEvents(c.session.userId)).map((e) => e.action).filter((a) => a.startsWith('github.connection'));
+    expect(actions).toEqual(['github.connection_broken', 'github.connection_restored']);
+  });
+
+  it('a "repository deleted" message for a repository GitHub still has is ignored', async () => {
+    const c = await connectedCreator('stillthere', { plan: 'team' });
+    const projectId = await claim(c.session, `Still ${randomBytes(2).toString('hex')}`);
+    const made = (await api(running.base, c.session, `/projects/${projectId}/code-home`, { method: 'POST', body: {} })).body.repositories[0];
+    const r = await deliver('repository', { action: 'deleted', installation: { id: c.installationId }, repository: { id: made.github_repo_id, full_name: made.full_name, private: true }, sender: { login: 'x' } });
+    expect(((await r.json()) as any).outcome).toBe('ignored: GitHub does not report the repository as deleted');
+    const r2 = await deliver('repository', { action: 'publicized', installation: { id: c.installationId }, repository: { id: made.github_repo_id, full_name: made.full_name, private: false }, sender: { login: 'x' } });
+    expect(((await r2.json()) as any).outcome).toBe('ignored: GitHub does not report the repository as publicized');
+    const actions = (await adminDb.query('SELECT action FROM event WHERE project_id = $1 ORDER BY seq', [projectId])).rows.map((x) => x.action);
+    expect(actions).toEqual(['project.claimed', 'repository.created']);
+  });
+
+  it("the connection screen shows only the current installation's lock: an earlier organization's success is never shown for a new one", async () => {
+    const c = await connectedCreator('stale');
+    gh.uninstall(c.installationId);
+    await deliver('installation', { action: 'deleted', installation: { id: c.installationId, account: { login: c.org, id: gh.orgs.get(c.org)!.id } }, sender: { login: c.owner } });
+    // A newly linked installation with no lock recorded yet must not borrow the earlier organization's lock.
+    const creatorId = (await adminDb.query('SELECT id FROM creator WHERE identity_id = $1', [c.session.userId])).rows[0].id;
+    const orgX = `stale-x-${randomBytes(3).toString('hex')}`;
+    const ox = gh.addOrg(orgX, { owners: [c.owner] });
+    const idX = gh.install(orgX);
+    await adminDb.query(`INSERT INTO github_installation (creator_id, installation_id, account_login, account_id, status) VALUES ($1, $2, $3, $4, 'active')`, [creatorId, idX, orgX, ox.id]);
+    const fresh = await api(running.base, c.session, '/github/connection');
+    expect(fresh.body.installation.organization).toBe(orgX);
+    expect(fresh.body.organization_lock).toBeNull();
+    await adminDb.query(`UPDATE github_installation SET status = 'removed' WHERE installation_id = $1`, [idX]);
+
+    // Connect a second organization whose lock fails (GitHub errors while reading it back).
+    const org2 = `stale2-${randomBytes(3).toString('hex')}`;
+    gh.addOrg(org2, { owners: [c.owner] });
+    const id2 = gh.install(org2);
+    const { state, cookie } = await start(c.session);
+    gh.failOrgRead = true;
+    try {
+      expect(outcome(await finish(state, cookie, id2, c.owner))).toBe('connected_lock_failed');
+    } finally {
+      gh.failOrgRead = false;
+    }
+    const status = await api(running.base, c.session, '/github/connection');
+    expect(status.body.installation.organization).toBe(org2);
+    expect(status.body.organization_lock).toBeNull(); // not the first organization's green checks
+    expect(status.body.organization_lock_failed).toMatchObject({ organization: org2, error: { status: 500 } });
+  });
+
+  it('a repository whose lock could not be finished can be finished later, and empty code can be pushed again', async () => {
+    const c = await connectedCreator('relockme', { plan: 'team' });
+    const projectId = await claim(c.session, `Relock ${randomBytes(2).toString('hex')}`);
+    const z = new JSZip();
+    z.file('README.md', '# again\n');
+    const zip = await z.generateAsync({ type: 'nodebuffer' });
+    gh.refusePushes = true;
+    let made: any;
+    try {
+      made = (await (await postZip(c.session, projectId, zip)).json() as any).repositories[0];
+    } finally {
+      gh.refusePushes = false;
+    }
+    expect(made.initial_commit.pushed).toBe(false);
+    const repoId = (await adminDb.query('SELECT id FROM repository WHERE project_id = $1', [projectId])).rows[0].id;
+    // Retry with the code: pushed now, everything read back, recorded as checked, and now fully locked.
+    const res = await fetch(`${running.base}/api/v1/projects/${projectId}/repositories/${repoId}/lock`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${c.session.accessToken}`, 'Content-Type': 'application/zip' },
+      body: new Uint8Array(zip)
+    });
+    const body: any = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.fully_locked).toBe(true);
+    expect(body.repository.initial_commit).toMatchObject({ pushed: true, matches: true, reported_files: 1 });
+    expect(gh.repos.get(made.full_name)!.rulesets).toHaveLength(1); // the existing rules were reused, not duplicated
+    expect((await adminDb.query('SELECT locked_at FROM repository WHERE id = $1', [repoId])).rows[0].locked_at).not.toBeNull();
+    const last = (await adminDb.query(`SELECT action, actor_type FROM event WHERE project_id = $1 ORDER BY seq DESC LIMIT 1`, [projectId])).rows[0];
+    expect(last).toEqual({ action: 'repository.lock_checked', actor_type: 'creator' });
+    // Code can only go into a repository GitHub reports as empty.
+    const again = await fetch(`${running.base}/api/v1/projects/${projectId}/repositories/${repoId}/lock`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${c.session.accessToken}`, 'Content-Type': 'application/zip' },
+      body: new Uint8Array(zip)
+    });
+    expect(again.status).toBe(409);
+    // Someone else's repository: 404.
+    const other = await connectedCreator('relockother');
+    expect((await api(running.base, other.session, `/projects/${projectId}/repositories/${repoId}/lock`, { method: 'POST', body: {} })).status).toBe(404);
+  });
+
+  it("if GitHub creates the repository but its answer is lost, Custody Core recognises its own repository and records it", async () => {
+    const c = await connectedCreator('lostanswer');
+    const projectId = await claim(c.session, `Lost ${randomBytes(2).toString('hex')}`);
+    gh.loseCreateAnswer = true;
+    let r: any;
+    try {
+      r = await api(running.base, c.session, `/projects/${projectId}/code-home`, { method: 'POST', body: {} });
+    } finally {
+      gh.loseCreateAnswer = false;
+    }
+    expect(r.status).toBe(201);
+    const [repo] = r.body.repositories;
+    expect(repo.adopted).toMatch(/502/);
+    expect(gh.repos.get(repo.full_name)!.description).toContain(`Custody Core ${projectId}`);
+    expect((await adminDb.query('SELECT github_repo_id FROM repository WHERE project_id = $1', [projectId])).rows[0].github_repo_id).toBe(String(gh.repos.get(repo.full_name)!.id));
+    // A repository of the same name that is NOT ours (no marker) is never adopted.
+    const p2 = await claim(c.session, `Foreign ${randomBytes(2).toString('hex')}`);
+    const name = (await adminDb.query('SELECT name FROM project WHERE id = $1', [p2])).rows[0].name;
+    const blocker = await claim(c.session, name);
+    await api(running.base, c.session, `/projects/${blocker}/code-home`, { method: 'POST', body: {} });
+    expect((await api(running.base, c.session, `/projects/${p2}/code-home`, { method: 'POST', body: {} })).status).toBe(502);
+    expect((await adminDb.query('SELECT 1 FROM repository WHERE project_id = $1', [p2])).rowCount).toBe(0);
+  });
+
+  it('an upload GitHub would refuse (a .gitmodules pointing outside the repository) is refused before anything is created', async () => {
+    const c = await connectedCreator('fsck');
+    const projectId = await claim(c.session, `Fsck ${randomBytes(2).toString('hex')}`);
+    const z = new JSZip();
+    z.file('README.md', 'x');
+    z.file('.gitmodules', '[submodule "../../evil"]\n\tpath = evil\n\turl = https://example.com/evil.git\n');
+    const repos = gh.repos.size;
+    const res = await postZip(c.session, projectId, await z.generateAsync({ type: 'nodebuffer' }));
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as any).error).toMatch(/cannot be committed/);
+    expect(gh.repos.size).toBe(repos);
+  });
+
+  it('a renamed organization is followed, and someone no longer an owner on GitHub cannot create repositories', async () => {
+    const c = await connectedCreator('renamed');
+    const newName = `${c.org}-new`;
+    gh.renameOrg(c.org, newName);
+    const r = await deliver('organization', { action: 'renamed', installation: { id: c.installationId }, organization: { login: newName }, sender: { login: c.owner } });
+    expect(((await r.json()) as any).outcome).toBe(`organization renamed to ${newName}`);
+    expect((await api(running.base, c.session, '/github/connection')).body.installation.organization).toBe(newName);
+    const projectId = await claim(c.session, `Renamed ${randomBytes(2).toString('hex')}`);
+    const ok = await api(running.base, c.session, `/projects/${projectId}/code-home`, { method: 'POST', body: {} });
+    expect(ok.status).toBe(201);
+    expect(ok.body.repositories[0].full_name.startsWith(`${newName}/`)).toBe(true);
+
+    // The person who connected it stops being an owner on GitHub.
+    gh.orgs.get(newName)!.owners.delete(c.owner);
+    gh.orgs.get(newName)!.members.add(c.owner);
+    const p2 = await claim(c.session, `No Owner ${randomBytes(2).toString('hex')}`);
+    const refused = await api(running.base, c.session, `/projects/${p2}/code-home`, { method: 'POST', body: {} });
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toMatch(/no longer an owner/);
   });
 
   // ---------------------------------------------------------------- tokens are never kept

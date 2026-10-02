@@ -370,6 +370,7 @@ async function main() {
     check(await card.getByText('First commit: 2 files').isVisible(), 'the uploaded code is the first commit, and GitHub reports it');
     const made = [...gh.repos.values()].filter((r) => r.org === ghOrg);
     check(made.length === 2 && made.every((r) => r.private && !r.allow_forking), 'two private, unforkable repositories really exist in the organization');
+    check((await card.getByTestId('finish-lock').count()) === 0, 'no "finish locking" button is offered for branch rules a free plan cannot have');
     await shot(page, '20-repositories-created');
 
     // A claim that stops half way (GitHub refuses the core repository's name) can be finished from the dashboard.
@@ -396,6 +397,7 @@ async function main() {
 
     // Uninstalling the app on GitHub (a signed webhook) shows the connection as broken.
     const installationId = [...gh.installations.entries()].find(([, i]) => i.org === ghOrg)![0];
+    gh.uninstall(installationId); // the owner uninstalls it on GitHub; GitHub then sends the webhook
     const hookBody = Buffer.from(JSON.stringify({ action: 'deleted', installation: { id: installationId, account: { login: ghOrg, id: gh.orgs.get(ghOrg)!.id } }, sender: { login: 'browser-owner' } }));
     const hook = await fetch(`${base}/api/v1/github/webhook`, {
       method: 'POST',

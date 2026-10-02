@@ -150,6 +150,18 @@ the app). Every value is read back from GitHub and recorded in the project's eve
 So on a free organization the dashboard shows **"Branch rules: needs GitHub Team, not active"**, and the event records
 GitHub's refusal and `applied: false`. Nothing claims the rules are on when GitHub says they are not.
 
+## Before each change on GitHub
+
+Before creating or re-locking repositories, Custody Core asks GitHub whether the app is still installed and not
+suspended, follows a renamed organization, and checks that the GitHub user who connected the organization is still
+an owner of it. If not, nothing is done and the dashboard says why.
+
+If creating a repository fails partway, nothing is hidden: a repository GitHub created is recorded with what did
+and did not happen, and **Check again with GitHub and finish locking** applies whatever is missing (or pushes the
+uploaded code again into a repository GitHub reports as still empty). Each repository's description carries a
+marker (`Custody Core <project id>`) so that, if GitHub's answer to "create" is lost, Custody Core can recognise
+its own repository; a repository without that marker is never taken over.
+
 ## Tokens
 
 - The app's own login is a short JWT signed with the private key, made for each call.
@@ -161,7 +173,10 @@ GitHub's refusal and `applied: false`. Nothing claims the rules are on when GitH
 ## Webhooks
 
 Every webhook's `X-Hub-Signature-256` is checked against `GITHUB_WEBHOOK_SECRET` over the exact bytes received;
-anything else is refused (401) and not used. Each delivery is handled once. When the app is uninstalled (or
+anything else is refused (401) and not used. Each delivery is handled once. A webhook is only taken as a hint:
+anyone holding an old signed delivery could send it again, so before anything is changed or recorded Custody Core
+asks GitHub what is true now (is the app still installed, suspended, what is the repository's name and
+visibility), and records what GitHub reports. When the app is uninstalled (or
 suspended) on GitHub, the dashboard shows **Connection broken** and the account record gets
 `github.connection_broken`. Repositories deleted, renamed, made public and so on are recorded in their project's log.
 

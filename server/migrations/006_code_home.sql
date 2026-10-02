@@ -10,6 +10,7 @@ CREATE TABLE github_installation (
   installation_id BIGINT NOT NULL UNIQUE,
   account_login TEXT NOT NULL,            -- the organization's name on GitHub
   account_id BIGINT NOT NULL,
+  owner_login TEXT,                       -- the GitHub user GitHub confirmed as an owner when connecting
   status TEXT NOT NULL CHECK (status IN ('active', 'suspended', 'removed')),
   connected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now()

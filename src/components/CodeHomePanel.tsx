@@ -136,7 +136,12 @@ export const CodeHomePanel: React.FC<{ onChange?: (s: CodeHomeStatus) => void }>
             Connected: <span className="font-mono text-indigo-300">{inst!.organization}</span>
             {status.organization_lock?.plan && <span className="text-zinc-500 text-xs"> (GitHub plan: {status.organization_lock.plan})</span>}
           </div>
-          {status.organization_lock ? (
+          {status.organization_lock_failed ? (
+            <p className="text-xs text-rose-300" data-testid="org-lock-failed">
+              Locking {status.organization_lock_failed.organization} failed on {new Date(status.organization_lock_failed.recorded_at).toLocaleString()} (GitHub said:{' '}
+              {status.organization_lock_failed.error.message}). Its settings are not confirmed.
+            </p>
+          ) : status.organization_lock ? (
             <>
               <p className="text-[11px] text-zinc-500">Organization settings, as GitHub reported them on {new Date(status.organization_lock.recorded_at).toLocaleString()}:</p>
               <SettingsList settings={status.organization_lock.settings} />

@@ -125,6 +125,15 @@ Actions written so far:
 |---|---|---|
 | `account.second_factor_enrolled` | `creator` (the person's `creator.id`) | `{ factor_id }` |
 | `account.second_factor_locked` | `system` / `second-factor-guard` | `{ factor_id, wrong_codes, window_minutes, locked_minutes, locked_until }` |
+| `github.connected` | `creator` | `{ organization, organization_id, installation_id, confirmed_by_github_user }` |
+| `github.organization_locked` | `creator` (performed by the GitHub App) | `{ installation_id, organization, plan, settings: [{ setting, requested, reported, applied }], all_applied, change_error }` |
+| `github.organization_lock_failed` | `creator` (performed by the GitHub App) | `{ installation_id, organization, error }` |
+| `github.connection_broken` / `github.connection_restored` | `system` / `github-webhook` (or `github-app`) | `{ installation_id, organization, reason, github_reports, webhook_said, by }` |
+| `github.organization_renamed` | `system` | `{ installation_id, from, to }` |
+
+Project events from the code home (in each project's own chain): `repository.created`, `repository.lock_checked`
+and `repository.creation_failed` (actor: the creator who asked; `performed_by: "github-app"`), and
+`repository.<change>_on_github` (actor: `system` / `github-webhook`, recorded only when GitHub confirms the change).
 
 The same limits apply as for project events: deleting the newest events is not detected, and the table owner
 can still bypass the triggers (the chain then reveals the change).

@@ -42,6 +42,8 @@ interface Repo {
   default_branch: string;
   rulesets: any[];
   bare: string;
+  description: string;
+  created_at: string;
 }
 
 export interface StandIn {
@@ -53,7 +55,7 @@ export interface StandIn {
   privateKeyPem: string;
   orgs: Map<string, Org>;
   repos: Map<string, Repo>;
-  installations: Map<number, { org: string; appId: string }>;
+  installations: Map<number, { org: string; appId: string; suspendedAt?: string | null }>;
   tokens: IssuedToken[];
   userTokens: Map<string, { login: string; revoked: boolean }>;
   calls: Array<{ method: string; path: string; auth: string }>;
@@ -72,8 +74,17 @@ export interface StandIn {
   refusePushes: boolean;
   /** Answer 500 to reading a repository (to test a GitHub failure after creating one). */
   failRepoRead: boolean;
+  /** Answer 500 to reading an organization (to test a failed organization lock). */
+  failOrgRead: boolean;
   /** Report file trees as truncated, as GitHub does for very large trees. */
   truncateTrees: boolean;
+  /** Create the repository but lose GitHub's answer (502), as when a response times out. */
+  loseCreateAnswer: boolean;
+  /** Uninstall / suspend / unsuspend the app on an organization, as an owner would on GitHub. */
+  uninstall(id: number): void;
+  suspend(id: number, suspended: boolean): void;
+  /** Rename an organization, as an owner would on GitHub (its id stays the same). */
+  renameOrg(from: string, to: string): void;
   stop(): Promise<void>;
 }
 
@@ -91,7 +102,7 @@ export async function startGitHubStandIn(): Promise<StandIn> {
     privateKeyPem: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
     orgs: new Map<string, Org>(),
     repos: new Map<string, Repo>(),
-    installations: new Map<number, { org: string; appId: string }>(),
+    installations: new Map<number, { org: string; appId: string; suspendedAt?: string | null }>(),
     tokens: [] as IssuedToken[],
     userTokens: new Map<string, { login: string; revoked: boolean }>(),
     codes: new Map<string, string>(),
@@ -134,7 +145,11 @@ export async function startGitHubStandIn(): Promise<StandIn> {
     visibility: r.private ? 'private' : 'public',
     allow_forking: r.allow_forking,
     default_branch: r.default_branch,
-    html_url: `${url}/${r.org}/${r.name}`
+    html_url: `${url}/${r.org}/${r.name}`,
+    description: r.description,
+    created_at: r.created_at,
+    // GitHub reports 0 for a repository with no commits yet
+    size: spawnSync('git', ['-C', r.bare, 'rev-parse', '--verify', '-q', 'HEAD']).status === 0 ? 1 : 0
   });
 
   async function api(req: http.IncomingMessage, res: http.ServerResponse, p: string, body: any) {
@@ -145,6 +160,7 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       if (!verifyAppJwt(bearer(req))) return send(res, 401, { message: 'A JSON web token could not be decoded' });
       const inst = s.installations.get(Number(match[1]));
       if (!inst || inst.appId !== s.appId) return send(res, 404, { message: 'Not Found' });
+      if (inst.suspendedAt) return send(res, 403, { message: 'This installation has been suspended' });
       const known = ['administration', 'contents', 'pull_requests', 'metadata', 'organization_administration', 'members'];
       const asked = Object.keys(body?.permissions ?? {});
       if (asked.some((k) => !known.includes(k))) return send(res, 422, { message: 'The permissions requested are not granted to this installation.' });
@@ -163,7 +179,7 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       const inst = s.installations.get(Number(match[1]));
       if (!inst || inst.appId !== s.appId) return send(res, 404, { message: 'Not Found' });
       const org = s.orgs.get(inst.org)!;
-      return send(res, 200, { id: Number(match[1]), app_id: Number(inst.appId), account: { login: org.login, id: org.id, type: 'Organization' } });
+      return send(res, 200, { id: Number(match[1]), app_id: Number(inst.appId), suspended_at: inst.suspendedAt ?? null, account: { login: org.login, id: org.id, type: 'Organization' } });
     }
     if (m === 'GET' && p === '/installation/repositories') {
       const t = instToken(req);
@@ -187,6 +203,7 @@ export async function startGitHubStandIn(): Promise<StandIn> {
         if (org.refusePatch) return send(res, org.refusePatch.status, { message: org.refusePatch.message });
         Object.assign(org.settings, body);
       }
+      if (handle.failOrgRead) return send(res, 500, { message: 'Server Error' });
       const visible = can(t, 'organization_administration', 'read') ? { ...org.settings, plan: { name: org.plan } } : {};
       return send(res, 200, { login: org.login, id: org.id, type: 'Organization', ...visible });
     }
@@ -201,9 +218,39 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       fs.mkdirSync(path.dirname(bare), { recursive: true });
       spawnSync('git', ['init', '-q', '--bare', '-b', 'main', bare]);
       spawnSync('git', ['-C', bare, 'config', 'http.receivepack', 'true']);
-      const repo: Repo = { id: nextId++, org: org.login, name: body.name, private: body.private !== false, allow_forking: !!org.settings.members_can_fork_private_repositories, default_branch: 'main', rulesets: [], bare };
+      // GitHub checks every pushed object and refuses broken or dangerous ones.
+      spawnSync('git', ['-C', bare, 'config', 'receive.fsckObjects', 'true']);
+      const repo: Repo = {
+        id: nextId++,
+        org: org.login,
+        name: body.name,
+        private: body.private !== false,
+        allow_forking: !!org.settings.members_can_fork_private_repositories,
+        default_branch: 'main',
+        rulesets: [],
+        bare,
+        description: String(body.description ?? ''),
+        created_at: new Date().toISOString()
+      };
       s.repos.set(key, repo);
+      if (handle.loseCreateAnswer) return send(res, 502, { message: 'Server Error' });
       return send(res, 201, repoView(repo));
+    }
+    if (m === 'GET' && (match = /^\/repositories\/(\d+)$/.exec(p))) {
+      const t = instToken(req);
+      if (!t) return send(res, 401, { message: 'Bad credentials' });
+      const repo = [...s.repos.values()].find((r) => r.id === Number(match![1]));
+      if (!repo || !coversRepo(t, repo.org, repo.name)) return send(res, 404, { message: 'Not Found' });
+      return send(res, 200, repoView(repo));
+    }
+    if (m === 'GET' && (match = /^\/orgs\/([^/]+)\/memberships\/([^/]+)$/.exec(p))) {
+      const t = instToken(req);
+      const org = s.orgs.get(decodeURIComponent(match[1]));
+      if (!t || !org || s.installations.get(t.installationId)?.org !== org.login) return send(res, 404, { message: 'Not Found' });
+      if (!can(t, 'members', 'read')) return send(res, 403, { message: 'Resource not accessible by integration' });
+      const login = decodeURIComponent(match[2]);
+      if (!org.owners.has(login) && !org.members.has(login)) return send(res, 404, { message: 'Not Found' });
+      return send(res, 200, { state: 'active', role: org.owners.has(login) ? 'admin' : 'member', user: { login } });
     }
     if ((match = /^\/repos\/([^/]+)\/([^/]+)(\/.*)?$/.exec(p))) {
       const [o, n, rest = ''] = [decodeURIComponent(match[1]), decodeURIComponent(match[2]), match[3]];
@@ -391,7 +438,9 @@ export async function startGitHubStandIn(): Promise<StandIn> {
     url,
     browser: null,
     refusePushes: false,
+    loseCreateAnswer: false,
     failRepoRead: false,
+    failOrgRead: false,
     truncateTrees: false,
     appPermissions: {
       administration: 'write',
@@ -430,6 +479,26 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       };
       s.orgs.set(login, org);
       return org;
+    },
+    uninstall(id) {
+      s.installations.delete(id);
+    },
+    suspend(id, suspended) {
+      const i = s.installations.get(id);
+      if (i) i.suspendedAt = suspended ? new Date().toISOString() : null;
+    },
+    renameOrg(from, to) {
+      const org = s.orgs.get(from)!;
+      s.orgs.delete(from);
+      org.login = to;
+      s.orgs.set(to, org);
+      for (const i of s.installations.values()) if (i.org === from) i.org = to;
+      for (const [k, r] of [...s.repos.entries()]) {
+        if (r.org !== from) continue;
+        s.repos.delete(k);
+        r.org = to;
+        s.repos.set(`${to}/${r.name}`, r);
+      }
     },
     install(org, opts = {}) {
       const id = nextId++;

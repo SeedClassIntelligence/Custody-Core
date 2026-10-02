@@ -58,6 +58,8 @@ export interface RepositoryResult {
   } | null;
   /** Set when the repository was created but a later step could not be completed */
   incomplete?: string;
+  /** Set when the repository was found on GitHub (made by Custody Core for this project) after creating it failed */
+  adopted?: string;
 }
 
 /** A repository name GitHub accepts, from a project name. */
@@ -73,6 +75,7 @@ export function repositoryName(projectName: string): string {
 }
 
 const MAX_FILES = 5000;
+const GIT_TIMEOUT_MS = 120_000;
 const MAX_TOTAL_BYTES = 100 * 1024 * 1024;
 
 export class BadUpload extends Error {}
@@ -182,7 +185,8 @@ export async function readZip(zipBytes: Buffer): Promise<Array<{ path: string; d
 
 function run(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    // No git step may hang: two minutes at most, then it is stopped and reported.
+    const child = spawn(cmd, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], timeout: GIT_TIMEOUT_MS, killSignal: 'SIGKILL' });
     let out = '';
     let err = '';
     child.stdout.on('data', (c) => (out += c));
@@ -190,7 +194,11 @@ function run(cmd: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): 
     child.on('error', reject);
     // Name the git command itself (skipping "-c key=value" settings), for a readable error.
     const verb = args.find((a, i) => !a.startsWith('-') && args[i - 1] !== '-c') ?? args[0];
-    child.on('close', (code) => (code === 0 ? resolve(out.trim()) : reject(new Error(`git ${verb} failed (${code}): ${err.slice(-500)}`))));
+    child.on('close', (code, signal) =>
+      code === 0
+        ? resolve(out.trim())
+        : reject(new Error(signal ? `git ${verb} did not finish within ${GIT_TIMEOUT_MS / 1000} seconds` : `git ${verb} failed (${code}): ${err.slice(-500)}`))
+    );
   });
 }
 
@@ -242,6 +250,10 @@ export async function prepareInitialCommit(files: Awaited<ReturnType<typeof read
     // --force: every uploaded file is committed, even if a .gitignore in the upload lists it.
     await run('git', ['add', '-A', '--force'], dir, env);
     await run('git', ['commit', '-q', '-m', 'Initial code, uploaded to Custody Core'], dir, env);
+    // GitHub checks every pushed object and refuses broken or dangerous ones (for example a .gitmodules naming
+    // a path outside the repository). Run the same strict check here, so such an upload is refused before any
+    // repository exists.
+    await run('git', ['fsck', '--strict', '--no-dangling', '--no-progress'], dir, env);
     const sha = await run('git', ['rev-parse', 'HEAD'], dir, env);
     const listed = await run('git', ['ls-files', '-z'], dir, env);
     const committed = listed.split('\0').filter(Boolean).length;
@@ -269,6 +281,27 @@ export async function prepareInitialCommit(files: Awaited<ReturnType<typeof read
   }
 }
 
+/** Written into each repository's description, so Custody Core can recognise its own repository later. */
+export function repositoryMarker(projectId: string): string {
+  return `Custody Core ${projectId}`;
+}
+
+/**
+ * After creating failed or its answer was lost: is there a repository of that name that Custody Core made for
+ * this project (its description carries the project's marker) and that is still empty? Then it is ours.
+ */
+async function findOwnRepository(config: GitHubConfig, installationId: number, org: string, name: string, projectId: string) {
+  try {
+    const repo = await withInstallationToken(config, installationId, { repositories: [name], permissions: { metadata: 'read' } }, (token) =>
+      gh(config, { kind: 'token', token }, 'GET', `/repos/${encodeURIComponent(org)}/${encodeURIComponent(name)}`)
+    );
+    const ours = typeof repo?.description === 'string' && repo.description.includes(repositoryMarker(projectId)) && Number(repo.size) === 0;
+    return ours ? repo : null;
+  } catch {
+    return null; // not there (or not visible): nothing to adopt
+  }
+}
+
 /** Creates one private repository, pushes the upload if any, locks it, and reads it all back. */
 export async function createLockedRepository(
   config: GitHubConfig,
@@ -278,27 +311,40 @@ export async function createLockedRepository(
   role: 'main' | 'core',
   description: string,
   prepared: PreparedCommit | null,
-  uploadedFiles = 0
+  uploadedFiles: number,
+  projectId: string
 ): Promise<RepositoryResult> {
   // 1. Create it. The repository does not exist yet, so this token cannot be narrowed to it.
-  const created = await withInstallationToken(config, installationId, { permissions: { administration: 'write' } }, (token) =>
-    gh(config, { kind: 'token', token }, 'POST', `/orgs/${encodeURIComponent(org)}/repos`, {
-      name,
-      description: description.slice(0, 350),
-      private: true,
-      visibility: 'private',
-      auto_init: false,
-      has_wiki: false,
-      has_projects: false
-    })
-  );
+  let created: any;
+  let adopted: string | null = null;
+  try {
+    created = await withInstallationToken(config, installationId, { permissions: { administration: 'write' } }, (token) =>
+      gh(config, { kind: 'token', token }, 'POST', `/orgs/${encodeURIComponent(org)}/repos`, {
+        name,
+        description: `${description.slice(0, 250)} · ${repositoryMarker(projectId)}`,
+        private: true,
+        visibility: 'private',
+        auto_init: false,
+        has_wiki: false,
+        has_projects: false
+      })
+    );
+  } catch (err: any) {
+    // GitHub may have created it even though the answer did not arrive (a timeout, a 5xx), or an earlier
+    // attempt created it and was never recorded. Only a repository carrying this project's marker is ours.
+    const own = await findOwnRepository(config, installationId, org, name, projectId);
+    if (!own) throw err;
+    created = own;
+    adopted = err instanceof GitHubError ? `GitHub answered ${err.status} when creating it, but reports it exists` : 'the answer to creating it was lost, but GitHub reports it exists';
+  }
   const fullName: string = created.full_name;
   const branch: string = created.default_branch || 'main';
 
   // From here on the repository exists on GitHub: whatever happens is recorded as a result, never as
   // "not created".
   try {
-    return await finishRepository(config, installationId, name, role, fullName, branch, prepared, uploadedFiles);
+    const result = await finishRepository(config, installationId, name, role, fullName, branch, prepared, uploadedFiles);
+    return adopted ? { ...result, adopted } : result;
   } catch (err: any) {
     return {
       role,
@@ -309,12 +355,13 @@ export async function createLockedRepository(
       settings: [],
       ruleset: { applied: false, refused: null, reported: null },
       initial_commit: null,
+      ...(adopted ? { adopted } : {}),
       incomplete: err instanceof GitHubError ? `GitHub answered ${err.status}: ${String(err.body?.message ?? err.message)}` : 'no answer from GitHub'
     };
   }
 }
 
-async function finishRepository(
+export async function finishRepository(
   config: GitHubConfig,
   installationId: number,
   name: string,
@@ -351,7 +398,10 @@ async function finishRepository(
 
     const ruleset: RulesetResult = { applied: false, refused: null, reported: null };
     try {
-      const made = await gh(config, auth, 'POST', `${repoPath}/rulesets`, rulesetFor(config.appId));
+      // When finishing an earlier attempt, the ruleset may already be there: read it rather than add another.
+      const existing: any[] = await gh(config, auth, 'GET', `${repoPath}/rulesets`).catch(() => []);
+      const mine = Array.isArray(existing) ? existing.find((r) => r?.name === RULESET_NAME) : null;
+      const made = mine ?? (await gh(config, auth, 'POST', `${repoPath}/rulesets`, rulesetFor(config.appId)));
       const back = await gh(config, auth, 'GET', `${repoPath}/rulesets/${Number(made.id)}`);
       ruleset.reported = {
         id: Number(back.id),

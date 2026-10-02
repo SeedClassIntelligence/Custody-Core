@@ -27,6 +27,13 @@ const sha256 = (v: string) => createHash('sha256').update(v).digest('hex');
 export const githubPublicRouter = express.Router();
 export const githubRouter = express.Router();
 
+// Express 4 does not catch errors thrown by async handlers; send them to the app's error handler instead of
+// letting them crash the process.
+type Handler = (req: express.Request, res: express.Response, next: express.NextFunction) => Promise<unknown>;
+const safe = (fn: Handler) => (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  fn(req, res, next).catch(next);
+};
+
 function appUrl(): string {
   const raw = (process.env.APP_URL || '').replace(/\/+$/, '');
   if (!/^https?:\/\/[^/]+$/.test(raw)) throw new GitHubNotConfigured('APP_URL must be set to where this app is reached, for example https://custody.example.com');
@@ -73,7 +80,7 @@ function backToApp(res: express.Response, outcome: string) {
 
 // (Mounted after the full login check in server.ts: session, confirmed email and the code step.)
 
-githubRouter.post('/connect', async (_req, res) => {
+githubRouter.post('/connect', safe(async (_req, res) => {
   const config = configOr503(res);
   if (!config) return;
   const db = getDbPool();
@@ -102,10 +109,10 @@ githubRouter.post('/connect', async (_req, res) => {
     console.error('[github] connect failed:', err?.message ?? err);
     res.status(500).json({ error: 'Something went wrong on the server.' });
   }
-});
+}));
 
 // Re-apply the organization lock and record what GitHub reports now (for example after someone changed a setting).
-githubRouter.post('/organization/lock', async (_req, res) => {
+githubRouter.post('/organization/lock', safe(async (_req, res) => {
   const config = configOr503(res);
   if (!config) return;
   const db = getDbPool();
@@ -115,16 +122,16 @@ githubRouter.post('/organization/lock', async (_req, res) => {
   if (!inst) return res.status(409).json({ error: 'Your code home is not connected.' });
   try {
     const lock = await lockOrganization(config, Number(inst.installation_id), inst.account_login);
-    await appendAccountEvent(creator.userId, 'creator', creator.id, 'github.organization_locked', { installation_id: Number(inst.installation_id), ...lock });
+    await appendAccountEvent(creator.userId, 'creator', creator.id, 'github.organization_locked', { installation_id: Number(inst.installation_id), performed_by: 'github-app', ...lock });
     res.json(lock);
   } catch (err: any) {
     const error = err instanceof GitHubError ? { status: err.status, message: String(err.body?.message ?? err.message) } : { status: null, message: 'no answer from GitHub' };
-    await appendAccountEvent(creator.userId, 'creator', creator.id, 'github.organization_lock_failed', { installation_id: Number(inst.installation_id), organization: inst.account_login, error });
+    await appendAccountEvent(creator.userId, 'creator', creator.id, 'github.organization_lock_failed', { installation_id: Number(inst.installation_id), organization: inst.account_login, performed_by: 'github-app', error });
     res.status(502).json({ error: `GitHub did not answer as expected: ${error.message}` });
   }
-});
+}));
 
-githubRouter.get('/connection', async (_req, res) => {
+githubRouter.get('/connection', safe(async (_req, res) => {
   const db = getDbPool();
   if (!db) return res.status(503).json({ error: 'Database not connected.' });
   const creator = creatorOf(res);
@@ -143,10 +150,22 @@ githubRouter.get('/connection', async (_req, res) => {
         [creator.id]
       )
     ).rows[0];
-    const latest = async (action: string) =>
-      (await db.query(`SELECT payload, hashed_timestamp FROM account_event WHERE account_id = $1 AND action = $2 ORDER BY seq DESC LIMIT 1`, [creator.userId, action])).rows[0] ?? null;
-    const lock = await latest('github.organization_locked');
-    const broken = inst && inst.status !== 'active' ? await latest('github.connection_broken') : null;
+    // Only events about THIS installation describe it: an earlier organization's lock is not this one's.
+    const latest = async (actions: string[]) =>
+      inst
+        ? ((
+            await db.query(
+              `SELECT action, payload, hashed_timestamp FROM account_event
+                WHERE account_id = $1 AND action = ANY($2::text[]) AND payload->>'installation_id' = $3
+                ORDER BY seq DESC LIMIT 1`,
+              [creator.userId, actions, String(inst.installation_id)]
+            )
+          ).rows[0] ?? null)
+        : null;
+    const lastLock = await latest(['github.organization_locked', 'github.organization_lock_failed']);
+    const lock = lastLock?.action === 'github.organization_locked' ? lastLock : null;
+    const lockFailed = lastLock?.action === 'github.organization_lock_failed' ? lastLock : null;
+    const broken = inst && inst.status !== 'active' ? await latest(['github.connection_broken']) : null;
     res.json({
       configured,
       installation: inst
@@ -159,17 +178,18 @@ githubRouter.get('/connection', async (_req, res) => {
           }
         : null,
       organization_lock: lock ? { ...lock.payload, recorded_at: lock.hashed_timestamp } : null,
+      organization_lock_failed: lockFailed ? { ...lockFailed.payload, recorded_at: lockFailed.hashed_timestamp } : null,
       broken: broken ? { ...broken.payload, recorded_at: broken.hashed_timestamp } : null
     });
   } catch (err: any) {
     console.error('[github] connection status failed:', err?.message ?? err);
     res.status(500).json({ error: 'Something went wrong on the server.' });
   }
-});
+}));
 
 // ------------------------------------------------------------------------------------------------ browser redirects from GitHub
 
-githubPublicRouter.get('/setup', async (req, res) => {
+githubPublicRouter.get('/setup', safe(async (req, res) => {
   let config: GitHubConfig;
   try {
     config = githubConfig();
@@ -195,9 +215,9 @@ githubPublicRouter.get('/setup', async (req, res) => {
   authorize.searchParams.set('redirect_uri', `${appUrl()}/api/v1/github/callback`);
   res.set('Cache-Control', 'no-store');
   res.redirect(303, authorize.toString());
-});
+}));
 
-githubPublicRouter.get('/callback', async (req, res) => {
+githubPublicRouter.get('/callback', safe(async (req, res) => {
   let config: GitHubConfig;
   try {
     config = githubConfig();
@@ -258,12 +278,12 @@ githubPublicRouter.get('/callback', async (req, res) => {
         return backToApp(res, 'linked_elsewhere');
       }
       const linked = await client.query(
-        `INSERT INTO github_installation (creator_id, installation_id, account_login, account_id, status)
-         VALUES ($1, $2, $3, $4, 'active')
-         ON CONFLICT (installation_id) DO UPDATE SET status = 'active', account_login = EXCLUDED.account_login, status_changed_at = now()
+        `INSERT INTO github_installation (creator_id, installation_id, account_login, account_id, owner_login, status)
+         VALUES ($1, $2, $3, $4, $5, 'active')
+         ON CONFLICT (installation_id) DO UPDATE SET status = 'active', account_login = EXCLUDED.account_login, owner_login = EXCLUDED.owner_login, status_changed_at = now()
            WHERE github_installation.creator_id = EXCLUDED.creator_id
          RETURNING id`,
-        [creator.id, installationId, org, installation.account.id]
+        [creator.id, installationId, org, installation.account.id, githubUser]
       );
       if (linked.rowCount !== 1) {
         await client.query('ROLLBACK');
@@ -289,10 +309,11 @@ githubPublicRouter.get('/callback', async (req, res) => {
     // Lock the organization and record what GitHub reports afterwards (or that locking failed).
     try {
       const lock = await lockOrganization(config, installationId, org);
-      await appendAccountEvent(creator.identity_id, 'system', 'github-app', 'github.organization_locked', { installation_id: installationId, ...lock });
+      await appendAccountEvent(creator.identity_id, 'creator', creator.id, 'github.organization_locked', { installation_id: installationId, performed_by: 'github-app', ...lock });
       return backToApp(res, lock.all_applied ? 'connected' : 'connected_not_all_locked');
     } catch (err: any) {
-      await appendAccountEvent(creator.identity_id, 'system', 'github-app', 'github.organization_lock_failed', {
+      await appendAccountEvent(creator.identity_id, 'creator', creator.id, 'github.organization_lock_failed', {
+        performed_by: 'github-app',
         installation_id: installationId,
         organization: org,
         error: err instanceof GitHubError ? { status: err.status, message: String(err.body?.message ?? err.message) } : { status: null, message: 'no answer from GitHub' }
@@ -306,7 +327,7 @@ githubPublicRouter.get('/callback', async (req, res) => {
     if (userToken) await revokeUserToken(config, userToken);
     userToken = null;
   }
-});
+}));
 
 async function exchangeCode(config: GitHubConfig, code: string): Promise<string> {
   const res = await fetch(`${config.webUrl}/login/oauth/access_token`, {
