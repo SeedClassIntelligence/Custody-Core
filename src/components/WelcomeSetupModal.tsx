@@ -4,6 +4,7 @@ import { Github, HardDrive, ShieldCheck, AlertCircle, X, Sparkles } from 'lucide
 interface WelcomeSetupModalProps {
   isOpen: boolean;
   onClose: () => void;
+  codeHome: import('../utils/api').CodeHomeStatus | null;
 }
 
 const STEPS = [
@@ -30,11 +31,15 @@ const STEPS = [
   }
 ];
 
-export const WelcomeSetupModal: React.FC<WelcomeSetupModalProps> = ({ isOpen, onClose }) => {
+export const WelcomeSetupModal: React.FC<WelcomeSetupModalProps> = ({ isOpen, onClose, codeHome }) => {
   const [activeStep, setActiveStep] = useState<number>(1);
   if (!isOpen) return null;
 
   const step = STEPS.find((s) => s.id === activeStep)!;
+  // What is really connected: you are signed in with the code step (you could not see this otherwise); the code
+  // home as the server reports it; backup storage is not built yet.
+  const connectedSteps = new Set<number>([1, ...(codeHome?.installation?.status === 'active' ? [2] : [])]);
+  const isConnected = connectedSteps.has(activeStep);
   const StepIcon = step.icon;
 
   return (
@@ -47,7 +52,7 @@ export const WelcomeSetupModal: React.FC<WelcomeSetupModalProps> = ({ isOpen, on
             </div>
             <div>
               <h2 className="text-lg font-semibold text-zinc-100">Setup Guide</h2>
-              <p className="text-xs text-zinc-400">The three things you will connect. None of them are connected yet.</p>
+              <p className="text-xs text-zinc-400">The three things you will connect, and which are connected now.</p>
             </div>
           </div>
           <button
@@ -75,10 +80,17 @@ export const WelcomeSetupModal: React.FC<WelcomeSetupModalProps> = ({ isOpen, on
         </div>
 
         <div className="p-8 space-y-6 text-center">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-950/60 border border-amber-800/80 text-amber-300 text-xs font-mono font-medium">
-            <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
-            <span>Not connected yet</span>
-          </div>
+          {isConnected ? (
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-800/80 text-emerald-300 text-xs font-mono font-medium">
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+              <span>{activeStep === 2 ? `Connected: ${codeHome!.installation!.organization}` : 'Connected'}</span>
+            </div>
+          ) : (
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-950/60 border border-amber-800/80 text-amber-300 text-xs font-mono font-medium">
+              <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
+              <span>Not connected yet</span>
+            </div>
+          )}
           <div className="flex items-center justify-center gap-2 text-zinc-100">
             <StepIcon className="w-5 h-5 text-indigo-400" />
             <h3 className="font-semibold">{step.title}</h3>

@@ -59,3 +59,68 @@ export async function claimProject(input: { name: string; purpose: string }): Pr
   }
   return payload.project as Project;
 }
+
+// ---------------------------------------------------------------- code home (GitHub)
+
+export interface SettingResult {
+  setting: string;
+  requested: unknown;
+  reported: unknown;
+  applied: boolean;
+}
+
+export interface CodeHomeStatus {
+  configured: boolean;
+  installation: { installation_id: number; organization: string; status: 'active' | 'suspended' | 'removed'; connected_at: string; status_changed_at: string } | null;
+  organization_lock: { organization: string; plan: string | null; settings: SettingResult[]; all_applied: boolean; change_error: { status: number; message: string } | null; recorded_at: string } | null;
+  broken: { organization: string; reason: string; by: string | null; recorded_at: string } | null;
+}
+
+export async function fetchCodeHome(): Promise<CodeHomeStatus> {
+  const res = await authFetch('/api/v1/github/connection');
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `Could not load your code home (server returned ${res.status}).`);
+  return body as CodeHomeStatus;
+}
+
+/** Starts connecting. The server sets a one-time code in this browser and returns GitHub's install page. */
+export async function startCodeHomeConnection(): Promise<{ install_url: string; new_organization_url: string }> {
+  const res = await authFetch('/api/v1/github/connect', { method: 'POST' });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `Could not start connecting (server returned ${res.status}).`);
+  return body;
+}
+
+export interface RepositoryResult {
+  role: 'main' | 'core';
+  full_name: string;
+  html_url: string;
+  settings: SettingResult[];
+  ruleset: { applied: boolean; refused: { status: number; message: string; needs_paid_plan: boolean } | null };
+  initial_commit: { pushed: boolean; files: number; reported_sha: string | null; matches: boolean } | null;
+}
+
+/** Creates the project's repositories on GitHub (empty, or with an uploaded zip as the first commit). */
+export async function createCodeHomeRepositories(projectId: string, opts: { splitCore: boolean; zip: File | null }): Promise<RepositoryResult[]> {
+  const res = opts.zip
+    ? await authFetch(`/api/v1/projects/${projectId}/code-home?split_core=${opts.splitCore ? 1 : 0}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/zip' },
+        body: opts.zip
+      })
+    : await authFetch(`/api/v1/projects/${projectId}/code-home`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ split_core: opts.splitCore })
+      });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `GitHub repositories could not be created (server returned ${res.status}).`);
+  return body.repositories as RepositoryResult[];
+}
+
+/** Re-applies the organization lock and returns what GitHub reports now. */
+export async function relockOrganization(): Promise<void> {
+  const res = await authFetch('/api/v1/github/organization/lock', { method: 'POST' });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `Could not check with GitHub (server returned ${res.status}).`);
+}

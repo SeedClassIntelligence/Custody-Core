@@ -1,13 +1,19 @@
 import React, { useState } from 'react';
 import { FolderPlus, X, Loader2, AlertCircle } from 'lucide-react';
+import { CodeHomeStatus } from '../utils/api';
+import { RepositoryOptions } from './RepositoriesCard';
 
 interface ClaimProjectModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onClaimProject: (data: { name: string; purpose: string }) => Promise<void>;
+  onClaimProject: (data: { name: string; purpose: string; splitCore: boolean; zip: File | null; createRepositories: boolean }) => Promise<void>;
+  codeHome: CodeHomeStatus | null;
 }
 
-export const ClaimProjectModal: React.FC<ClaimProjectModalProps> = ({ isOpen, onClose, onClaimProject }) => {
+export const ClaimProjectModal: React.FC<ClaimProjectModalProps> = ({ isOpen, onClose, onClaimProject, codeHome }) => {
+  const [splitCore, setSplitCore] = useState(false);
+  const [zip, setZip] = useState<File | null>(null);
+  const connected = codeHome?.installation?.status === 'active';
   const [name, setName] = useState('');
   const [purpose, setPurpose] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -22,12 +28,15 @@ export const ClaimProjectModal: React.FC<ClaimProjectModalProps> = ({ isOpen, on
     setIsSubmitting(true);
     setError(null);
     try {
-      await onClaimProject({ name: name.trim(), purpose: purpose.trim() });
+      await onClaimProject({ name: name.trim(), purpose: purpose.trim(), splitCore, zip, createRepositories: connected });
       setName('');
       setPurpose('');
+      setZip(null);
+      setSplitCore(false);
       onClose();
     } catch (err: any) {
       setError(err.message || 'The project could not be recorded.');
+      // If the project itself was recorded, the dashboard already shows it; the error is about the repositories.
     } finally {
       setIsSubmitting(false);
     }
@@ -87,13 +96,22 @@ export const ClaimProjectModal: React.FC<ClaimProjectModalProps> = ({ isOpen, on
             />
           </div>
 
-          <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl p-3 flex items-start gap-2.5 text-xs text-amber-300">
-            <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-            <p className="text-[11px] text-amber-300/90">
-              <span className="font-semibold text-amber-200">Not connected yet:</span> creating and locking private GitHub repositories.
-              For now, claiming records your project name and purpose in the event log, and nothing else.
-            </p>
-          </div>
+          {connected ? (
+            <div className="space-y-2 border border-zinc-800 rounded-xl p-3">
+              <p className="text-xs text-zinc-300">
+                Private repositories will be created and locked in <span className="font-mono text-zinc-100">{codeHome!.installation!.organization}</span>.
+              </p>
+              <RepositoryOptions splitCore={splitCore} onSplitCore={setSplitCore} zip={zip} onZip={setZip} disabled={isSubmitting} />
+            </div>
+          ) : (
+            <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl p-3 flex items-start gap-2.5 text-xs text-amber-300">
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <p className="text-[11px] text-amber-300/90">
+                <span className="font-semibold text-amber-200">Code home not connected:</span> claiming records your project name and purpose in the event
+                log. Connect your code home on the dashboard to create its private repositories.
+              </p>
+            </div>
+          )}
 
           {error && (
             <div className="bg-rose-950/50 border border-rose-800 p-3 rounded-lg text-xs text-rose-200">
@@ -116,7 +134,7 @@ export const ClaimProjectModal: React.FC<ClaimProjectModalProps> = ({ isOpen, on
               className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium px-5 py-2 rounded-lg text-xs flex items-center gap-2 transition-colors"
             >
               {isSubmitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-              <span>{isSubmitting ? 'Recording...' : 'Record Project'}</span>
+              <span>{isSubmitting ? (connected ? 'Creating on GitHub...' : 'Recording...') : connected ? 'Claim it' : 'Record Project'}</span>
             </button>
           </div>
         </form>

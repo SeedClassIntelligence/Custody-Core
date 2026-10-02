@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { createInitialEmptyState, purgeLegacyBrowserState, AppState } from './utils/storage';
-import { fetchProjects, fetchProjectEvents, claimProject } from './utils/api';
+import { fetchProjects, fetchProjectEvents, claimProject, createCodeHomeRepositories, CodeHomeStatus } from './utils/api';
+import { CodeHomePanel } from './components/CodeHomePanel';
 
 // Components
 import { Header } from './components/Header';
@@ -28,6 +29,8 @@ function Workspace({ auth }: { auth: AuthInfo }) {
   const [state, setState] = useState<AppState | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [eventsError, setEventsError] = useState<string | null>(null);
+  const [codeHome, setCodeHome] = useState<CodeHomeStatus | null>(null);
+  const [refreshTick, setRefreshTick] = useState(0);
 
   // Navigation & UI state
   const [currentTab, setCurrentTab] = useState<string>('dashboard');
@@ -58,6 +61,18 @@ function Workspace({ auth }: { auth: AuthInfo }) {
     init();
   }, []);
 
+  // After repositories are created (or fail), reload the projects and the active project's events from the server.
+  const refresh = useCallback(async () => {
+    try {
+      const { projects } = await fetchProjects();
+      setState((prev) => (prev ? { ...prev, projects } : prev));
+    } catch (err: any) {
+      setLoadError(err.message || 'Could not reach the server.');
+    }
+    setRefreshTick((t) => t + 1);
+  }, []);
+  const onCodeHome = useCallback((s: CodeHomeStatus) => setCodeHome(s), []);
+
   const activeProjectId = state?.activeProjectId;
   useEffect(() => {
     if (!activeProjectId) return;
@@ -73,7 +88,7 @@ function Workspace({ auth }: { auth: AuthInfo }) {
     return () => {
       cancelled = true;
     };
-  }, [activeProjectId]);
+  }, [activeProjectId, refreshTick]);
 
   if (!state) {
     return (
@@ -88,7 +103,8 @@ function Workspace({ auth }: { auth: AuthInfo }) {
   const selectedWorkspace = selectedDoor ? state.workspaces.find((w) => w.door_id === selectedDoor.id) : undefined;
 
   // Claim a project: the server records it and its first event. A failure is shown, never papered over.
-  const handleClaimProject = async (data: { name: string; purpose: string }) => {
+  // With a connected code home, the repositories are created right after; a failure there is shown (and recorded).
+  const handleClaimProject = async (data: { name: string; purpose: string; splitCore: boolean; zip: File | null; createRepositories: boolean }) => {
     const project = await claimProject(data);
     setState((prev) =>
       prev
@@ -99,6 +115,13 @@ function Workspace({ auth }: { auth: AuthInfo }) {
           }
         : prev
     );
+    if (data.createRepositories) {
+      try {
+        await createCodeHomeRepositories(project.id, { splitCore: data.splitCore, zip: data.zip });
+      } finally {
+        await refresh();
+      }
+    }
   };
 
   return (
@@ -109,6 +132,7 @@ function Workspace({ auth }: { auth: AuthInfo }) {
         roleMode={roleMode}
         onSelectRoleMode={setRoleMode}
         connections={state.connections}
+        codeHome={codeHome}
         onOpenSetup={() => setIsSetupOpen(true)}
         userEmail={auth.email}
         onSignOut={() => void auth.signOut()}
@@ -122,10 +146,18 @@ function Workspace({ auth }: { auth: AuthInfo }) {
         )}
 
         {currentTab === 'dashboard' && (
+          <div className="mb-6">
+            <CodeHomePanel onChange={onCodeHome} />
+          </div>
+        )}
+
+        {currentTab === 'dashboard' && (
           <ProjectHomeView
             project={activeProject}
             events={state.events}
             eventsError={eventsError}
+            codeHome={codeHome}
+            onRepositoriesChanged={refresh}
             onOpenNewDoor={() => setIsOpenDoorOpen(true)}
             onClaimNewProject={() => setIsClaimOpen(true)}
             onSelectTab={setCurrentTab}
@@ -181,12 +213,13 @@ function Workspace({ auth }: { auth: AuthInfo }) {
         {currentTab === 'acceptance' && <AcceptanceSuiteView />}
       </main>
 
-      <WelcomeSetupModal isOpen={isSetupOpen} onClose={() => setIsSetupOpen(false)} />
+      <WelcomeSetupModal isOpen={isSetupOpen} onClose={() => setIsSetupOpen(false)} codeHome={codeHome} />
 
       <ClaimProjectModal
         isOpen={isClaimOpen}
         onClose={() => setIsClaimOpen(false)}
         onClaimProject={handleClaimProject}
+        codeHome={codeHome}
       />
 
       {activeProject && (

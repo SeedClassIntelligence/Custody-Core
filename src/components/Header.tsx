@@ -20,6 +20,7 @@ interface HeaderProps {
   roleMode: RoleMode;
   onSelectRoleMode: (mode: RoleMode) => void;
   connections: Connection[];
+  codeHome: import('../utils/api').CodeHomeStatus | null;
   onOpenSetup: () => void;
   userEmail: string;
   onSignOut: () => void;
@@ -31,6 +32,7 @@ export const Header: React.FC<HeaderProps> = ({
   roleMode,
   onSelectRoleMode,
   connections,
+  codeHome,
   onOpenSetup,
   userEmail,
   onSignOut
@@ -52,7 +54,8 @@ export const Header: React.FC<HeaderProps> = ({
       });
   }, []);
 
-  const ghConn = connections.find(c => c.kind === 'github' && c.status === 'locked');
+  // The code home as the server reports it (GET /api/v1/github/connection).
+  const ghInst = codeHome?.installation ?? null;
   const s3Conn = connections.find(c => (c.kind === 'storage_s3' || c.kind === 'storage_drive') && c.status === 'connected');
 
   return (
@@ -65,7 +68,7 @@ export const Header: React.FC<HeaderProps> = ({
           <span className="text-zinc-600">|</span>
           <span className="text-zinc-300">Phase 1: Custody Core</span>
           <span className="rounded bg-indigo-950/80 border border-indigo-700/60 px-1.5 py-0.5 text-[10px] font-medium text-indigo-300">
-            Milestone 2 Active
+            Milestone 3 Active
           </span>
         </div>
 
@@ -81,10 +84,14 @@ export const Header: React.FC<HeaderProps> = ({
           <span className="text-zinc-700">•</span>
           <div className="flex items-center gap-1.5">
             <FolderLock className="w-3 h-3 text-zinc-400" />
-            <span>GitHub App: {ghConn ? (
-              <strong className="text-zinc-200">Connected</strong>
+            <span>Code home: {ghInst?.status === 'active' ? (
+              <strong className="text-zinc-200">Connected ({ghInst.organization})</strong>
+            ) : ghInst ? (
+              <strong className="text-rose-400">Connection broken</strong>
+            ) : codeHome && !codeHome.configured ? (
+              <span className="text-zinc-500">Not connected yet (GitHub App not set up on the server)</span>
             ) : (
-              <span className="text-zinc-500">Not connected yet (Milestone 3)</span>
+              <span className="text-zinc-500">Not connected yet</span>
             )}</span>
           </div>
           <span className="text-zinc-700">•</span>

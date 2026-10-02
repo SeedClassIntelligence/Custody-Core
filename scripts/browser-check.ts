@@ -9,6 +9,8 @@ import { ensureAuthStack } from './auth-stack';
 import JSZip from 'jszip';
 import pg from 'pg';
 import { startDatabaseProcess, freePort } from '../tests/support/dbProcess';
+import { startGitHubStandIn } from '../tests/support/githubStandIn';
+import { signatureFor } from '../server/github/webhooks';
 import { assertSafeTestDatabaseUrl, collectProtectedUrls } from '../tests/support/safety';
 import { verifyHashChain } from '../shared/crypto';
 
@@ -77,6 +79,12 @@ async function main() {
 
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
+  // GitHub, for this check: the local stand-in (tests/support/githubStandIn.ts). Real GitHub: scripts/github-e2e.ts.
+  const gh = await startGitHubStandIn();
+  const ghOrg = 'browser-check-org';
+  gh.addOrg(ghOrg, { owners: ['browser-owner'] });
+  gh.browser = { login: 'browser-owner', org: ghOrg, setupUrl: `${base}/api/v1/github/setup` };
+  const webhookSecret = randomBytes(24).toString('hex');
   const server = spawn(process.execPath, ['--import', 'tsx', 'server.ts'], {
     cwd: root,
     env: {
@@ -93,7 +101,16 @@ async function main() {
       MFA_ENCRYPTION_KEY: randomBytes(32).toString('base64'),
       SUPABASE_ANON_KEY: authStack.anonKey,
       VITE_SUPABASE_URL: authStack.apiUrl,
-      VITE_SUPABASE_ANON_KEY: authStack.anonKey
+      VITE_SUPABASE_ANON_KEY: authStack.anonKey,
+      APP_URL: base,
+      GITHUB_APP_ID: gh.appId,
+      GITHUB_APP_SLUG: gh.slug,
+      GITHUB_APP_CLIENT_ID: gh.clientId,
+      GITHUB_APP_CLIENT_SECRET: gh.clientSecret,
+      GITHUB_APP_PRIVATE_KEY: gh.privateKeyPem,
+      GITHUB_WEBHOOK_SECRET: webhookSecret,
+      GITHUB_API_URL: gh.url,
+      GITHUB_WEB_URL: gh.url
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -174,7 +191,9 @@ async function main() {
 
     // 1. Empty state: no invented project, and old demo data is not resurrected.
     await page.getByText('No projects yet').waitFor();
-    check(await page.getByText('PostgreSQL Connected').isVisible(), 'header reports the database as connected');
+    // The header asks the server on its own request; give it up to 10 seconds, then judge.
+    const dbShown = await page.getByText('PostgreSQL Connected').waitFor({ timeout: 10_000 }).then(() => true, () => false);
+    check(dbShown, 'header reports the database as connected');
     check(await page.getByText(email).isVisible(), 'the header shows who is signed in');
     await shot(page, '01-project-home-empty');
 
@@ -316,6 +335,53 @@ async function main() {
     await page.getByRole('heading', { name: 'Browser Check Project' }).waitFor();
     check(true, 'with the code, the same creator sees the project they claimed');
 
+    // 9b. Code home: connect GitHub (stand-in), the organization is locked, then create the project's repositories.
+    const panel = page.getByTestId('code-home-panel');
+    await panel.getByRole('button', { name: 'Connect your code home' }).click();
+    await page.getByTestId('install-link').waitFor();
+    check(await panel.getByText('Create a free GitHub organization').isVisible(), 'the connection guide explains creating a free organization first');
+    await shot(page, '18-code-home-connect');
+    await page.getByTestId('install-link').click();
+    await panel.getByText('Your code home is connected and locked.').waitFor();
+    await panel.getByText('Members can see repositories:').waitFor(); // the settings come from the server a moment later
+    check(await panel.getByText(ghOrg).first().isVisible(), `the dashboard shows the connected organization (${ghOrg})`);
+    check(!page.url().includes('code_home='), 'the address bar is tidied after coming back from GitHub');
+    const orgNow = gh.orgs.get(ghOrg)!.settings;
+    check(orgNow.default_repository_permission === 'none' && orgNow.members_can_create_repositories === false, 'the organization on GitHub is really locked');
+    check((await panel.locator('li').count()) === 5 && (await panel.locator('li svg.text-rose-400').count()) === 0, 'all 5 organization settings are shown as GitHub reported them, all applied');
+    await shot(page, '19-code-home-connected');
+
+    const uploadZipPath = path.join(shotsDir, 'existing-code.zip');
+    const z = new JSZip();
+    z.file('my-app/README.md', '# Uploaded in the browser check\n');
+    z.file('my-app/main.py', 'print("hello")\n');
+    fs.writeFileSync(uploadZipPath, await z.generateAsync({ type: 'nodebuffer' }));
+    const card = page.getByTestId('repositories-card');
+    await card.getByRole('checkbox').check();
+    await card.getByTestId('zip-input').setInputFiles(uploadZipPath);
+    await card.getByRole('button', { name: 'Create repositories' }).click();
+    await card.getByTestId('repository-record').nth(1).waitFor();
+    const rulesLines = await card.getByTestId('branch-rules').allInnerTexts();
+    check(rulesLines.length === 2 && rulesLines.every((t) => t === 'Branch rules: needs GitHub Team, not active'), `on a free organization the dashboard says "Branch rules: needs GitHub Team, not active" (${rulesLines.join(' | ')})`);
+    check(await card.getByText('First commit: 2 files').isVisible(), 'the uploaded code is the first commit, and GitHub reports it');
+    const made = [...gh.repos.values()].filter((r) => r.org === ghOrg);
+    check(made.length === 2 && made.every((r) => r.private && !r.allow_forking), 'two private, unforkable repositories really exist in the organization');
+    await shot(page, '20-repositories-created');
+
+    // Uninstalling the app on GitHub (a signed webhook) shows the connection as broken.
+    const installationId = [...gh.installations.entries()].find(([, i]) => i.org === ghOrg)![0];
+    const hookBody = Buffer.from(JSON.stringify({ action: 'deleted', installation: { id: installationId }, sender: { login: 'browser-owner' } }));
+    const hook = await fetch(`${base}/api/v1/github/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-GitHub-Event': 'installation', 'X-GitHub-Delivery': randomBytes(8).toString('hex'), 'X-Hub-Signature-256': signatureFor(webhookSecret, hookBody) },
+      body: hookBody
+    });
+    check(hook.status === 200, 'the signed uninstall webhook is accepted');
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.getByRole('heading', { name: 'Enter your authenticator code' }).or(page.getByTestId('code-home-broken')).first().waitFor();
+    check(await page.getByTestId('code-home-broken').isVisible(), 'after uninstalling, the dashboard shows the connection as broken');
+    await shot(page, '21-code-home-broken');
+
     // 10. The browser keeps no custody data; only the login session is stored.
     const keys = await page.evaluate(() => Object.keys(localStorage));
     check(keys.every((k) => k.startsWith('sb-')), `only the login session is stored in the browser (keys: ${keys.join(', ') || 'none'})`);
@@ -365,6 +431,7 @@ async function main() {
   } finally {
     await browser.close();
     server.kill('SIGTERM');
+    await gh.stop();
     await database.stop();
   }
 

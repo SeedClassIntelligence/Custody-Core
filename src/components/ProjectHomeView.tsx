@@ -2,11 +2,15 @@ import React from 'react';
 import { FolderLock, DoorOpen, Plus, ArrowRight, AlertCircle, Database } from 'lucide-react';
 import { Project, CustodyEvent } from '../types/custody';
 import { formatHash } from '../utils/crypto';
+import { CodeHomeStatus } from '../utils/api';
+import { RepositoriesCard } from './RepositoriesCard';
 
 interface ProjectHomeViewProps {
   project?: Project | null;
   events: CustodyEvent[];
   eventsError?: string | null;
+  codeHome: CodeHomeStatus | null;
+  onRepositoriesChanged: () => void;
   onOpenNewDoor: () => void;
   onClaimNewProject: () => void;
   onSelectTab: (tab: string) => void;
@@ -23,6 +27,8 @@ export const ProjectHomeView: React.FC<ProjectHomeViewProps> = ({
   project,
   events,
   eventsError,
+  codeHome,
+  onRepositoriesChanged,
   onOpenNewDoor,
   onClaimNewProject,
   onSelectTab
@@ -84,25 +90,7 @@ export const ProjectHomeView: React.FC<ProjectHomeViewProps> = ({
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-5 space-y-2">
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
-            <FolderLock className="w-3.5 h-3.5 text-indigo-400" />
-            Code Home
-          </h3>
-          <NotConnected />
-          <p className="text-xs text-zinc-400">
-            Private repositories in your own GitHub organization, locked against forking and force-pushes.
-          </p>
-          {project.repositories.length > 0 && (
-            <ul className="pt-2 text-[11px] font-mono text-zinc-300 space-y-0.5">
-              {project.repositories.map((repo) => (
-                <li key={repo.id}>
-                  {repo.full_name} <span className="text-zinc-500">(recorded name only, lock not verified)</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+        <RepositoriesCard project={project} events={events} codeHome={codeHome} onCreated={onRepositoriesChanged} />
 
         <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-5 space-y-2">
           <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
