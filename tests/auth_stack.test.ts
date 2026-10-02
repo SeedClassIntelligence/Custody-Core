@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { authStack, createMfaUser, currentCode, enrollTotp, getUser, signIn, signUp, tokenClaims, uniqueEmail, verifyTotp } from './support/authStack';
+import { authStack, createSupabaseMfaUser as createMfaUser, currentCode, supabaseEnrollTotp as enrollTotp, getUser, signIn, signUp, tokenClaims, uniqueEmail, supabaseVerifyTotp as verifyTotp } from './support/authStack';
 
 /**
  * Proves the local Supabase Auth stack behaves the way Milestone 2 relies on, with no mocking:

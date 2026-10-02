@@ -31,7 +31,7 @@ describe('Claiming a project through the real API (as a logged-in creator)', () 
   });
 
   it('records the project and a first project.claimed event, by the logged-in creator, whose hash chain verifies', async () => {
-    const { session } = await createMfaUser('claim');
+    const { session } = await createMfaUser('claim', running.base);
     userIds.push(session.userId);
     const me = await api(running.base, session, '/me');
 
@@ -59,7 +59,7 @@ describe('Claiming a project through the real API (as a logged-in creator)', () 
   });
 
   it('rejects a claim with no purpose and records nothing', async () => {
-    const { session } = await createMfaUser('nopurpose');
+    const { session } = await createMfaUser('nopurpose', running.base);
     userIds.push(session.userId);
     const before = (await adminDb.query('SELECT COUNT(*)::int AS n FROM project')).rows[0].n;
     const res = await api(running.base, session, '/projects', { method: 'POST', body: { name: 'No Purpose' } });

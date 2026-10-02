@@ -16,7 +16,7 @@ describe('Project ids in the URL (as a logged-in creator)', () => {
     const res = await runMigrations();
     if (!res.success) throw new Error(res.message);
     running = await startApp();
-    session = (await createMfaUser('ids')).session;
+    session = (await createMfaUser('ids', running.base)).session;
     await api(running.base, session, '/me'); // creates the creator row
   });
 

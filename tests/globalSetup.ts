@@ -1,5 +1,6 @@
 import { assertSafeTestDatabaseUrl, collectProtectedUrls } from './support/safety';
 import { startDatabaseProcess, DatabaseProcess } from './support/dbProcess';
+import { randomBytes } from 'node:crypto';
 import { ensureAuthStack } from '../scripts/auth-stack';
 
 let database: DatabaseProcess | null = null;
@@ -17,6 +18,8 @@ export async function setup() {
   process.env.CUSTODY_PROTECTED_URLS = JSON.stringify(protectedUrls);
   // Test workers are started after this, so they inherit it.
   process.env.TEST_DATABASE_URL = testUrl;
+  // A throwaway key for the authenticator step; never the real one.
+  process.env.MFA_ENCRYPTION_KEY = randomBytes(32).toString('base64');
 
   // Login tests need the local Supabase Auth stack (Docker). If it cannot start, only those tests fail,
   // loudly and with the reason; the rest of the suite still runs.

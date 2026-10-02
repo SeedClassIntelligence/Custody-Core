@@ -74,8 +74,8 @@ export interface EnrolledFactor {
   secret: string;
 }
 
-/** Starts TOTP enrollment. The factor stays unverified until a code is verified. */
-export async function enrollTotp(session: AuthSession, name = 'authenticator'): Promise<EnrolledFactor> {
+/** Supabase's OWN authenticator enrollment (no longer used by the app; kept to prove it grants nothing). */
+export async function supabaseEnrollTotp(session: AuthSession, name = 'authenticator'): Promise<EnrolledFactor> {
   const r = await call('/auth/v1/factors', {
     method: 'POST',
     token: session.accessToken,
@@ -89,8 +89,8 @@ export function currentCode(secret: string): string {
   return generateSync({ secret });
 }
 
-/** Challenges a factor and verifies a code. Returns the raw result so tests can check refusals. */
-export async function verifyTotp(session: AuthSession, factor: EnrolledFactor, code: string) {
+/** Supabase's OWN code check (no longer used by the app). Returns the raw result. */
+export async function supabaseVerifyTotp(session: AuthSession, factor: EnrolledFactor, code: string) {
   const challenge = await call(`/auth/v1/factors/${factor.factorId}/challenge`, { method: 'POST', token: session.accessToken, body: {} });
   if (challenge.status !== 200) throw new Error(`challenge failed (${challenge.status}): ${JSON.stringify(challenge.body)}`);
   const r = await call(`/auth/v1/factors/${factor.factorId}/verify`, {
@@ -101,14 +101,64 @@ export async function verifyTotp(session: AuthSession, factor: EnrolledFactor, c
   return { status: r.status, body: r.body, session: r.status === 200 ? toSession(r.body, session.email) : null };
 }
 
-/** Full happy path: sign up, enroll an authenticator, verify a real code. Returns an aal2 session. */
-export async function createMfaUser(label: string): Promise<{ session: AuthSession; factor: EnrolledFactor; email: string }> {
+/** Supabase's own multifactor flow to aal2. The app ignores it; tests use it to prove that. */
+export async function createSupabaseMfaUser(label: string): Promise<{ session: AuthSession; factor: EnrolledFactor; email: string }> {
   const email = uniqueEmail(label);
   const aal1 = await signUp(email);
-  const factor = await enrollTotp(aal1);
-  const verified = await verifyTotp(aal1, factor, currentCode(factor.secret));
+  const factor = await supabaseEnrollTotp(aal1);
+  const verified = await supabaseVerifyTotp(aal1, factor, currentCode(factor.secret));
   if (!verified.session) throw new Error(`TOTP verification failed (${verified.status}): ${JSON.stringify(verified.body)}`);
   return { session: verified.session, factor, email };
+}
+
+// ------------------------------------------------------------------ Custody Core's own code step
+
+/** A code for `secret` at the current time step plus `stepOffset`, computed by otplib (independent of server/totp.ts). */
+export function codeAt(secret: string, stepOffset = 0): string {
+  return generateSync({ secret, epoch: Math.floor(Date.now() / 1000) + stepOffset * 30 });
+}
+
+async function appCall(base: string, session: { accessToken: string } | null, path: string, body?: unknown) {
+  const res = await fetch(`${base}/api/v1${path}`, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { 'Content-Type': 'application/json', ...(session ? { Authorization: `Bearer ${session.accessToken}` } : {}) },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+  return { status: res.status, body: (await res.json().catch(() => ({}))) as any, headers: res.headers };
+}
+
+/** Starts setting up an authenticator on the Custody Core server. Returns the key the app would show. */
+export async function enrollCode(base: string, session: AuthSession): Promise<{ secret: string; factorId: string; otpauthUri: string }> {
+  const r = await appCall(base, session, '/mfa/enroll', {});
+  if (r.status !== 201) throw new Error(`enroll failed (${r.status}): ${JSON.stringify(r.body)}`);
+  return { secret: r.body.secret, factorId: r.body.factor_id, otpauthUri: r.body.otpauth_uri };
+}
+
+/** Sends a code to the Custody Core server. Returns the raw answer so tests can check refusals. */
+export function verifyCode(base: string, session: { accessToken: string }, code: string) {
+  return appCall(base, session, '/mfa/verify', { code });
+}
+
+export function mfaStatus(base: string, session: { accessToken: string }) {
+  return appCall(base, session, '/mfa/status');
+}
+
+/** Full login the way the app does it: sign up, set up the authenticator on our server, enter a real code. */
+export async function createMfaUser(label: string, base: string): Promise<{ session: AuthSession; secret: string; email: string }> {
+  const email = uniqueEmail(label);
+  const session = await signUp(email);
+  const { secret } = await enrollCode(base, session);
+  const r = await verifyCode(base, session, codeAt(secret));
+  if (r.status !== 200) throw new Error(`code step failed (${r.status}): ${JSON.stringify(r.body)}`);
+  return { session, secret, email };
+}
+
+/** Signs in again with the password and passes the code step with the NEXT code (the current one may be used). */
+export async function signInWithCode(base: string, email: string, secret: string): Promise<AuthSession> {
+  const session = await signIn(email);
+  const r = await verifyCode(base, session, codeAt(secret, 1));
+  if (r.status !== 200) throw new Error(`code step failed (${r.status}): ${JSON.stringify(r.body)}`);
+  return session;
 }
 
 /** The auth server's own opinion of a token. */
