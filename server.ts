@@ -15,7 +15,7 @@ import { authenticate, creatorOf } from './server/auth';
 import { mfaRouter } from './server/mfa';
 import { githubPublicRouter, githubRouter } from './server/github/connect';
 import { githubWebhook } from './server/github/webhooks';
-import { createCodeHome } from './server/github/claim';
+import { createCodeHome, relockRepository } from './server/github/claim';
 import { verifyAccountChain } from './shared/crypto';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -32,7 +32,9 @@ function serverError(res: express.Response, err: any, what: string) {
 
 export const app = express();
 // GitHub webhooks are checked against the exact bytes GitHub signed, so this route reads the raw body.
-app.post('/api/v1/github/webhook', express.raw({ type: '*/*', limit: '5mb' }), githubWebhook);
+app.post('/api/v1/github/webhook', express.raw({ type: '*/*', limit: '5mb' }), (req, res, next) => {
+  githubWebhook(req, res).catch(next);
+});
 app.use(express.json());
 
 // --- API Routes (/api/v1/*) ---
@@ -223,6 +225,9 @@ const apiRouter = express.Router();
 
   // "Claim it": create the project's private repositories in the creator's connected organization.
   apiRouter.post('/projects/:id/code-home', express.raw({ type: 'application/zip', limit: '50mb' }), createCodeHome);
+  // Finish an existing repository's lock (and, with a zip, add code to a main repository that is still empty).
+  apiRouter.param('repoId', (req, res, next, id) => (UUID.test(id) ? next() : res.status(404).json({ error: 'Repository not found.' })));
+  apiRouter.post('/projects/:id/repositories/:repoId/lock', express.raw({ type: 'application/zip', limit: '50mb' }), relockRepository);
 
   // A project that does not exist and a project that belongs to someone else get the same answer,
   // so the response cannot be used to find out whether a project exists.
