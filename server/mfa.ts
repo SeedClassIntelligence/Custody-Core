@@ -2,6 +2,7 @@ import express from 'express';
 import type pg from 'pg';
 import { getDbPool } from './db';
 import { authenticateSession, sessionOf } from './auth';
+import { randomUUID } from 'node:crypto';
 import { matchingStep, newSecret, otpauthUri, base32Decode } from './totp';
 import { open, seal, SecretBoxNotConfigured, encryptionKey } from './secretBox';
 
@@ -51,13 +52,21 @@ mfaRouter.get('/status', async (_req, res) => {
   if (!db) return;
   const session = sessionOf(res);
   try {
+    // Lock times are decided by the database clock only (never this server's), so every instance agrees.
     const factor = await db.query(
-      `SELECT id, locked_until FROM mfa_factor WHERE identity_id = $1 AND status = 'verified'`,
+      `SELECT id, CASE WHEN locked_until > now() THEN locked_until END AS locked_until
+         FROM mfa_factor WHERE identity_id = $1 AND status = 'verified'`,
       [session.userId]
     );
     const passed = await db.query('SELECT 1 FROM mfa_session WHERE session_id = $1 AND identity_id = $2', [session.sessionId, session.userId]);
-    const lockedUntil = factor.rows[0]?.locked_until && new Date(factor.rows[0].locked_until) > new Date() ? new Date(factor.rows[0].locked_until).toISOString() : null;
-    res.json({ enrolled: factor.rowCount === 1, verified: passed.rowCount === 1, locked_until: lockedUntil });
+    const lockedUntil = factor.rows[0]?.locked_until ? new Date(factor.rows[0].locked_until).toISOString() : null;
+    res.json({
+      enrolled: factor.rowCount === 1,
+      verified: passed.rowCount === 1,
+      locked_until: lockedUntil,
+      // An authenticator from Supabase's old code step that has not been reset: setup here is refused (see /enroll).
+      needs_reset: factor.rowCount === 0 && session.hasSupabaseFactor
+    });
   } catch (err: any) {
     console.error('[mfa] status failed:', err?.message ?? err);
     res.status(500).json({ error: 'Something went wrong on the server.' });
@@ -78,12 +87,22 @@ mfaRouter.post('/enroll', async (_req, res) => {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'An authenticator is already set up for this account.' });
     }
+    // The account already had an authenticator in Supabase's old code step. Letting whoever holds the password
+    // set up a new one here would hand them the account, so the operator must reset it first.
+    if (session.hasSupabaseFactor) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'This account has an authenticator from the previous sign-in system. Ask the operator to reset it, then sign in again.',
+        required: 'operator_reset'
+      });
+    }
     // A half-finished setup is replaced; it never counted as a second factor.
     await client.query(`UPDATE mfa_factor SET status = 'abandoned' WHERE identity_id = $1 AND status = 'unverified'`, [session.userId]);
     const secret = newSecret();
+    const factorId = randomUUID();
     const row = await client.query(
-      `INSERT INTO mfa_factor (identity_id, secret_ciphertext, status) VALUES ($1, $2, 'unverified') RETURNING id`,
-      [session.userId, seal(secret, session.userId)]
+      `INSERT INTO mfa_factor (id, identity_id, secret_ciphertext, status) VALUES ($1, $2, $3, 'unverified') RETURNING id`,
+      [factorId, session.userId, seal(secret, sealOwner(session.userId, factorId))]
     );
     await client.query('COMMIT');
     // The key is shown once, so the person can add it to their authenticator app. It is not stored in clear.
@@ -111,7 +130,7 @@ mfaRouter.post('/verify', async (req, res) => {
     await client.query('BEGIN');
     // The verified authenticator if there is one, otherwise the one being set up. Never chosen by the browser.
     const found = await client.query(
-      `SELECT id, status, secret_ciphertext, last_used_step, locked_until
+      `SELECT id, status, secret_ciphertext, last_used_step, locked_until, locked_until > clock_timestamp() AS is_locked
          FROM mfa_factor
         WHERE identity_id = $1 AND status IN ('verified', 'unverified')
         ORDER BY (status = 'verified') DESC, created_at DESC
@@ -126,16 +145,17 @@ mfaRouter.post('/verify', async (req, res) => {
     const factor = found.rows[0];
 
     const record = (outcome: string) =>
-      client.query('INSERT INTO mfa_attempt (factor_id, identity_id, outcome) VALUES ($1, $2, $3)', [factor.id, session.userId, outcome]);
+      // clock_timestamp(): the moment of the attempt itself, not the start of its transaction.
+      client.query('INSERT INTO mfa_attempt (factor_id, identity_id, outcome, attempted_at) VALUES ($1, $2, $3, clock_timestamp())', [factor.id, session.userId, outcome]);
 
     // Locked: refuse without looking at the code.
-    if (factor.locked_until && new Date(factor.locked_until) > new Date()) {
+    if (factor.is_locked) {
       await record('locked');
       await client.query('COMMIT');
       return locked(res, new Date(factor.locked_until));
     }
 
-    const secret = base32Decode(open(factor.secret_ciphertext, session.userId));
+    const secret = base32Decode(open(factor.secret_ciphertext, sealOwner(session.userId, factor.id)));
     const step = matchingStep(secret, code, Date.now());
     const reused = step !== null && factor.last_used_step !== null && step <= Number(factor.last_used_step);
 
@@ -144,14 +164,14 @@ mfaRouter.post('/verify', async (req, res) => {
       const wrong = Number((await client.query(
         `SELECT count(*) AS n FROM mfa_attempt
           WHERE factor_id = $1 AND outcome IN ('wrong_code', 'reused_code')
-            AND attempted_at > now() - make_interval(mins => $2)
+            AND attempted_at > clock_timestamp() - make_interval(mins => $2)
             AND attempted_at > COALESCE((SELECT max(attempted_at) FROM mfa_attempt WHERE factor_id = $1 AND outcome = 'accepted'), '-infinity')`,
         [factor.id, WINDOW_MINUTES]
       )).rows[0].n);
 
       if (wrong >= MAX_WRONG) {
         const until = (await client.query(
-          `UPDATE mfa_factor SET locked_until = now() + make_interval(mins => $2) WHERE id = $1 RETURNING locked_until`,
+          `UPDATE mfa_factor SET locked_until = clock_timestamp() + make_interval(mins => $2) WHERE id = $1 RETURNING locked_until`,
           [factor.id, LOCK_MINUTES]
         )).rows[0].locked_until as Date;
         await client.query(
@@ -210,6 +230,11 @@ mfaRouter.post('/verify', async (req, res) => {
     client.release();
   }
 });
+
+/** What a stored key is bound to: this login and this authenticator row. */
+function sealOwner(identityId: string, factorId: string): string {
+  return `${identityId}:${factorId}`;
+}
 
 function locked(res: express.Response, until: Date) {
   res.set('Retry-After', String(Math.max(1, Math.ceil((until.getTime() - Date.now()) / 1000))));

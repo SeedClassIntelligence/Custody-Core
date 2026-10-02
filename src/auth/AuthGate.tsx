@@ -82,12 +82,19 @@ export function AuthGate({ children }: { children: (auth: AuthInfo) => React.Rea
       if (!statusRes.ok) return setPhase({ kind: 'error', message: status.error ?? `The server answered ${statusRes.status}.` });
       if (status.verified) return setPhase({ kind: 'ready', email: session.user.email ?? '' });
       if (status.enrolled) return setPhase({ kind: 'challenge', lockedUntil: status.locked_until ?? null });
+      if (status.needs_reset) {
+        return setPhase({
+          kind: 'error',
+          message: 'This account has an authenticator from the previous sign-in system. For your safety it must be reset by the operator before you set up a new one.'
+        });
+      }
 
       // No authenticator yet: start setting one up (the server replaces any half-finished setup).
       // Whoever holds the password at this moment becomes the owner of the authenticator, which is why
       // the project must require confirmed email addresses (docs/LOGIN_SETUP.md).
       const enrollRes = await authFetch('/api/v1/mfa/enroll', { method: 'POST' });
       const enrolled = await readJson(enrollRes);
+      if (enrollRes.status === 409 && enrolled.required === 'operator_reset') return setPhase({ kind: 'error', message: enrolled.error });
       if (enrollRes.status === 409) return setPhase({ kind: 'challenge', lockedUntil: null });
       if (!enrollRes.ok) return setPhase({ kind: 'error', message: enrolled.error ?? `The server answered ${enrollRes.status}.` });
       setPhase({ kind: 'enroll', otpauthUri: enrolled.otpauth_uri, secret: enrolled.secret });

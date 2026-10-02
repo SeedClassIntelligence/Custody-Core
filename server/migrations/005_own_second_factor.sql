@@ -25,7 +25,7 @@ CREATE TABLE mfa_attempt (
   factor_id UUID NOT NULL REFERENCES mfa_factor (id),
   identity_id TEXT NOT NULL,
   outcome TEXT NOT NULL CHECK (outcome IN ('accepted', 'wrong_code', 'reused_code', 'locked')),
-  attempted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  attempted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX idx_mfa_attempt_factor_time ON mfa_attempt (factor_id, attempted_at);
 

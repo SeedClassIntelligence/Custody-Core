@@ -12,7 +12,7 @@ import { verifyAccountChain } from '../shared/crypto';
 import { assertPoolTargetsTestDb } from './support/safety';
 import { freePort } from './support/dbProcess';
 import { api, startApp, RunningApp } from './support/api';
-import { authStack, codeAt, enrollCode, signIn, signUp, uniqueEmail, verifyCode, mfaStatus, createMfaUser, AuthSession } from './support/authStack';
+import { authStack, createSupabaseMfaUser, withAuthDb, codeAt, enrollCode, signIn, signUp, uniqueEmail, verifyCode, mfaStatus, createMfaUser, AuthSession } from './support/authStack';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -84,6 +84,8 @@ describe('Stored authenticator keys are encrypted (server/secretBox.ts)', () => 
     flipped[0] ^= 1;
     expect(() => open([parts[0], parts[1], parts[2], flipped.toString('base64')].join('.'), 'user-a', key)).toThrow();
     expect(() => open(sealed, 'user-a', randomBytes(32))).toThrow();
+    // a shortened authentication tag is refused outright
+    expect(() => open([parts[0], parts[1], Buffer.from(parts[2], 'base64').subarray(0, 4).toString('base64'), parts[3]].join('.'), 'user-a', key)).toThrow();
   });
 
   it('refuses to work without a proper key', () => {
@@ -138,7 +140,7 @@ describe('Code step on the server: setup, lockout after 5 wrong codes, kept in t
 
   it('setup: the key is shown once, stored only encrypted, and the first good code completes setup and opens the API', async () => {
     const pw = await signUp(uniqueEmail('setup'));
-    expect((await mfaStatus(running.base, pw)).body).toEqual({ enrolled: false, verified: false, locked_until: null });
+    expect((await mfaStatus(running.base, pw)).body).toEqual({ enrolled: false, verified: false, locked_until: null, needs_reset: false });
     const { secret, otpauthUri } = await enrollCode(running.base, pw);
     expect(new URL(otpauthUri).searchParams.get('secret')).toBe(secret);
 
@@ -150,7 +152,7 @@ describe('Code step on the server: setup, lockout after 5 wrong codes, kept in t
     expect((await api(running.base, pw, '/projects')).status).toBe(403);
     expect((await verifyCode(running.base, pw, codeAt(secret))).status).toBe(200);
     expect((await api(running.base, pw, '/projects')).status).toBe(200);
-    expect((await mfaStatus(running.base, pw)).body).toEqual({ enrolled: true, verified: true, locked_until: null });
+    expect((await mfaStatus(running.base, pw)).body).toEqual({ enrolled: true, verified: true, locked_until: null, needs_reset: false });
     expect(await accountActions(pw.userId)).toEqual(['account.second_factor_enrolled']);
 
     // Once an authenticator is verified, nobody can set up another one (including someone with only the password).
@@ -241,14 +243,16 @@ describe('Code step on the server: setup, lockout after 5 wrong codes, kept in t
   });
 
   it('a code that was already accepted cannot be used again, and counts as a wrong attempt', async () => {
-    const p = await createMfaUser('reuse', running.base);
-    const again = await signIn(p.email);
-    const used = codeAt(p.secret); // the code createMfaUser just used
+    const pw = await signUp(uniqueEmail('reuse'));
+    const { secret } = await enrollCode(running.base, pw);
+    const used = codeAt(secret); // keep the exact code that is accepted, so a 30-second boundary cannot change it
+    expect((await verifyCode(running.base, pw, used)).status).toBe(200);
+    const again = await signIn(pw.email);
     const r = await verifyCode(running.base, again, used);
     expect(r.status).toBe(422);
     expect(r.body.error).toMatch(/already used/);
-    expect((await attempts(p.session.userId)).reused_code).toBe(1);
-    expect((await verifyCode(running.base, again, codeAt(p.secret, 1))).status).toBe(200);
+    expect((await attempts(pw.userId)).reused_code).toBe(1);
+    expect((await verifyCode(running.base, again, codeAt(secret, 1))).status).toBe(200);
   });
 
   it('when the lock has expired and the wrong codes are older than the window, the right code works again', async () => {
@@ -262,6 +266,69 @@ describe('Code step on the server: setup, lockout after 5 wrong codes, kept in t
     await adminDb.query(`UPDATE mfa_attempt SET attempted_at = attempted_at - interval '16 minutes' WHERE identity_id = $1`, [p.session.userId]);
     expect((await verifyCode(running.base, p.fresh, codeAt(p.secret, 1))).status).toBe(200);
     expect((await api(running.base, p.fresh, '/projects')).status).toBe(200);
+  });
+
+  // ---- the 15-minute window and the reset after a right code (each would ship broken without these)
+
+  const ageAttempts = (userId: string, minutes: number) =>
+    adminDb.query(`UPDATE mfa_attempt SET attempted_at = attempted_at - make_interval(mins => $2) WHERE identity_id = $1`, [userId, minutes]);
+
+  it('wrong codes older than 15 minutes no longer count: 4 old + 1 new is not a lock', async () => {
+    const p = await personWithFreshSession('window-old');
+    const wrong = wrongCodeFor(p.secret);
+    for (let i = 0; i < MAX_WRONG - 1; i++) expect((await verifyCode(running.base, p.fresh, wrong)).status).toBe(422);
+    await ageAttempts(p.session.userId, 16);
+    const r = await verifyCode(running.base, p.fresh, wrong);
+    expect(r.status).toBe(422);
+    expect(r.body.attempts_left).toBe(MAX_WRONG - 1);
+  });
+
+  it('wrong codes 14 minutes old still count: 4 of those + 1 new is a lock', async () => {
+    const p = await personWithFreshSession('window-young');
+    const wrong = wrongCodeFor(p.secret);
+    for (let i = 0; i < MAX_WRONG - 1; i++) expect((await verifyCode(running.base, p.fresh, wrong)).status).toBe(422);
+    await ageAttempts(p.session.userId, 14);
+    expect((await verifyCode(running.base, p.fresh, wrong)).status).toBe(429);
+  });
+
+  it('a right code clears the count: 4 wrong, 1 right, then 1 wrong is not a lock', async () => {
+    const p = await personWithFreshSession('reset');
+    const wrong = wrongCodeFor(p.secret);
+    for (let i = 0; i < MAX_WRONG - 1; i++) expect((await verifyCode(running.base, p.fresh, wrong)).status).toBe(422);
+    expect((await verifyCode(running.base, p.fresh, codeAt(p.secret, 1))).status).toBe(200);
+    const later = await signIn(p.email);
+    const r = await verifyCode(running.base, later, wrongCodeFor(p.secret));
+    expect(r.status).toBe(422);
+    expect(r.body.attempts_left).toBe(MAX_WRONG - 1);
+  });
+
+  it('a stored key moved to another authenticator row of the same person does not decrypt (error, not a pass)', async () => {
+    const pw = await signUp(uniqueEmail('moved'));
+    const first = await enrollCode(running.base, pw);
+    await enrollCode(running.base, pw); // first row is now abandoned, second is the live one
+    const rows = (await adminDb.query('SELECT id, secret_ciphertext FROM mfa_factor WHERE identity_id = $1 ORDER BY created_at', [pw.userId])).rows;
+    await adminDb.query('UPDATE mfa_factor SET secret_ciphertext = $2 WHERE id = $1', [rows[1].id, rows[0].secret_ciphertext]);
+    expect((await verifyCode(running.base, pw, codeAt(first.secret))).status).toBe(500);
+    expect((await api(running.base, pw, '/projects')).status).toBe(403);
+  });
+
+  it("an account with an authenticator from Supabase's old code step cannot be set up again by whoever has the password", async () => {
+    const legacy = await createSupabaseMfaUser('legacy');
+    const pw = await signIn(legacy.email);
+    expect((await mfaStatus(running.base, pw)).body).toMatchObject({ enrolled: false, needs_reset: true });
+    const r = await api(running.base, pw, '/mfa/enroll', { method: 'POST', body: {} });
+    expect(r.status).toBe(409);
+    expect(r.body.required).toBe('operator_reset');
+    expect((await adminDb.query('SELECT count(*)::int AS n FROM mfa_factor WHERE identity_id = $1', [pw.userId])).rows[0].n).toBe(0);
+    // Its Supabase aal2 session does not help either.
+    expect((await api(running.base, legacy.session, '/projects')).status).toBe(403);
+
+    // After the operator removes the old authenticator (docs/LOGIN_SETUP.md), the person can set up here.
+    await withAuthDb((c) => c.query('DELETE FROM auth.mfa_factors WHERE user_id = $1', [pw.userId]));
+    const again = await signIn(legacy.email);
+    expect((await mfaStatus(running.base, again)).body.needs_reset).toBe(false);
+    const { secret } = await enrollCode(running.base, again);
+    expect((await verifyCode(running.base, again, codeAt(secret))).status).toBe(200);
   });
 
   it('the lock survives a restart: a freshly started server process still refuses the right code', async () => {

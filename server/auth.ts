@@ -67,6 +67,8 @@ export interface AuthenticatedSession {
   email: string;
   /** Supabase session id: stays the same when the access token is refreshed */
   sessionId: string;
+  /** The account has a verified authenticator in Supabase's own (no longer used) multifactor system. */
+  hasSupabaseFactor: boolean;
 }
 
 /**
@@ -118,7 +120,8 @@ export async function authenticateSession(req: Request, res: Response, next: Nex
     });
   }
 
-  res.locals.session = { userId: user.id, email: String(user.email), sessionId: claims.session_id } satisfies AuthenticatedSession;
+  const hasSupabaseFactor = Array.isArray(user.factors) && user.factors.some((f: any) => f?.status === 'verified');
+  res.locals.session = { userId: user.id, email: String(user.email), sessionId: claims.session_id, hasSupabaseFactor } satisfies AuthenticatedSession;
   res.locals.displayName = String(user.user_metadata?.full_name || user.user_metadata?.name || String(user.email).split('@')[0] || 'Creator');
   next();
 }

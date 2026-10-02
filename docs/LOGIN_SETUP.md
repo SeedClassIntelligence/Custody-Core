@@ -89,8 +89,13 @@ It does not protect, and you should know:
 
 - **Whoever first holds the password for an account that has not finished setup becomes its owner.** The setup
   screen lets that person set up an authenticator. Confirmed email (above) is what keeps this to the real owner.
-- **Someone who knows the password can lock the real owner out for 15 minutes** by entering wrong codes. That is the
-  price of the limit; it cannot get them in.
+- **Someone who knows the password can lock the real owner out for 15 minutes** by entering wrong codes, again and
+  again. That is the price of the limit.
+- **A patient guesser who has the password is slowed, not stopped.** Each guess has about a 3 in 1,000,000 chance
+  (the code of the current 30 seconds or one either side is accepted). The limit allows about 5 guesses every
+  15 minutes, so about 480 a day: roughly a 1 in 700 chance per day, and about 40% over a year of non-stop
+  guessing. Every lockout is recorded, but nobody is alerted yet. Longer locks after repeated lockouts, and a
+  notice to the owner, would close this; they are not built.
 - **Removing an authenticator is not available yet.** Losing the phone means asking the operator to reset it.
 - **The server trusts the login service** for the password step. If it is unreachable the API answers 503 and
   lets nobody in; it never guesses. Anyone who holds your project's JWT secret could mint tokens, so keep that
@@ -98,8 +103,29 @@ It does not protect, and you should know:
 
 ## Accounts made before this change
 
-Authenticators set up with Supabase's own multifactor are not used any more. Each person sets up their
-authenticator again the next time they sign in (the app shows the setup screen automatically).
+Authenticators set up with Supabase's own multifactor are not used any more. An account that has one is **not**
+offered a new setup automatically: otherwise whoever holds the password could set up their own authenticator and
+take the account. The app says the account must be reset, and the server refuses setup (409, `operator_reset`).
+
+To reset such an account, after you have confirmed with the real person that they are ready to sign in right away:
+
+1. Supabase dashboard > **Authentication** > **Users**, and copy that person's user id.
+2. **SQL Editor**, run (with their id):
+   ```sql
+   DELETE FROM auth.mfa_factors WHERE user_id = '<user id>';
+   ```
+3. Ask them to sign in now and set up their authenticator; until they do, the first person to sign in with the
+   password could.
+
+## Supabase's built-in REST API is closed to Custody Core's data
+
+Supabase serves every table in the `public` schema at `/rest/v1` to anyone holding the public key (which is in the
+browser), and on Supabase new tables are open to it by default. Custody Core never uses that API, so
+`server/roles.sql` (applied on every migration, and by the dashboard apply script) removes every right of the roles
+`anon` and `authenticated` on our tables and functions, and turns on row-level security with a policy only for the
+app account. `docs/deploy/verify-migrations.sql` checks this (rows 71 to 73), and
+`tests/data_api_exposure.test.ts` proves it on the real Supabase database image, including that without it a
+password-only user could mark the code step as passed.
 
 ## How the server decides
 

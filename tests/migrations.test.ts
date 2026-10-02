@@ -38,6 +38,11 @@ describe('Versioned migrations (schema_migrations + 002_hashed_timestamp_constra
     const url = urlForDatabase(testUrl, name);
     assertSafeTestDatabaseUrl(url, collectProtectedUrls());
     const pool = new pg.Pool({ connectionString: url });
+    // pool.end() can resolve before the server has closed the connections; DROP DATABASE ... WITH (FORCE) then
+    // terminates them (57P01). That one is expected during cleanup; anything else still surfaces.
+    pool.on('error', (err: any) => {
+      if (err?.code !== '57P01') throw err;
+    });
     scratch.push({ name, pool });
     return pool;
   }
