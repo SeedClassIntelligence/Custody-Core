@@ -9,7 +9,8 @@
 --   * records migration 001 (already applied to this database by the app) after checking it is really there
 --   * applies every later migration in order: 002 (hashed_timestamp constraint), 003 (database-built event chain,
 --     append_event), 004 (creator email no longer unique), 005 (authenticator-code step run by the app, with
---     the wrong-code limit, and the per-account record account_event)
+--     the wrong-code limit, and the per-account record account_event), 006 (code home: GitHub installations,
+--     received webhooks, repositories created on GitHub)
 --   * records each in schema_migrations exactly as `npm run migrate` does
 --   * applies the custody_app grants (server/roles.sql): no INSERT on event or account_event, EXECUTE on
 --     append_event and append_account_event, attempts can be added but never changed or deleted
@@ -479,6 +480,65 @@ END
 $apply3$;
 
 -- ---------------------------------------------------------------------------
+-- 006_code_home.sql  (skipped if it is already recorded in schema_migrations)
+-- ---------------------------------------------------------------------------
+DO $apply4$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '006_code_home.sql') THEN
+    EXECUTE $mig$
+-- 006: Code home (GitHub). A creator's GitHub organization, connected through the Custody Core GitHub App.
+--
+-- Only the installation's id is stored, never a token: tokens are requested per operation and revoked after it.
+
+-- The app installed on a creator's organization. Linked to the creator only after GitHub itself confirmed,
+-- through a signed-in GitHub user, that this installation belongs to them (server/github/connect.ts).
+CREATE TABLE github_installation (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  creator_id UUID NOT NULL REFERENCES creator (id),
+  installation_id BIGINT NOT NULL UNIQUE,
+  account_login TEXT NOT NULL,            -- the organization's name on GitHub
+  account_id BIGINT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('active', 'suspended', 'removed')),
+  connected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- One working code home per creator.
+CREATE UNIQUE INDEX uq_github_installation_one_active ON github_installation (creator_id) WHERE status <> 'removed';
+
+-- One-time codes that tie a GitHub installation round trip to the creator who started it. Only a hash is kept.
+CREATE TABLE github_connect_state (
+  state_hash CHAR(64) PRIMARY KEY,
+  creator_id UUID NOT NULL REFERENCES creator (id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  installation_hint BIGINT,               -- what GitHub's redirect said; only trusted after GitHub confirms it
+  used_at TIMESTAMPTZ
+);
+
+-- Every webhook GitHub sent us that passed the signature check, once (GitHub may deliver the same one again).
+CREATE TABLE github_webhook_delivery (
+  delivery_id TEXT PRIMARY KEY,
+  event TEXT NOT NULL,
+  action TEXT,
+  installation_id BIGINT,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  outcome TEXT NOT NULL
+);
+
+-- Repositories now come from GitHub: which installation created them, and GitHub's own id.
+ALTER TABLE repository ADD COLUMN installation_id BIGINT;
+CREATE UNIQUE INDEX uq_repository_github_repo_id ON repository (github_repo_id) WHERE github_repo_id <> '';
+
+$mig$;
+    INSERT INTO schema_migrations (version) VALUES ('006_code_home.sql');
+    RAISE NOTICE 'applied 006_code_home.sql';
+  ELSE
+    RAISE NOTICE 'skipped 006_code_home.sql (already applied)';
+  END IF;
+END
+$apply4$;
+
+-- ---------------------------------------------------------------------------
 -- server/roles.sql  (the custody_app grants; safe to repeat)
 -- ---------------------------------------------------------------------------
 -- Custody Core Restricted Database Role: custody_app
@@ -515,6 +575,11 @@ REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE account_event FROM custody_app;
 -- Only the operator clears a reset requirement.
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE mfa_legacy_reset FROM custody_app;
 GRANT EXECUTE ON FUNCTION append_account_event(text, text, text, text, jsonb) TO custody_app;
+
+-- Code home (migration 006): received webhooks are a record; installations are never deleted, only marked removed.
+REVOKE UPDATE, DELETE, TRUNCATE ON TABLE github_webhook_delivery FROM custody_app;
+REVOKE DELETE, TRUNCATE ON TABLE github_installation FROM custody_app;
+REVOKE DELETE, TRUNCATE ON TABLE github_connect_state FROM custody_app;
 
 -- The app role must not be able to create objects (for example look-alike functions) in this schema.
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;

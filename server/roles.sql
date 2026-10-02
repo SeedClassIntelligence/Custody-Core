@@ -33,6 +33,11 @@ REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE account_event FROM custody_app;
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE mfa_legacy_reset FROM custody_app;
 GRANT EXECUTE ON FUNCTION append_account_event(text, text, text, text, jsonb) TO custody_app;
 
+-- Code home (migration 006): received webhooks are a record; installations are never deleted, only marked removed.
+REVOKE UPDATE, DELETE, TRUNCATE ON TABLE github_webhook_delivery FROM custody_app;
+REVOKE DELETE, TRUNCATE ON TABLE github_installation FROM custody_app;
+REVOKE DELETE, TRUNCATE ON TABLE github_connect_state FROM custody_app;
+
 -- The app role must not be able to create objects (for example look-alike functions) in this schema.
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 

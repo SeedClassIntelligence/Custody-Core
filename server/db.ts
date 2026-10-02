@@ -239,3 +239,18 @@ export async function verifyServerProjectEvents(projectId: string): Promise<Veri
     }))
   );
 }
+
+/** Records an event in a login's own record (account_event). The database builds the chain. */
+export async function appendAccountEvent(
+  accountId: string,
+  actorType: InsertEventParams['actor_type'],
+  actorId: string,
+  action: string,
+  payload: Record<string, any>,
+  client?: pg.PoolClient
+) {
+  const runner = client ?? getDbPool();
+  if (!runner) throw new Error('Database is not connected.');
+  const res = await runner.query('SELECT * FROM append_account_event($1, $2, $3, $4, $5::jsonb)', [accountId, actorType, actorId, action, JSON.stringify(payload)]);
+  return res.rows[0];
+}
