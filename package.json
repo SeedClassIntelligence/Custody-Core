@@ -14,6 +14,7 @@
     "lint": "tsc --noEmit",
     "test:db": "tsx scripts/test-db.ts",
     "browser-check": "tsx scripts/browser-check.ts",
+    "github-e2e": "tsx scripts/github-e2e.ts",
     "verify-live": "tsx scripts/verify-live-db.ts",
     "auth-stack:start": "tsx scripts/auth-stack.ts start",
     "auth-stack:stop": "tsx scripts/auth-stack.ts stop",
