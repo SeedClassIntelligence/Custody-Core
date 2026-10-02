@@ -23,6 +23,14 @@ GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO custody_app;
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE event FROM custody_app;
 GRANT EXECUTE ON FUNCTION append_event(uuid, text, text, text, text, text, jsonb) TO custody_app;
 
+-- Second factor (migration 005): attempts are a record, so the app may add and read them but never change them.
+-- Account events, like project events, are written only through append_account_event().
+REVOKE UPDATE, DELETE, TRUNCATE ON TABLE mfa_attempt FROM custody_app;
+REVOKE UPDATE, DELETE, TRUNCATE ON TABLE mfa_session FROM custody_app;
+REVOKE DELETE, TRUNCATE ON TABLE mfa_factor FROM custody_app;
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE account_event FROM custody_app;
+GRANT EXECUTE ON FUNCTION append_account_event(text, text, text, text, jsonb) TO custody_app;
+
 -- The app role must not be able to create objects (for example look-alike functions) in this schema.
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 
