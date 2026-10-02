@@ -13,6 +13,9 @@ import {
 } from './server/db';
 import { authenticate, creatorOf } from './server/auth';
 import { mfaRouter } from './server/mfa';
+import { githubPublicRouter, githubRouter } from './server/github/connect';
+import { githubWebhook } from './server/github/webhooks';
+import { createCodeHome } from './server/github/claim';
 import { verifyAccountChain } from './shared/crypto';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -28,6 +31,8 @@ function serverError(res: express.Response, err: any, what: string) {
 }
 
 export const app = express();
+// GitHub webhooks are checked against the exact bytes GitHub signed, so this route reads the raw body.
+app.post('/api/v1/github/webhook', express.raw({ type: '*/*', limit: '5mb' }), githubWebhook);
 app.use(express.json());
 
 // --- API Routes (/api/v1/*) ---
@@ -55,7 +60,7 @@ const apiRouter = express.Router();
     res.json({
       status: 'ok',
       service: 'Custody Core Server',
-      milestone: 'Milestone 2: login with required multifactor authentication',
+      milestone: 'Milestone 3: code home (GitHub)',
       database: {
         status: dbStatus,
         configured: hasDb,
@@ -67,6 +72,9 @@ const apiRouter = express.Router();
 
   // The authenticator-code step: needs a real Supabase session, not the code step itself.
   apiRouter.use('/mfa', mfaRouter);
+
+  // GitHub sends the browser back here after installing and authorizing; identity comes from the one-time state.
+  apiRouter.use('/github', githubPublicRouter);
 
   // Everything below requires a full login: session, confirmed email and the code step passed on this server.
   // Only /health above is open.
@@ -85,6 +93,8 @@ const apiRouter = express.Router();
       serverError(res, err, 'reading account events');
     }
   });
+
+  apiRouter.use('/github', githubRouter);
 
   apiRouter.get('/me', (_req, res) => {
     const creator = creatorOf(res);
@@ -149,13 +159,9 @@ const apiRouter = express.Router();
     if (typeof name !== 'string' || typeof purpose !== 'string' || name.length > 200 || purpose.length > 5000) {
       return res.status(400).json({ error: 'Project name (up to 200 characters) and purpose (up to 5000) must be text.' });
     }
-    if (
-      repositories !== undefined &&
-      (!Array.isArray(repositories) ||
-        repositories.length > 20 ||
-        repositories.some((r: any) => !r || typeof r.full_name !== 'string' || !r.full_name.trim() || r.full_name.length > 200))
-    ) {
-      return res.status(400).json({ error: 'repositories must be a list of up to 20 items, each with a full_name.' });
+    if (repositories !== undefined) {
+      // Repositories are created on GitHub by the server (POST /projects/:id/code-home), never named by the browser.
+      return res.status(400).json({ error: 'Repositories cannot be sent here; they are created in your code home after the claim.' });
     }
 
     const client = await db.connect();
@@ -171,21 +177,6 @@ const apiRouter = express.Router();
       );
       const project = projRes.rows[0];
 
-      // Insert Repositories
-      const createdRepos = [];
-      if (Array.isArray(repositories)) {
-        for (const repo of repositories) {
-          const repoRes = await client.query(
-            // locked_at stays empty: nothing is locked until the GitHub integration reads the lock back.
-            `INSERT INTO repository (project_id, full_name, default_branch, is_core)
-             VALUES ($1, $2, $3, $4)
-             RETURNING *`,
-            [project.id, repo.full_name, repo.default_branch || 'main', repo.is_core || false]
-          );
-          createdRepos.push(repoRes.rows[0]);
-        }
-      }
-
       // Record the first event in the same transaction, so a project never exists without its claim event.
       const event = await insertEvent({
         project_id: project.id,
@@ -198,7 +189,8 @@ const apiRouter = express.Router();
           name: project.name,
           purpose: project.purpose,
           split_core: !!split_core,
-          repositories: createdRepos.map(r => r.full_name)
+          // None yet: they are created on GitHub after the claim, each with its own event.
+          repositories: []
         }
       }, client);
 
@@ -207,7 +199,7 @@ const apiRouter = express.Router();
       res.status(201).json({
         project: {
           ...project,
-          repositories: createdRepos
+          repositories: []
         },
         event
       });
@@ -228,6 +220,9 @@ const apiRouter = express.Router();
     }
     next();
   });
+
+  // "Claim it": create the project's private repositories in the creator's connected organization.
+  apiRouter.post('/projects/:id/code-home', express.raw({ type: 'application/zip', limit: '50mb' }), createCodeHome);
 
   // A project that does not exist and a project that belongs to someone else get the same answer,
   // so the response cannot be used to find out whether a project exists.
