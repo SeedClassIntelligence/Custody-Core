@@ -55,6 +55,18 @@ WITH checks(sort, name, expected, actual) AS (
   (69, 'account_event is append-only (both triggers exist)', 'true',
        (SELECT (count(*) = 2)::text FROM pg_trigger WHERE tgrelid = to_regclass('public.account_event')
            AND tgname IN ('trg_account_event_append_only', 'trg_account_event_prevent_truncate') AND NOT tgisinternal)),
+  (71, 'Supabase REST API roles (anon, authenticated) have NO rights on any Custody Core table', '0',
+       (SELECT count(*)::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          CROSS JOIN (SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated')) r
+          CROSS JOIN unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) AS p(priv)
+         WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v') AND has_table_privilege(r.rolname, c.oid, p.priv))),
+  (72, 'Supabase REST API roles (anon, authenticated) can NOT run any Custody Core function', '0',
+       (SELECT count(*)::text FROM pg_proc f JOIN pg_namespace n ON n.oid = f.pronamespace
+          CROSS JOIN (SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated')) r
+         WHERE n.nspname = 'public' AND has_function_privilege(r.rolname, f.oid, 'EXECUTE'))),
+  (73, 'row-level security is on for every Custody Core table', '0',
+       (SELECT count(*)::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relkind = 'r' AND NOT c.relrowsecurity)),
   (70, 'custody_app has NO access to schema_migrations', 'false',
        CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN 'table schema_migrations is missing'
             ELSE CASE WHEN (SELECT count(*) = 1 FROM pg_roles WHERE rolname = 'custody_app') THEN has_table_privilege('custody_app', 'public.schema_migrations', 'SELECT')::text ELSE 'role missing' END END),
