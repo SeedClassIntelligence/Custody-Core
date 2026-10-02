@@ -188,6 +188,16 @@ const apiRouter = express.Router();
     }
   });
 
+  // A project id that is not a UUID cannot name a project, so say "not found" instead of letting the
+  // database reject it with a 500.
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  apiRouter.param('id', (req, res, next, id) => {
+    if (!UUID.test(id)) {
+      return res.status(404).json({ error: 'Project not found.' });
+    }
+    next();
+  });
+
   // TODO: Milestone 2 creator check - verify session creator owns or has granted access to project
   apiRouter.get('/projects/:id/events', async (req, res) => {
     const db = getDbPool();
