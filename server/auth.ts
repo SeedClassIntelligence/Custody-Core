@@ -6,10 +6,10 @@ import { getDbPool } from './db';
  * header, query parameter or body field the client chooses.
  *
  * Every request must carry `Authorization: Bearer <access token>`. The server asks Supabase Auth to
- * validate the token (signature, expiry, revocation), then reads the assurance level from it:
- *   - missing, malformed, invalid or expired token  -> 401
- *   - valid token, but not multifactor (below aal2) -> 403
- *   - valid aal2 token                              -> the request runs as that creator
+ * validate the token (signature, expiry, revocation), then checks the code step was passed on this server:
+ *   - missing, malformed, invalid or expired token          -> 401
+ *   - valid session, but the code step not passed here      -> 403
+ *   - valid session that passed the code step on this server -> the request runs as that creator
  *
  * Only the project URL and the public (anon) key are needed. The service-role key is not used.
  */
@@ -61,7 +61,19 @@ async function ensureCreator(userId: string, email: string, displayName: string)
   return id;
 }
 
-export async function authenticate(req: Request, res: Response, next: NextFunction) {
+export interface AuthenticatedSession {
+  /** Supabase Auth user id */
+  userId: string;
+  email: string;
+  /** Supabase session id: stays the same when the access token is refreshed */
+  sessionId: string;
+}
+
+/**
+ * Step 1: a real, current Supabase session (email and password) for a confirmed email address.
+ * Enough to set up or enter the authenticator code, and nothing else.
+ */
+export async function authenticateSession(req: Request, res: Response, next: NextFunction) {
   const config = getAuthConfig();
   if (!config) {
     return res.status(503).json({ error: 'Login is not configured on the server (SUPABASE_URL and SUPABASE_ANON_KEY are missing).' });
@@ -98,14 +110,6 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
     return res.status(401).json({ error: 'Your session is not valid. Sign in again.' });
   }
 
-  if (claims.aal !== 'aal2') {
-    return res.status(403).json({
-      error: 'Multifactor authentication is required. Enter the code from your authenticator app.',
-      required: 'aal2',
-      current: claims.aal ?? 'unknown'
-    });
-  }
-
   // The email is how a creator is shown and contacted, so it must belong to this person.
   if (!user.email || !user.email_confirmed_at) {
     return res.status(403).json({
@@ -114,16 +118,43 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
     });
   }
 
+  res.locals.session = { userId: user.id, email: String(user.email), sessionId: claims.session_id } satisfies AuthenticatedSession;
+  res.locals.displayName = String(user.user_metadata?.full_name || user.user_metadata?.name || String(user.email).split('@')[0] || 'Creator');
+  next();
+}
+
+/**
+ * Step 2: this session has passed the authenticator-code step on THIS server (see server/mfa.ts).
+ * Supabase's own multifactor result (the token's aal claim) is deliberately not trusted: Supabase's
+ * code-check endpoint cannot be rate limited on every plan, so codes are checked only here.
+ */
+export async function requireSecondFactor(_req: Request, res: Response, next: NextFunction) {
+  const session = res.locals.session as AuthenticatedSession;
+  const db = getDbPool();
+  if (!db) return res.status(503).json({ error: 'Database not connected.' });
+
   try {
-    const email = String(user.email || '');
-    const displayName = String(user.user_metadata?.full_name || user.user_metadata?.name || email.split('@')[0] || 'Creator');
-    const id = await ensureCreator(user.id, email, displayName);
-    res.locals.creator = { id, userId: user.id, email } satisfies AuthenticatedCreator;
+    const passed = await db.query('SELECT 1 FROM mfa_session WHERE session_id = $1 AND identity_id = $2', [session.sessionId, session.userId]);
+    if (passed.rowCount !== 1) {
+      return res.status(403).json({
+        error: 'Enter the code from your authenticator app.',
+        required: 'second_factor'
+      });
+    }
+    const id = await ensureCreator(session.userId, session.email, String(res.locals.displayName));
+    res.locals.creator = { id, userId: session.userId, email: session.email } satisfies AuthenticatedCreator;
     next();
   } catch (err: any) {
-    console.error('[auth] could not load the creator record:', err?.message ?? err);
+    console.error('[auth] could not check the second factor or load the creator record:', err?.message ?? err);
     return res.status(500).json({ error: 'Could not load your creator record.' });
   }
+}
+
+/** A full login: real session, confirmed email, and the code step passed on this server. */
+export const authenticate = [authenticateSession, requireSecondFactor];
+
+export function sessionOf(res: Response): AuthenticatedSession {
+  return res.locals.session as AuthenticatedSession;
 }
 
 export function creatorOf(res: Response): AuthenticatedCreator {
