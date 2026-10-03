@@ -4,15 +4,15 @@ import { assertPoolTargetsTestDb } from './support/safety';
 import { withTriggersBypassed } from './support/cleanup';
 import { api, startApp, RunningApp } from './support/api';
 import {
-  authStack, createMfaUser, enrollTotp, signIn, signUp, tokenClaims, uniqueEmail, currentCode, verifyTotp, AuthSession
+  authStack, createMfaUser, createSupabaseMfaUser, enrollCode, signIn, signUp, tokenClaims, uniqueEmail, codeAt, verifyCode, AuthSession
 } from './support/authStack';
 
 /**
  * Login on the API, tested against a real Supabase Auth server and a real database:
- * no token or a bad token is 401, a password-only (aal1) session is 403, a verified authenticator
- * session (aal2) gets in, and the logged-in creator, not the client, decides who owns what.
+ * no token or a bad token is 401, a session that has not passed the code step ON THIS SERVER is 403,
+ * a session that has gets in, and the logged-in creator, not the client, decides who owns what.
  */
-describe('API login: 401 without a valid session, 403 without multifactor, creator linked on first verified login', () => {
+describe('API login: 401 without a valid session, 403 without the code step, creator linked on first full login', () => {
   const adminDb = getAdminPool()!;
   let running: RunningApp;
   const userIds: string[] = [];
@@ -38,7 +38,7 @@ describe('API login: 401 without a valid session, 403 without multifactor, creat
   });
 
   async function newCreator(label: string) {
-    const made = await createMfaUser(label);
+    const made = await createMfaUser(label, running.base);
     userIds.push(made.session.userId);
     return made;
   }
@@ -85,55 +85,74 @@ describe('API login: 401 without a valid session, 403 without multifactor, creat
     expect((await api(running.base, null, '/projects', { method: 'POST', body: { name: 'x', purpose: 'y', creator_id: session.userId } })).status).toBe(401);
   });
 
-  it('a password-only session (aal1) is 403 on every protected route, for a user who has no authenticator yet', async () => {
-    const aal1 = await signUp(uniqueEmail('aal1new'));
-    userIds.push(aal1.userId);
-    expect(aal1.aal).toBe('aal1');
+  it('a password-only session is 403 on every protected route, for a user who has no authenticator yet', async () => {
+    const pw = await signUp(uniqueEmail('pwonly'));
+    userIds.push(pw.userId);
     for (const [method, path, body] of protectedRoutes) {
-      const r = await api(running.base, aal1, path, { method, body });
+      const r = await api(running.base, pw, path, { method, body });
       expect(r.status, `${method} ${path}`).toBe(403);
-      expect(r.body.required).toBe('aal2');
-      expect(r.body.current).toBe('aal1');
+      expect(r.body.required).toBe('second_factor');
     }
   });
 
-  it('a password-only session is 403 even for a user who has already set up MFA, and a half-finished enrollment does not count', async () => {
-    const { email, session } = await newCreator('aal1mfa');
+  it("Supabase's own multifactor result (an aal2 token) does NOT get in: codes count only when checked by this server", async () => {
+    const viaSupabase = await createSupabaseMfaUser('supabase-aal2');
+    userIds.push(viaSupabase.session.userId);
+    expect(tokenClaims(viaSupabase.session.accessToken).aal).toBe('aal2');
+    for (const [method, path, body] of protectedRoutes) {
+      const r = await api(running.base, viaSupabase.session, path, { method, body });
+      expect(r.status, `${method} ${path}`).toBe(403);
+      expect(r.body.required).toBe('second_factor');
+    }
+  });
+
+  it('a password-only session is 403 even for a user who has already set up the code step, and a half-finished setup does not count', async () => {
+    const { email, session } = await newCreator('pwagain');
     const again = await signIn(email);
-    expect(again.aal).toBe('aal1');
     expect((await api(running.base, again, '/projects')).status).toBe(403);
 
-    // Enrolled but never verified: still aal1.
+    // Set up but never confirmed with a code: still no access.
     const half = await signUp(uniqueEmail('half'));
     userIds.push(half.userId);
-    await enrollTotp(half);
+    await enrollCode(running.base, half);
     expect((await api(running.base, half, '/projects')).status).toBe(403);
 
-    // The verified session of the first user does work.
+    // The session that passed the code step does work.
     expect((await api(running.base, session, '/projects')).status).toBe(200);
   });
 
   it('a wrong authenticator code does not open the API', async () => {
-    const aal1 = await signUp(uniqueEmail('wrong'));
-    userIds.push(aal1.userId);
-    const factor = await enrollTotp(aal1);
-    const wrong = currentCode(factor.secret) === '000000' ? '000001' : '000000';
-    expect((await verifyTotp(aal1, factor, wrong)).session).toBeNull();
-    expect((await api(running.base, aal1, '/projects')).status).toBe(403);
+    const pw = await signUp(uniqueEmail('wrong'));
+    userIds.push(pw.userId);
+    const { secret } = await enrollCode(running.base, pw);
+    const right = codeAt(secret);
+    const wrong = right === '000000' ? '000001' : '000000';
+    const r = await verifyCode(running.base, pw, wrong);
+    expect(r.status).toBe(422);
+    expect((await api(running.base, pw, '/projects')).status).toBe(403);
   });
 
-  it('no creator row is created for a session that failed the multifactor check', async () => {
-    const aal1 = await signUp(uniqueEmail('nocreator'));
-    userIds.push(aal1.userId);
-    await api(running.base, aal1, '/projects');
-    await api(running.base, aal1, '/projects', { method: 'POST', body: { name: 'x', purpose: 'y' } });
-    const n = (await adminDb.query('SELECT COUNT(*)::int AS n FROM creator WHERE identity_id = $1', [aal1.userId])).rows[0].n;
+  it('passing the code step in one session does not unlock another session of the same person', async () => {
+    const { email, session } = await newCreator('persession');
+    expect((await api(running.base, session, '/projects')).status).toBe(200);
+    const other = await signIn(email);
+    expect((await api(running.base, other, '/projects')).status).toBe(403);
+  });
+
+  it('no creator row is created for a session that has not passed the code step', async () => {
+    const pw = await signUp(uniqueEmail('nocreator'));
+    userIds.push(pw.userId);
+    await api(running.base, pw, '/projects');
+    await api(running.base, pw, '/projects', { method: 'POST', body: { name: 'x', purpose: 'y' } });
+    const n = (await adminDb.query('SELECT COUNT(*)::int AS n FROM creator WHERE identity_id = $1', [pw.userId])).rows[0].n;
     expect(n).toBe(0);
   });
 
   it('the first verified login creates the creator row linked to the Supabase user; later logins reuse it', async () => {
+    // newCreator signs up and passes the code step: that first verified login creates the row (and records the
+    // setup with that creator as actor). A login that has not passed the code step gets none (tested below).
     const { session, email } = await newCreator('first');
-    expect((await adminDb.query('SELECT COUNT(*)::int AS n FROM creator WHERE identity_id = $1', [session.userId])).rows[0].n).toBe(0);
+    expect((await adminDb.query('SELECT COUNT(*)::int AS n FROM creator WHERE identity_id = $1', [session.userId])).rows[0].n).toBe(1);
 
     const me = await api(running.base, session, '/me');
     expect(me.status).toBe(200);

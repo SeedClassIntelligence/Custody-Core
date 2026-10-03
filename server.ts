@@ -12,6 +12,8 @@ import {
   insertEvent
 } from './server/db';
 import { authenticate, creatorOf } from './server/auth';
+import { mfaRouter } from './server/mfa';
+import { verifyAccountChain } from './shared/crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -63,8 +65,26 @@ const apiRouter = express.Router();
     });
   });
 
-  // Everything below requires a verified multifactor login. Only /health above is open.
+  // The authenticator-code step: needs a real Supabase session, not the code step itself.
+  apiRouter.use('/mfa', mfaRouter);
+
+  // Everything below requires a full login: session, confirmed email and the code step passed on this server.
+  // Only /health above is open.
   apiRouter.use(authenticate);
+
+  // The signed-in person's own account record (for example lockouts), with a verification of its chain.
+  apiRouter.get('/account/events', async (_req, res) => {
+    const db = getDbPool();
+    if (!db) return res.status(503).json({ error: 'Database not connected.' });
+    try {
+      const rows = (await db.query('SELECT * FROM account_event WHERE account_id = $1 ORDER BY seq', [creatorOf(res).userId])).rows;
+      const events = rows.map((r) => ({ ...r, seq: Number(r.seq) }));
+      const check = await verifyAccountChain(events.map((e) => ({ ...e, timestamp: e.hashed_timestamp })));
+      res.json({ events, valid: check.isValid, broken_at_seq: check.brokenAtSeq ?? null, count: events.length });
+    } catch (err: any) {
+      serverError(res, err, 'reading account events');
+    }
+  });
 
   apiRouter.get('/me', (_req, res) => {
     const creator = creatorOf(res);

@@ -33,7 +33,13 @@ describe('Built browser bundle', () => {
       const i = l.indexOf('=');
       return [l.slice(0, i), l.slice(i + 1).replace(/^"|"$/g, '')];
     }));
-    secrets = { SERVICE_ROLE_KEY: env.SERVICE_ROLE_KEY, SECRET_KEY: env.SECRET_KEY, JWT_SECRET: env.JWT_SECRET };
+    secrets = {
+      SERVICE_ROLE_KEY: env.SERVICE_ROLE_KEY,
+      SECRET_KEY: env.SECRET_KEY,
+      JWT_SECRET: env.JWT_SECRET,
+      // The server's key for stored authenticator keys (set by tests/globalSetup.ts).
+      MFA_ENCRYPTION_KEY: process.env.MFA_ENCRYPTION_KEY ?? ''
+    };
 
     const build = spawnSync(process.execPath, [path.join(root, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', '--outDir', outDir, '--emptyOutDir'], {
       cwd: root,
@@ -45,7 +51,8 @@ describe('Built browser bundle', () => {
         VITE_SUPABASE_ANON_KEY: anonKey,
         SUPABASE_SERVICE_ROLE_KEY: secrets.SERVICE_ROLE_KEY ?? '',
         SERVICE_ROLE_KEY: secrets.SERVICE_ROLE_KEY ?? '',
-        DATABASE_URL: process.env.TEST_DATABASE_URL ?? ''
+        DATABASE_URL: process.env.TEST_DATABASE_URL ?? '',
+        MFA_ENCRYPTION_KEY: secrets.MFA_ENCRYPTION_KEY ?? ''
       }
     });
     if (build.status !== 0) throw new Error(`vite build failed:\n${build.stdout}\n${build.stderr}`.slice(-2000));
@@ -71,10 +78,11 @@ describe('Built browser bundle', () => {
       expect(all().includes(value), `${name} value found in the bundle`).toBe(false);
     }
     expect(Object.values(secrets).filter(Boolean).length).toBeGreaterThan(0); // we really had secrets to look for
+    expect(secrets.MFA_ENCRYPTION_KEY, 'the authenticator key must be set for this check').toBeTruthy();
   });
 
   it('contains no service-role variable name or app database password', () => {
-    for (const needle of ['SUPABASE_SERVICE_ROLE_KEY', 'SERVICE_ROLE_KEY', 'service_role', 'CustodyAppPass']) {
+    for (const needle of ['SUPABASE_SERVICE_ROLE_KEY', 'SERVICE_ROLE_KEY', 'service_role', 'CustodyAppPass', 'MFA_ENCRYPTION_KEY']) {
       const hit = files.find((f) => f.text.includes(needle));
       expect(hit?.name, `"${needle}" found in ${hit?.name}`).toBeUndefined();
     }

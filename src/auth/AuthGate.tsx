@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Shield, Loader2, AlertCircle, KeyRound, LogIn } from 'lucide-react';
-import { supabase } from './supabase';
+import QRCode from 'qrcode';
+import { supabase, authFetch } from './supabase';
 
 export interface AuthInfo {
   email: string;
@@ -11,10 +12,14 @@ type Phase =
   | { kind: 'loading' }
   | { kind: 'not_configured' }
   | { kind: 'signed_out'; notice?: string }
-  | { kind: 'enroll'; factorId: string; qrCode: string; secret: string }
-  | { kind: 'challenge'; factorId: string }
+  | { kind: 'enroll'; otpauthUri: string; secret: string }
+  | { kind: 'challenge'; lockedUntil: string | null }
   | { kind: 'ready'; email: string }
   | { kind: 'error'; message: string };
+
+async function readJson(res: Response): Promise<any> {
+  return res.json().catch(() => ({}));
+}
 
 const card = 'bg-zinc-900 border border-zinc-700/80 rounded-2xl max-w-md w-full shadow-2xl overflow-hidden';
 const input =
@@ -52,8 +57,9 @@ function ErrorLine({ message }: { message: string | null }) {
 }
 
 /**
- * Nothing behind this gate is shown until the person has signed in AND verified a code from an
- * authenticator app (aal2). The server enforces the same rule on every request; this is the way in.
+ * Nothing behind this gate is shown until the person has signed in (Supabase: email and password) AND
+ * entered a code from an authenticator app, checked by OUR server (/api/v1/mfa), which limits wrong codes.
+ * The server enforces the same rule on every request; this is only the way in.
  */
 export function AuthGate({ children }: { children: (auth: AuthInfo) => React.ReactNode }) {
   const [phase, setPhase] = useState<Phase>({ kind: 'loading' });
@@ -71,24 +77,27 @@ export function AuthGate({ children }: { children: (auth: AuthInfo) => React.Rea
       const session = sessionData.session;
       if (!session) return setPhase({ kind: 'signed_out' });
 
-      const { data: aal, error: aalError } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
-      if (aalError) return setPhase({ kind: 'error', message: aalError.message });
-      if (aal.currentLevel === 'aal2') return setPhase({ kind: 'ready', email: session.user.email ?? '' });
+      const statusRes = await authFetch('/api/v1/mfa/status');
+      const status = await readJson(statusRes);
+      if (!statusRes.ok) return setPhase({ kind: 'error', message: status.error ?? `The server answered ${statusRes.status}.` });
+      if (status.verified) return setPhase({ kind: 'ready', email: session.user.email ?? '' });
+      if (status.enrolled) return setPhase({ kind: 'challenge', lockedUntil: status.locked_until ?? null });
+      if (status.needs_reset) {
+        return setPhase({
+          kind: 'error',
+          message: 'This account has an authenticator from the previous sign-in system. For your safety it must be reset by the operator before you set up a new one.'
+        });
+      }
 
-      const { data: factors, error: factorsError } = await supabase.auth.mfa.listFactors();
-      if (factorsError) return setPhase({ kind: 'error', message: factorsError.message });
-      const verified = factors.totp[0];
-      if (verified) return setPhase({ kind: 'challenge', factorId: verified.id });
-
-      // No verified authenticator yet: drop any half-finished enrollment, then start a fresh one.
+      // No authenticator yet: start setting one up (the server replaces any half-finished setup).
       // Whoever holds the password at this moment becomes the owner of the authenticator, which is why
       // the project must require confirmed email addresses (docs/LOGIN_SETUP.md).
-      for (const f of factors.all.filter((x) => x.factor_type === 'totp' && x.status === 'unverified')) {
-        await supabase.auth.mfa.unenroll({ factorId: f.id });
-      }
-      const { data: enrolled, error: enrollError } = await supabase.auth.mfa.enroll({ factorType: 'totp' });
-      if (enrollError) return setPhase({ kind: 'error', message: enrollError.message });
-      setPhase({ kind: 'enroll', factorId: enrolled.id, qrCode: enrolled.totp.qr_code, secret: enrolled.totp.secret });
+      const enrollRes = await authFetch('/api/v1/mfa/enroll', { method: 'POST' });
+      const enrolled = await readJson(enrollRes);
+      if (enrollRes.status === 409 && enrolled.required === 'operator_reset') return setPhase({ kind: 'error', message: enrolled.error });
+      if (enrollRes.status === 409) return setPhase({ kind: 'challenge', lockedUntil: null });
+      if (!enrollRes.ok) return setPhase({ kind: 'error', message: enrolled.error ?? `The server answered ${enrollRes.status}.` });
+      setPhase({ kind: 'enroll', otpauthUri: enrolled.otpauth_uri, secret: enrolled.secret });
     } finally {
       resolving.current = false;
     }
@@ -136,10 +145,10 @@ export function AuthGate({ children }: { children: (auth: AuthInfo) => React.Rea
 
   if (phase.kind === 'signed_out') return <SignInForm notice={phase.notice} onDone={() => void resolve()} />;
   if (phase.kind === 'enroll') {
-    return <CodeForm mode="enroll" factorId={phase.factorId} qrCode={phase.qrCode} secret={phase.secret} onVerified={() => void resolve()} onSignOut={signOut} />;
+    return <CodeForm mode="enroll" otpauthUri={phase.otpauthUri} secret={phase.secret} onVerified={() => void resolve()} onSignOut={signOut} />;
   }
   if (phase.kind === 'challenge') {
-    return <CodeForm mode="challenge" factorId={phase.factorId} onVerified={() => void resolve()} onSignOut={signOut} />;
+    return <CodeForm mode="challenge" lockedUntil={phase.lockedUntil} onVerified={() => void resolve()} onSignOut={signOut} />;
   }
   return <>{children({ email: phase.email, signOut })}</>;
 }
@@ -216,30 +225,49 @@ function SignInForm({ notice, onDone }: { notice?: string; onDone: () => void })
   );
 }
 
+function lockMessage(until: string): string {
+  return `Too many wrong codes. For your safety, code entry is paused until ${new Date(until).toLocaleTimeString()}. Try again then.`;
+}
+
 function CodeForm(props: {
   mode: 'enroll' | 'challenge';
-  factorId: string;
-  qrCode?: string;
+  otpauthUri?: string;
   secret?: string;
+  lockedUntil?: string | null;
   onVerified: () => void;
   onSignOut: () => Promise<void>;
 }) {
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(props.lockedUntil ? lockMessage(props.lockedUntil) : null);
+  const [qr, setQr] = useState<string | null>(null);
+
+  // The QR code is drawn here in the browser; the key is never sent to any other service.
+  useEffect(() => {
+    if (!props.otpauthUri) return;
+    QRCode.toDataURL(props.otpauthUri, { margin: 1, width: 176 }).then(setQr, () => setQr(null));
+  }, [props.otpauthUri]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!supabase) return;
     setBusy(true);
     setError(null);
     try {
-      const { error: err } = await supabase.auth.mfa.challengeAndVerify({ factorId: props.factorId, code: code.trim() });
-      if (err) {
-        setCode('');
-        return setError(err.message);
+      const res = await authFetch('/api/v1/mfa/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: code.trim() })
+      });
+      const body = await readJson(res);
+      if (res.ok) return props.onVerified();
+      setCode('');
+      if (res.status === 429 && body.locked_until) return setError(lockMessage(body.locked_until));
+      if (res.status === 422 && typeof body.attempts_left === 'number') {
+        return setError(`${body.error} ${body.attempts_left} ${body.attempts_left === 1 ? 'try' : 'tries'} left before code entry is paused.`);
       }
-      props.onVerified();
+      setError(body.error ?? `The server answered ${res.status}.`);
+    } catch {
+      setError('Could not reach the server. Try again.');
     } finally {
       setBusy(false);
     }
@@ -255,7 +283,7 @@ function CodeForm(props: {
           <p className="text-xs text-zinc-400">
             Scan this with an authenticator app (such as Google Authenticator, 1Password or Authy), then type the code it shows.
           </p>
-          {props.qrCode && <img src={props.qrCode} alt="Authenticator setup QR code" className="mx-auto w-44 h-44 bg-white rounded-lg p-2" />}
+          {qr && <img src={qr} alt="Authenticator setup QR code" className="mx-auto w-44 h-44 bg-white rounded-lg p-2" />}
           <div className="text-xs">
             <span className="text-zinc-400">Can't scan? Enter this key by hand:</span>
             <code data-testid="totp-secret" className="block mt-1 break-all bg-zinc-950 border border-zinc-800 rounded-lg p-2 text-zinc-200 select-all">

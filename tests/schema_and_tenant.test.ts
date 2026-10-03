@@ -12,7 +12,7 @@ import {
 import { assertPoolTargetsTestDb } from './support/safety';
 import { withTriggersBypassed } from './support/cleanup';
 import { api, startApp } from './support/api';
-import { authStack, createMfaUser, tokenClaims } from './support/authStack';
+import { authStack, createMfaUser, mfaStatus } from './support/authStack';
 
 const migrationsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'server', 'migrations');
 
@@ -451,11 +451,11 @@ describe('PostgreSQL Schema, Append-Only Triggers, Restricted Roles & Multi-Tena
   it('enforces multi-tenant API isolation: creator A cannot list or read creator B\'s project or events', async () => {
     authStack();
     const running = await startApp();
-    const alice = await createMfaUser('tenantA');
-    const bob = await createMfaUser('tenantB');
+    const alice = await createMfaUser('tenantA', running.base);
+    const bob = await createMfaUser('tenantB', running.base);
     try {
-      expect(tokenClaims(alice.session.accessToken).aal).toBe('aal2');
-      expect(tokenClaims(bob.session.accessToken).aal).toBe('aal2');
+      expect((await mfaStatus(running.base, alice.session)).body.verified).toBe(true);
+      expect((await mfaStatus(running.base, bob.session)).body.verified).toBe(true);
       expect(alice.session.userId).not.toBe(bob.session.userId);
 
       const aliceClaim = await api(running.base, alice.session, '/projects', { method: 'POST', body: { name: 'Alice Confidential Core', purpose: 'Confidential' } });

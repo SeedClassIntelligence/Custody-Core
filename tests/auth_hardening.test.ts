@@ -6,7 +6,7 @@ import { assertPoolTargetsTestDb } from './support/safety';
 import { withTriggersBypassed } from './support/cleanup';
 import { api, startApp, RunningApp } from './support/api';
 import {
-  authStack, createMfaUser, mintToken, signOut, signUp, tokenClaims, uniqueEmail, withAuthDb, enrollTotp, currentCode, verifyTotp, TEST_PASSWORD
+  authStack, createMfaUser, mintToken, signOut, signUp, tokenClaims, uniqueEmail, withAuthDb, enrollCode, codeAt, verifyCode, TEST_PASSWORD
 } from './support/authStack';
 
 /**
@@ -39,7 +39,7 @@ describe('Login hardening', () => {
   });
 
   async function newCreator(label: string) {
-    const made = await createMfaUser(label);
+    const made = await createMfaUser(label, running.base);
     userIds.push(made.session.userId);
     return made;
   }
@@ -66,7 +66,7 @@ describe('Login hardening', () => {
   // ------------------------------------------------------------ fail closed
 
   describe('fails closed: if the login service cannot confirm who this is, nobody gets in', () => {
-    it('a valid aal2 token is refused (503, no data) while the login service is unreachable', async () => {
+    it('a fully logged-in token is refused (503, no data) while the login service is unreachable', async () => {
       const { session } = await newCreator('down');
       const dead = await fakeAuthServer((_q, r) => r.end());
       const url = dead.url;
@@ -76,7 +76,7 @@ describe('Login hardening', () => {
       expect(r.body.projects).toBeUndefined();
     });
 
-    it('a valid aal2 token is refused (503) when the login service answers with an error', async () => {
+    it('a fully logged-in token is refused (503) when the login service answers with an error', async () => {
       const { session } = await newCreator('err500');
       const broken = await fakeAuthServer((_q, r) => { r.statusCode = 500; r.end('{"error":"boom"}'); });
       try {
@@ -205,7 +205,7 @@ describe('Login hardening', () => {
     expect((await api(running.base, { accessToken: fresh }, '/projects')).status).toBe(200);
   });
 
-  it('a token that does not belong to any session is 401, even with aal2 and a real user id', async () => {
+  it('a token that does not belong to any session is 401, even with aal2 claims and a real user id', async () => {
     const { session } = await newCreator('nosession');
     const claims = tokenClaims(session.accessToken);
     const { session_id: _dropped, ...withoutSession } = claims;
@@ -216,13 +216,19 @@ describe('Login hardening', () => {
   });
 
   it('an account whose email is not confirmed is refused (403), and gets in once it is', async () => {
-    const { session } = await newCreator('unconfirmed');
+    const session = await signUp(uniqueEmail('unconfirmed'));
     await withAuthDb((c) => c.query('UPDATE auth.users SET email_confirmed_at = NULL WHERE id = $1', [session.userId]));
-    const refused = await api(running.base, session, '/projects');
-    expect(refused.status).toBe(403);
-    expect(refused.body.required).toBe('confirmed_email');
+    // Not even the authenticator setup is available, and nothing is created for this account.
+    for (const [path, init] of [['/projects', {}], ['/mfa/status', {}], ['/mfa/enroll', { method: 'POST', body: {} }]] as const) {
+      const refused = await api(running.base, session, path, init);
+      expect(refused.status, path).toBe(403);
+      expect(refused.body.required, path).toBe('confirmed_email');
+    }
     expect((await adminDb.query('SELECT COUNT(*)::int AS n FROM creator WHERE identity_id = $1', [session.userId])).rows[0].n).toBe(0);
+    expect((await adminDb.query('SELECT COUNT(*)::int AS n FROM mfa_factor WHERE identity_id = $1', [session.userId])).rows[0].n).toBe(0);
     await withAuthDb((c) => c.query('UPDATE auth.users SET email_confirmed_at = now() WHERE id = $1', [session.userId]));
+    const { secret } = await enrollCode(running.base, session);
+    expect((await verifyCode(running.base, session, codeAt(secret))).status).toBe(200);
     expect((await api(running.base, session, '/projects')).status).toBe(200);
   });
 
@@ -250,10 +256,9 @@ describe('Login hardening', () => {
     expect((await adminDb.query('SELECT email FROM creator WHERE id = $1', [firstCreator])).rows[0].email).toBe(oldEmail);
     const aal1 = await signUp(oldEmail);
     userIds.push(aal1.userId);
-    const factor = await enrollTotp(aal1);
-    const verified = await verifyTotp(aal1, factor, currentCode(factor.secret));
-    expect(verified.session).not.toBeNull();
-    const second = await api(running.base, verified.session!, '/me');
+    const { secret } = await enrollCode(running.base, aal1);
+    expect((await verifyCode(running.base, aal1, codeAt(secret))).status).toBe(200);
+    const second = await api(running.base, aal1, '/me');
     expect(second.status).toBe(200);
     expect(second.body.creator.id).not.toBe(firstCreator);
     expect((await adminDb.query('SELECT identity_id FROM creator WHERE id = $1', [second.body.creator.id])).rows[0].identity_id).toBe(aal1.userId);

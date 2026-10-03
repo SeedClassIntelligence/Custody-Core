@@ -8,9 +8,13 @@
 -- What it does:
 --   * records migration 001 (already applied to this database by the app) after checking it is really there
 --   * applies every later migration in order: 002 (hashed_timestamp constraint), 003 (database-built event chain,
---     append_event), 004 (creator email no longer unique)
+--     append_event), 004 (creator email no longer unique), 005 (authenticator-code step run by the app, with
+--     the wrong-code limit, and the per-account record account_event)
 --   * records each in schema_migrations exactly as `npm run migrate` does
---   * applies the custody_app grants (server/roles.sql): no INSERT on event, EXECUTE on append_event
+--   * applies the custody_app grants (server/roles.sql): no INSERT on event or account_event, EXECUTE on
+--     append_event and append_account_event, attempts can be added but never changed or deleted
+--   * closes Supabase's built-in REST API (roles anon and authenticated) to every Custody Core table and
+--     function, and turns on row-level security (only custody_app has a policy)
 -- It does NOT add, change or delete any event, project or creator.
 --
 -- Safe to run twice: a migration already recorded is skipped, and the grants are idempotent.
@@ -285,6 +289,196 @@ END
 $apply2$;
 
 -- ---------------------------------------------------------------------------
+-- 005_own_second_factor.sql  (skipped if it is already recorded in schema_migrations)
+-- ---------------------------------------------------------------------------
+DO $apply3$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '005_own_second_factor.sql') THEN
+    EXECUTE $mig$
+-- 005: Custody Core runs the authenticator-app (second factor) step itself.
+--
+-- Supabase Auth keeps handling email and password. The 6-digit code step moves here so that wrong codes can
+-- be limited: Supabase's own code-check endpoint is public and cannot be limited on every plan, so a limit
+-- that only watched our server could be bypassed by guessing there. Codes are now checked only by this
+-- server, against keys stored here (encrypted by the server; the database never sees a key in the clear).
+
+-- One row per authenticator. Only one verified authenticator per login.
+CREATE TABLE mfa_factor (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  identity_id TEXT NOT NULL,              -- the login system's user id (creator.identity_id)
+  secret_ciphertext TEXT NOT NULL,        -- AES-256-GCM, key held by the server only
+  status TEXT NOT NULL CHECK (status IN ('unverified', 'verified', 'abandoned')),
+  last_used_step BIGINT,                  -- TOTP time step of the last accepted code (blocks reuse)
+  locked_until TIMESTAMPTZ,               -- set after too many wrong codes
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  verified_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX uq_mfa_factor_one_verified ON mfa_factor (identity_id) WHERE status = 'verified';
+CREATE INDEX idx_mfa_factor_identity ON mfa_factor (identity_id);
+
+-- Every code attempt, kept in the database so limits survive restarts and cover every server instance.
+CREATE TABLE mfa_attempt (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  factor_id UUID NOT NULL REFERENCES mfa_factor (id),
+  identity_id TEXT NOT NULL,
+  outcome TEXT NOT NULL CHECK (outcome IN ('accepted', 'wrong_code', 'reused_code', 'locked')),
+  attempted_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX idx_mfa_attempt_factor_time ON mfa_attempt (factor_id, attempted_at);
+
+-- A login session (Supabase session id) that has passed the code step on this server.
+CREATE TABLE mfa_session (
+  session_id TEXT PRIMARY KEY,
+  identity_id TEXT NOT NULL,
+  factor_id UUID NOT NULL REFERENCES mfa_factor (id),
+  verified_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Logins that had a verified authenticator in Supabase's old code step when this migration ran. Setting up an
+-- authenticator here is refused for them until the operator clears the row (docs/LOGIN_SETUP.md): otherwise
+-- whoever holds the password could set up their own and take the account. Recorded here, at deploy time, so
+-- that removing the old authenticator on the Supabase side (possible after guessing its code there) does not
+-- lift the block. On a database without Supabase Auth (tests), there is nothing to record.
+CREATE TABLE mfa_legacy_reset (
+  identity_id TEXT PRIMARY KEY,
+  found_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  cleared_at TIMESTAMPTZ                  -- set by the operator after confirming the person
+);
+DO $legacy$
+BEGIN
+  IF to_regclass('auth.mfa_factors') IS NOT NULL THEN
+    EXECUTE $q$INSERT INTO mfa_legacy_reset (identity_id)
+               SELECT DISTINCT user_id::text FROM auth.mfa_factors WHERE status::text = 'verified'
+               ON CONFLICT (identity_id) DO NOTHING$q$;
+  END IF;
+END
+$legacy$;
+
+-- ---------------------------------------------------------------------------------------------------------
+-- Account record: an append-only, hash-chained log per login, for things that belong to the account rather
+-- than to one project (for example a lockout after too many wrong codes). Built by the database, exactly
+-- like the project event chain (see docs/EVENT_HASH_FORMAT.md, "Account events").
+-- ---------------------------------------------------------------------------------------------------------
+CREATE TABLE account_event (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id TEXT NOT NULL,               -- the login system's user id
+  seq BIGINT NOT NULL,
+  actor_type TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  payload JSONB NOT NULL,
+  canonical_payload TEXT NOT NULL,
+  prev_hash CHAR(64) NOT NULL,
+  hash CHAR(64) NOT NULL,
+  hashed_timestamp TEXT NOT NULL CHECK (hashed_timestamp <> ''),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT uq_account_event_seq UNIQUE (account_id, seq),
+  CONSTRAINT chk_account_event_payload CHECK (payload = canonical_payload::jsonb)
+);
+
+CREATE FUNCTION reject_account_event_change() RETURNS TRIGGER
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
+BEGIN
+  RAISE EXCEPTION 'Table account_event is append-only: % operations are strictly forbidden.', TG_OP;
+END
+$$;
+
+CREATE TRIGGER trg_account_event_append_only
+  BEFORE UPDATE OR DELETE ON account_event
+  FOR EACH ROW EXECUTE FUNCTION reject_account_event_change();
+CREATE TRIGGER trg_account_event_prevent_truncate
+  BEFORE TRUNCATE ON account_event
+  FOR EACH STATEMENT EXECUTE FUNCTION reject_account_event_change();
+
+CREATE FUNCTION append_account_event(
+  p_account_id text,
+  p_actor_type text,
+  p_actor_id text,
+  p_action text,
+  p_payload jsonb
+) RETURNS public.account_event
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $$
+DECLARE
+  v_seq bigint;
+  v_prev_hash text;
+  v_now timestamptz;
+  v_ts text;
+  v_canonical text;
+  v_hash text;
+  v_row public.account_event;
+BEGIN
+  IF p_account_id IS NULL OR p_actor_type IS NULL OR p_actor_id IS NULL OR p_action IS NULL OR p_payload IS NULL THEN
+    RAISE EXCEPTION 'append_account_event: every argument is required' USING ERRCODE = 'null_value_not_allowed';
+  END IF;
+  IF p_actor_type NOT IN ('creator', 'developer', 'system', 'gateway') THEN
+    RAISE EXCEPTION 'append_account_event: unknown actor_type %', p_actor_type USING ERRCODE = 'check_violation';
+  END IF;
+  IF p_account_id ~ '^[[:space:]]*$' OR p_actor_id ~ '^[[:space:]]*$' OR p_action ~ '^[[:space:]]*$' THEN
+    RAISE EXCEPTION 'append_account_event: account_id, actor_id and action must not be empty' USING ERRCODE = 'check_violation';
+  END IF;
+  IF jsonb_typeof(p_payload) <> 'object' THEN
+    RAISE EXCEPTION 'append_account_event: payload must be a JSON object' USING ERRCODE = 'check_violation';
+  END IF;
+  IF octet_length(p_payload::text) > 65536 THEN
+    RAISE EXCEPTION 'append_account_event: payload is larger than 64 KiB' USING ERRCODE = 'program_limit_exceeded';
+  END IF;
+
+  -- One writer at a time per account, so sequence numbers and links never branch.
+  PERFORM pg_advisory_xact_lock(hashtextextended('account_event:' || p_account_id, 0));
+
+  SELECT e.seq, e.hash INTO v_seq, v_prev_hash
+    FROM public.account_event e
+   WHERE e.account_id = p_account_id
+   ORDER BY e.seq DESC
+   LIMIT 1;
+  IF NOT FOUND THEN
+    v_seq := 0;
+    v_prev_hash := repeat('0', 64);
+  END IF;
+  v_seq := v_seq + 1;
+
+  v_now := clock_timestamp();
+  v_ts := to_char(v_now AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"');
+  v_canonical := public.canonical_jsonb(p_payload);
+
+  v_hash := encode(sha256(convert_to(
+    '{"account_id":' || to_jsonb(p_account_id)::text ||
+    ',"action":' || to_jsonb(p_action)::text ||
+    ',"actor_id":' || to_jsonb(p_actor_id)::text ||
+    ',"actor_type":' || to_jsonb(p_actor_type)::text ||
+    ',"payload":' || v_canonical ||
+    ',"prev_hash":' || to_jsonb(v_prev_hash)::text ||
+    ',"seq":' || v_seq::text ||
+    ',"timestamp":' || to_jsonb(v_ts)::text ||
+    '}', 'UTF8')), 'hex');
+
+  INSERT INTO public.account_event (
+    account_id, seq, actor_type, actor_id, action, payload, canonical_payload, prev_hash, hash, hashed_timestamp, created_at
+  ) VALUES (
+    p_account_id, v_seq, p_actor_type, p_actor_id, p_action, p_payload, v_canonical, v_prev_hash, v_hash, v_ts, v_now
+  ) RETURNING * INTO v_row;
+
+  RETURN v_row;
+END
+$$;
+
+REVOKE ALL ON FUNCTION append_account_event(text, text, text, text, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION reject_account_event_change() FROM PUBLIC;
+
+$mig$;
+    INSERT INTO schema_migrations (version) VALUES ('005_own_second_factor.sql');
+    RAISE NOTICE 'applied 005_own_second_factor.sql';
+  ELSE
+    RAISE NOTICE 'skipped 005_own_second_factor.sql (already applied)';
+  END IF;
+END
+$apply3$;
+
+-- ---------------------------------------------------------------------------
 -- server/roles.sql  (the custody_app grants; safe to repeat)
 -- ---------------------------------------------------------------------------
 -- Custody Core Restricted Database Role: custody_app
@@ -312,6 +506,16 @@ GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO custody_app;
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE event FROM custody_app;
 GRANT EXECUTE ON FUNCTION append_event(uuid, text, text, text, text, text, jsonb) TO custody_app;
 
+-- Second factor (migration 005): attempts are a record, so the app may add and read them but never change them.
+-- Account events, like project events, are written only through append_account_event().
+REVOKE UPDATE, DELETE, TRUNCATE ON TABLE mfa_attempt FROM custody_app;
+REVOKE UPDATE, DELETE, TRUNCATE ON TABLE mfa_session FROM custody_app;
+REVOKE DELETE, TRUNCATE ON TABLE mfa_factor FROM custody_app;
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE account_event FROM custody_app;
+-- Only the operator clears a reset requirement.
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE mfa_legacy_reset FROM custody_app;
+GRANT EXECUTE ON FUNCTION append_account_event(text, text, text, text, jsonb) TO custody_app;
+
 -- The app role must not be able to create objects (for example look-alike functions) in this schema.
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 
@@ -328,6 +532,64 @@ BEGIN
   IF to_regclass('public.schema_migrations') IS NOT NULL THEN
     REVOKE ALL ON TABLE schema_migrations FROM custody_app;
   END IF;
+END
+$$;
+
+-- Supabase's built-in REST API is closed to all of the above by server/lockdown.sql, which runs after this file
+-- (and inside every migration).
+
+
+-- ---------------------------------------------------------------------------
+-- server/lockdown.sql  (closes Supabase's REST API to our tables and functions; safe to repeat)
+-- ---------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------------------------------------
+-- Close Supabase's built-in REST API (Data API) to everything of ours.
+--
+-- On Supabase, every table and function in schema public is served at /rest/v1 to the roles anon and
+-- authenticated, with the PUBLIC key that is in the browser, and new tables get full rights for those roles.
+-- Custody Core never uses that API: all access goes through our server as custody_app. So those roles get
+-- no access at all, and row-level security is on for every table (only custody_app has a policy; the
+-- table owner and SECURITY DEFINER functions are not affected). On a plain PostgreSQL without those roles
+-- the role-specific part is skipped.
+--
+-- It refers to no particular table or function, so it can run inside every migration's own transaction:
+-- nothing a migration creates is ever committed while open. It runs again after server/roles.sql.
+-- ---------------------------------------------------------------------------------------------------------
+
+-- Functions are executable by PUBLIC (every role) unless revoked. Only custody_app needs any of ours, and
+-- server/roles.sql grants it exactly those. The default-privileges line has no IN SCHEMA on purpose: a per-schema
+-- default cannot take away PostgreSQL's global "PUBLIC may execute" default, so without this every function a
+-- later migration creates would be callable through the REST API.
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+
+DO $$
+DECLARE
+  r text;
+  t record;
+BEGIN
+  FOREACH r IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+    IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = r) THEN
+      EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %I', r);
+      EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM %I', r);
+      EXECUTE format('REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM %I', r);
+      EXECUTE format('REVOKE ALL ON SCHEMA public FROM %I', r);
+      EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM %I', r);
+      EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM %I', r);
+      EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON FUNCTIONS FROM %I', r);
+    END IF;
+  END LOOP;
+
+  FOR t IN
+    SELECT c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+  LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t.relname);
+    -- (On the very first migration custody_app does not exist yet; roles.sql creates it and this runs again.)
+    IF EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'custody_app') AND NOT EXISTS (SELECT FROM pg_catalog.pg_policies WHERE schemaname = 'public' AND tablename = t.relname AND policyname = 'custody_app_access') THEN
+      EXECUTE format('CREATE POLICY custody_app_access ON public.%I FOR ALL TO custody_app USING (true) WITH CHECK (true)', t.relname);
+    END IF;
+  END LOOP;
 END
 $$;
 

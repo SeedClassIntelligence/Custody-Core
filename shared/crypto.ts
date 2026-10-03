@@ -231,3 +231,55 @@ export function formatHash(hash: string, lead = 8, trail = 6): string {
   if (hash.length <= lead + trail) return hash;
   return `${hash.substring(0, lead)}...${hash.substring(hash.length - trail)}`;
 }
+
+/** An account event (account_event table): one hash chain per login, built by the database. */
+export interface AccountEventInput {
+  seq: number;
+  account_id: string;
+  actor_type: string;
+  actor_id: string;
+  action: string;
+  payload: Record<string, any>;
+  canonical_payload: string;
+  prev_hash: string;
+  timestamp: string;
+}
+
+/**
+ * Same rules as a version 2 project event (docs/EVENT_HASH_FORMAT.md), with `account_id` in place of
+ * `project_id` and no subject fields: keys in alphabetical order, payload embedded as its stored text.
+ */
+export async function computeAccountEventHash(event: AccountEventInput): Promise<string> {
+  const s = (v: string) => JSON.stringify(v);
+  return await sha256(
+    '{"account_id":' + s(event.account_id) +
+    ',"action":' + s(event.action) +
+    ',"actor_id":' + s(event.actor_id) +
+    ',"actor_type":' + s(event.actor_type) +
+    ',"payload":' + event.canonical_payload +
+    ',"prev_hash":' + s(event.prev_hash) +
+    ',"seq":' + String(event.seq) +
+    ',"timestamp":' + s(event.timestamp) +
+    '}'
+  );
+}
+
+export async function verifyAccountChain(events: Array<AccountEventInput & { hash: string }>): Promise<VerificationResult> {
+  const now = new Date().toISOString();
+  for (let i = 0; i < events.length; i++) {
+    const event = events[i];
+    const expectedPrev = i === 0 ? GENESIS_PREV_HASH : events[i - 1].hash;
+    const fail = (reason: string) => ({ isValid: false, totalEvents: events.length, brokenAtSeq: event.seq, reason, verifiedAt: now });
+    if (event.seq !== i + 1) return fail(`Account event #${event.seq} is out of sequence.`);
+    if (event.prev_hash !== expectedPrev) return fail(`Previous hash linkage broken at account event #${event.seq}.`);
+    let consistent = false;
+    try {
+      consistent = canonicalJsonV2(JSON.parse(event.canonical_payload)) === canonicalJsonV2(event.payload);
+    } catch {
+      consistent = false;
+    }
+    if (!consistent) return fail(`The stored payload of account event #${event.seq} does not match the payload that was hashed.`);
+    if ((await computeAccountEventHash(event)) !== event.hash) return fail(`Hash integrity mismatch at account event #${event.seq}.`);
+  }
+  return { isValid: true, totalEvents: events.length, verifiedAt: now };
+}
