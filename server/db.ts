@@ -17,6 +17,15 @@ let appPool: pg.Pool | null = null;
 let adminPool: pg.Pool | null = null;
 let isMigrated = false;
 
+function usesLocalDatabase(databaseUrl: string): boolean {
+  try {
+    const hostname = new URL(databaseUrl).hostname;
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  } catch {
+    return false;
+  }
+}
+
 export function getResolvedDatabaseUrl(): string | null {
   const host = process.env.PGHOST || process.env.DB_HOST;
   const user = process.env.PGUSER || process.env.DB_USER || 'postgres';
@@ -87,7 +96,7 @@ export function getDbPool(): pg.Pool | null {
   if (!appPool) {
     appPool = new Pool({
       connectionString: databaseUrl,
-      ssl: databaseUrl.includes('localhost') ? false : { rejectUnauthorized: false },
+      ssl: usesLocalDatabase(databaseUrl) ? false : { rejectUnauthorized: false },
       // Never wait forever for a free connection: answer with an error instead of freezing every request.
       connectionTimeoutMillis: 10_000
     });
@@ -101,7 +110,7 @@ export function getAdminPool(): pg.Pool | null {
   if (!adminPool) {
     adminPool = new Pool({
       connectionString: adminUrl,
-      ssl: adminUrl.includes('localhost') ? false : { rejectUnauthorized: false }
+      ssl: usesLocalDatabase(adminUrl) ? false : { rejectUnauthorized: false }
     });
   }
   return adminPool;
