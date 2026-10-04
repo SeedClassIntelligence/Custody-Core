@@ -526,10 +526,11 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-'));
     try {
       const bare = gh.repos.get(main.full_name)!.bare;
-      expect(spawnSync('git', ['clone', '-q', bare, dir]).status).toBe(0);
+      expect(spawnSync('git', ['-c', 'core.autocrlf=false', 'clone', '-q', bare, dir]).status).toBe(0);
       expect(fs.readFileSync(path.join(dir, 'README.md'), 'utf8')).toBe('# My project\n');
       expect(fs.readFileSync(path.join(dir, 'src/index.js'), 'utf8')).toBe('console.log("hi");\n');
-      expect(fs.statSync(path.join(dir, 'run.sh')).mode & 0o111).not.toBe(0);
+      const runMode = spawnSync('git', ['-C', dir, 'ls-files', '--stage', 'run.sh'], { encoding: 'utf8' }).stdout.split(/\s+/)[0];
+      expect(runMode).toBe('100755');
       expect(spawnSync('git', ['-C', dir, 'rev-list', '--count', 'HEAD'], { encoding: 'utf8' }).stdout.trim()).toBe('1');
       expect(spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim()).toBe(main.initial_commit.reported_sha);
     } finally {

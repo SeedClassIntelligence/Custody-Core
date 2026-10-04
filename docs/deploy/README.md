@@ -53,7 +53,7 @@ What the checks prove, in plain words:
 - the app's database account **cannot insert, change or delete events** directly;
 - it **can** use the one controlled way to add events (`append_event`), and nobody else can;
 - the safety triggers and constraints are in place;
-- all four migrations are recorded, so `npm run migrate` will see them as done;
+- all six migrations are recorded, so `npm run migrate` will see them as done;
 - every project's events still have unbroken sequence numbers and links.
 
 ### 5. Optional: the same check from the app's side

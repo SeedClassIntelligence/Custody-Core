@@ -7,7 +7,9 @@ import { fileURLToPath } from 'node:url';
  * real migration files, so they can never drift from what `npm run migrate` applies.
  */
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const read = (p: string) => fs.readFileSync(path.join(root, p), 'utf8');
+// Git may check source SQL out with CRLF on Windows. Normalize before embedding it so the generated
+// deployment scripts are byte-for-byte identical on every platform.
+const read = (p: string) => fs.readFileSync(path.join(root, p), 'utf8').replace(/\r\n/g, '\n');
 
 const TABLES = ['creator', 'developer', 'connection', 'project', 'repository', 'agreement_template', 'door', 'door_repository', 'workspace', 'mirror_snapshot', 'event'];
 const MIGRATION_LOCK_ID = 7_021_001; // the same advisory lock server/migrationRunner.ts takes

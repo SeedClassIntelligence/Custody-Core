@@ -236,8 +236,6 @@ export async function prepareInitialCommit(files: Awaited<ReturnType<typeof read
     HOME: home,
     XDG_CONFIG_HOME: home,
     GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_SYSTEM: os.devNull,
-    GIT_CONFIG_GLOBAL: os.devNull,
     GIT_TERMINAL_PROMPT: '0',
     GIT_AUTHOR_NAME: 'Custody Core',
     GIT_AUTHOR_EMAIL: 'custody-core@users.noreply.github.com',
@@ -256,7 +254,13 @@ export async function prepareInitialCommit(files: Awaited<ReturnType<typeof read
     }
     await run('git', ['init', '-q', '--template=', '-b', branch], dir, env);
     // --force: every uploaded file is committed, even if a .gitignore in the upload lists it.
-    await run('git', ['add', '-A', '--force'], dir, env);
+    // Preserve the uploaded bytes regardless of the host machine's core.autocrlf setting.
+    await run('git', ['-c', 'core.autocrlf=false', 'add', '-A', '--force'], dir, env);
+    // Windows does not retain POSIX executable bits on disk, so put the ZIP's executable mode into
+    // the Git index explicitly. On Unix this is idempotent and documents the intended source of truth.
+    for (const f of files.filter((file) => file.executable)) {
+      await run('git', ['update-index', '--chmod=+x', '--', f.path], dir, env);
+    }
     await run('git', ['commit', '-q', '-m', 'Initial code, uploaded to Custody Core'], dir, env);
     // GitHub checks every pushed object and refuses broken or dangerous ones (for example a .gitmodules naming
     // a path outside the repository). Run the same strict check here, so such an upload is refused before any

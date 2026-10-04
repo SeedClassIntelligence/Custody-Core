@@ -24,7 +24,8 @@ app at it through `TEST_DATABASE_URL`, and runs the whole suite. The test setup 
 database: it loads every screen, claims a project, verifies its record, tampers with it, downloads an export and
 verifies that too. Screenshots land in `docs/screenshots/milestone-1/`.
 
-The tenant-isolation test is expected to fail until Milestone 2 (login) is built.
+The tenant-isolation test uses two real locally authenticated users and verifies that neither can list or read the
+other creator's projects or events.
 
 ## Event log
 

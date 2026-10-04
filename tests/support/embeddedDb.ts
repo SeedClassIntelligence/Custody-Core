@@ -37,8 +37,11 @@ export async function startEmbeddedTestDb(port?: number): Promise<EmbeddedTestDb
     password: TEST_DB_PASSWORD,
     port: chosenPort,
     persistent: false,
-    // Match production: UTF8 with a non-C collation, so ordering bugs show up in tests.
-    initdbFlags: ['--encoding=UTF8', '--locale=C.utf8', '--locale-provider=icu', '--icu-locale=en-US'],
+    // Match production: UTF8 with a deterministic, non-C collation, so ordering bugs show up in tests.
+    // Use ICU directly instead of an operating-system locale name: C.utf8 is available on Unix-like
+    // systems but is not a valid Windows locale. PostgreSQL's bundled ICU provider accepts en-US on
+    // every platform supported by embedded-postgres and preserves the locale-aware test semantics.
+    initdbFlags: ['--encoding=UTF8', '--locale-provider=icu', '--icu-locale=en-US'],
     createPostgresUser: process.getuid?.() === 0,
     onLog: () => {},
     onError: () => {}
@@ -55,8 +58,14 @@ export async function startEmbeddedTestDb(port?: number): Promise<EmbeddedTestDb
     // "localhost" matters: server/db.ts only disables SSL for URLs containing it.
     url: `postgresql://postgres:${TEST_DB_PASSWORD}@localhost:${chosenPort}/${TEST_DB_NAME}`,
     stop: async () => {
-      await pg.stop();
-      fs.rmSync(base, { recursive: true, force: true });
+      try {
+        await pg.stop();
+      } catch (err: any) {
+        // On Windows, taskkill can report the process exited a moment before its files are unlocked.
+        // The package then fails its own immediate removal with EBUSY even though PostgreSQL is stopped.
+        if (err?.code !== 'EBUSY') throw err;
+      }
+      fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   };
 }
