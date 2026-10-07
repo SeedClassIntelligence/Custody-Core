@@ -122,7 +122,8 @@ async function main() {
   server.stdout!.on('data', (c) => (serverLog += c.toString()));
   server.stderr!.on('data', (c) => (serverLog += c.toString()));
 
-  const browser = await chromium.launch({ headless: true });
+  // BROWSER_CHECK_CHROMIUM: an already-installed Chromium to use instead of Playwright's own download (optional).
+  const browser = await chromium.launch({ headless: true, executablePath: process.env.BROWSER_CHECK_CHROMIUM || undefined });
   try {
     await waitForServer(base, server);
 

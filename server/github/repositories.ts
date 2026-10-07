@@ -231,11 +231,17 @@ export async function prepareInitialCommit(files: Awaited<ReturnType<typeof read
     fs.rmSync(dir, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });
   };
+  // An empty settings file of git's own, used as its global and system configuration. A real empty file works on
+  // every platform (Windows' null device is not accepted by every git build).
+  const noConfig = path.join(home, 'empty-gitconfig');
+  fs.writeFileSync(noConfig, '');
   const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH,
     HOME: home,
     XDG_CONFIG_HOME: home,
     GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: noConfig,
+    GIT_CONFIG_SYSTEM: noConfig,
     GIT_TERMINAL_PROMPT: '0',
     GIT_AUTHOR_NAME: 'Custody Core',
     GIT_AUTHOR_EMAIL: 'custody-core@users.noreply.github.com',
@@ -258,8 +264,9 @@ export async function prepareInitialCommit(files: Awaited<ReturnType<typeof read
     await run('git', ['-c', 'core.autocrlf=false', 'add', '-A', '--force'], dir, env);
     // Windows does not retain POSIX executable bits on disk, so put the ZIP's executable mode into
     // the Git index explicitly. On Unix this is idempotent and documents the intended source of truth.
-    for (const f of files.filter((file) => file.executable)) {
-      await run('git', ['update-index', '--chmod=+x', '--', f.path], dir, env);
+    const executables = files.filter((file) => file.executable).map((file) => file.path);
+    for (let i = 0; i < executables.length; i += 100) {
+      await run('git', ['update-index', '--chmod=+x', '--', ...executables.slice(i, i + 100)], dir, env);
     }
     await run('git', ['commit', '-q', '-m', 'Initial code, uploaded to Custody Core'], dir, env);
     // GitHub checks every pushed object and refuses broken or dangerous ones (for example a .gitmodules naming

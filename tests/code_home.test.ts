@@ -540,6 +540,40 @@ describe('Code home through the API: connect, lock, claim, webhooks', () => {
     expect(pushToken).toMatchObject({ repositories: [main.full_name.split('/')[1]], permissions: { contents: 'write' }, revoked: true });
   });
 
+  it('many executable files all keep their executable mark, and Windows line endings are kept byte for byte', async () => {
+    const c = await connectedCreator('execs');
+    const projectId = await claim(c.session, `Executables ${randomBytes(2).toString('hex')}`);
+    const z = new JSZip();
+    for (let i = 0; i < 150; i++) z.file(`bin/tool-${i}.sh`, `#!/bin/sh\necho ${i}\n`, { unixPermissions: 0o100755 });
+    z.file('notes.txt', 'line one\r\nline two\r\n', { unixPermissions: 0o100644 });
+    const zip = await z.generateAsync({ type: 'nodebuffer', platform: 'UNIX' });
+    const res = await fetch(`${running.base}/api/v1/projects/${projectId}/code-home`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${c.session.accessToken}`, 'Content-Type': 'application/zip' },
+      body: new Uint8Array(zip)
+    });
+    const body: any = await res.json();
+    expect(res.status).toBe(201);
+    const main = body.repositories.find((x: any) => x.role === 'main');
+    expect(main.initial_commit).toMatchObject({ pushed: true, files_uploaded: 151, reported_files: 151, matches: true });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-'));
+    try {
+      expect(spawnSync('git', ['-c', 'core.autocrlf=false', 'clone', '-q', gh.repos.get(main.full_name)!.bare, dir]).status).toBe(0);
+      const modes = new Map(
+        spawnSync('git', ['-C', dir, 'ls-files', '--stage'], { encoding: 'utf8' })
+          .stdout.trim()
+          .split('\n')
+          .map((line) => [line.split('\t')[1], line.split(' ')[0]])
+      );
+      expect(modes.size).toBe(151);
+      for (let i = 0; i < 150; i++) expect(modes.get(`bin/tool-${i}.sh`), `bin/tool-${i}.sh`).toBe('100755');
+      expect(modes.get('notes.txt')).toBe('100644');
+      expect(fs.readFileSync(path.join(dir, 'notes.txt'), 'utf8')).toBe('line one\r\nline two\r\n');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('a zip cannot configure git on the server: a .gitconfig in it runs nothing and does not redirect the push (or its token)', async () => {
     const c = await connectedCreator('gitcfg');
     const projectId = await claim(c.session, `Git Config ${randomBytes(2).toString('hex')}`);

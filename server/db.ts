@@ -17,10 +17,11 @@ let appPool: pg.Pool | null = null;
 let adminPool: pg.Pool | null = null;
 let isMigrated = false;
 
-function usesLocalDatabase(databaseUrl: string): boolean {
+export function usesLocalDatabase(databaseUrl: string): boolean {
   try {
     const hostname = new URL(databaseUrl).hostname;
-    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+    // URL keeps the brackets around an IPv6 address: postgresql://user@[::1]:5432/db has hostname "[::1]".
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]';
   } catch {
     return false;
   }
