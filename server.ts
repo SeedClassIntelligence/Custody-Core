@@ -14,6 +14,11 @@ import {
 } from './server/db';
 import { authenticate, creatorOf } from './server/auth';
 import { mfaRouter } from './server/mfa';
+import { gatewayRouter } from './server/gateway/router';
+import { findScanner } from './server/gateway/scanner';
+import { githubApiRouter, githubCallbackRouter } from './server/githubRoutes';
+import { githubConfig } from './server/github';
+import { projectExtrasRouter } from './server/doors';
 import { verifyAccountChain } from './shared/crypto';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -29,6 +34,10 @@ function serverError(res: express.Response, err: any, what: string) {
 }
 
 export const app = express();
+// The git gateway streams git's own request bodies, so it comes before any body parsing.
+app.use('/git', gatewayRouter);
+// Where GitHub sends the browser back after the App is installed.
+app.use('/github', githubCallbackRouter);
 app.use(express.json());
 
 // --- API Routes (/api/v1/*) ---
@@ -56,10 +65,14 @@ const apiRouter = express.Router();
     res.json({
       status: 'ok',
       service: 'Custody Core Server',
-      milestone: 'Milestone 2: login with required multifactor authentication',
+      milestone: 'Milestone 3: git gateway',
       database: {
         status: dbStatus,
         configured: hasDb
+      },
+      gateway: {
+        github_app_configured: githubConfig() !== null,
+        secret_scanner: findScanner() ? 'installed' : 'missing'
       },
       time: new Date().toISOString()
     });
@@ -85,6 +98,9 @@ const apiRouter = express.Router();
       serverError(res, err, 'reading account events');
     }
   });
+
+  apiRouter.use('/github', githubApiRouter);
+  apiRouter.use('/projects/:id', projectExtrasRouter);
 
   apiRouter.get('/me', (_req, res) => {
     const creator = creatorOf(res);
