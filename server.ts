@@ -6,6 +6,7 @@ dotenv.config();
 
 import {
   getDbPool,
+  appDatabaseConfigProblem,
   runMigrations,
   getProjectEvents,
   verifyServerProjectEvents,
@@ -37,7 +38,6 @@ const apiRouter = express.Router();
   apiRouter.get('/health', async (_req, res) => {
     const hasDb = getDbPool() !== null;
     let dbStatus = 'not_connected';
-    let dbError = null;
 
     if (hasDb) {
       try {
@@ -47,8 +47,9 @@ const apiRouter = express.Router();
         client.release();
         dbStatus = 'connected';
       } catch (err: any) {
+        // The reason stays in the server log: this endpoint is open to anyone.
         dbStatus = 'error';
-        dbError = err.message;
+        console.error('[health] database check failed:', err?.message ?? err);
       }
     }
 
@@ -58,8 +59,7 @@ const apiRouter = express.Router();
       milestone: 'Milestone 2: login with required multifactor authentication',
       database: {
         status: dbStatus,
-        configured: hasDb,
-        error: dbError
+        configured: hasDb
       },
       time: new Date().toISOString()
     });
@@ -301,6 +301,11 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
 });
 
 export async function startServer() {
+  // A database is configured but the app has no password for its own account: refuse to start, rather than
+  // quietly run as "not connected".
+  const configProblem = appDatabaseConfigProblem();
+  if (configProblem) throw new Error(configProblem);
+
   // Try auto-running migrations if DATABASE_URL is provided
   const db = getDbPool();
   if (db) {

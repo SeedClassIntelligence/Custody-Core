@@ -7,7 +7,7 @@ See `CLAUDE.md`-style project instructions kept alongside this repo for the rule
 ## Run locally
 
 1. `npm install`
-2. Copy `.env.example` to `.env` and fill in `DATABASE_URL` (never commit `.env`).
+2. Copy `.env.example` to `.env` and fill in `DATABASE_URL` and `APP_DB_PASSWORD` (never commit `.env`).
 3. `npm run dev`
 
 Values already set in your shell take priority over `.env`.
@@ -41,6 +41,11 @@ Nothing is mocked: users are created and signed in by the auth server, authentic
 - `npm test` starts the stack by itself if Docker is running (the first start downloads images and takes a few minutes).
 - If Docker is not available, only the login tests fail, with that reason; the rest of the suite still runs.
 - `npm run auth-stack:start | auth-stack:stop | auth-stack:status` control it by hand.
+
+## Deploying
+
+`npm run build` then `npm start` (or the `Dockerfile`). Step by step, with every setting the host needs:
+`docs/deploy/README.md`, section "Deploying the app".
 
 ## Deploying the database upgrade without network access
 

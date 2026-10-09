@@ -3,7 +3,7 @@ dotenv.config(); // same rule as the app: values already in the shell win over .
 
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
-import { getAppDatabaseUrl, getAdminDatabaseUrl } from '../server/db';
+import { getAppDatabaseUrl, getAdminDatabaseUrl, appDatabaseConfigProblem, sslFor } from '../server/db';
 import { computeEventHash } from '../shared/crypto';
 
 /**
@@ -26,7 +26,7 @@ function check(ok: boolean, text: string) {
 function poolFor(url: string) {
   return new pg.Pool({
     connectionString: url,
-    ssl: url.includes('localhost') || url.includes('127.0.0.1') ? false : { rejectUnauthorized: false },
+    ssl: sslFor(url),
     connectionTimeoutMillis: 20000
   });
 }
@@ -34,6 +34,8 @@ function poolFor(url: string) {
 async function main() {
   const appUrl = getAppDatabaseUrl();
   const adminUrl = getAdminDatabaseUrl();
+  const problem = appDatabaseConfigProblem();
+  if (problem) throw new Error(problem);
   if (!appUrl || !adminUrl) throw new Error('No database is configured (DATABASE_URL is missing).');
 
   const admin = poolFor(adminUrl);

@@ -120,11 +120,15 @@ describe('Dashboard SQL Editor scripts (docs/deploy)', () => {
     expect(run.applied).toEqual([]);
     expect(run.alreadyApplied).toEqual(listMigrationFiles(MIGRATIONS));
 
+    // The dashboard script creates custody_app with no password; the operator (or the server, from
+    // APP_DB_PASSWORD) sets one. Do what the deploy guide says.
+    await pool.query(`ALTER ROLE custody_app WITH PASSWORD '${process.env.APP_DB_PASSWORD!.replace(/'/g, "''")}'`);
+
     // As custody_app: a direct INSERT is refused and append_event chains onto the old events.
     const appUrl = new URL(testUrl);
     appUrl.pathname = new URL((pool as any).options.connectionString).pathname;
     appUrl.username = 'custody_app';
-    appUrl.password = 'CustodyAppPass702!';
+    appUrl.password = process.env.APP_DB_PASSWORD!;
     const app = new pg.Pool({ connectionString: appUrl.toString() });
     try {
       await expect(app.query(
