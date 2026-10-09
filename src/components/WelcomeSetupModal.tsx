@@ -4,6 +4,7 @@ import { Github, HardDrive, ShieldCheck, AlertCircle, X, Sparkles } from 'lucide
 interface WelcomeSetupModalProps {
   isOpen: boolean;
   onClose: () => void;
+  githubConnected?: boolean;
 }
 
 const STEPS = [
@@ -19,7 +20,7 @@ const STEPS = [
     label: '2. Code Home',
     icon: Github,
     title: 'Connect your GitHub organization',
-    body: 'Your code will live in a private GitHub organization you own, locked down by the platform so developers never touch it.'
+    body: 'Install the Custody Core GitHub App on the organization that holds your code. Developers then reach it only through the gateway, and never get a GitHub credential.'
   },
   {
     id: 3,
@@ -30,7 +31,7 @@ const STEPS = [
   }
 ];
 
-export const WelcomeSetupModal: React.FC<WelcomeSetupModalProps> = ({ isOpen, onClose }) => {
+export const WelcomeSetupModal: React.FC<WelcomeSetupModalProps> = ({ isOpen, onClose, githubConnected = false }) => {
   const [activeStep, setActiveStep] = useState<number>(1);
   if (!isOpen) return null;
 
@@ -47,7 +48,7 @@ export const WelcomeSetupModal: React.FC<WelcomeSetupModalProps> = ({ isOpen, on
             </div>
             <div>
               <h2 className="text-lg font-semibold text-zinc-100">Setup Guide</h2>
-              <p className="text-xs text-zinc-400">The three things you will connect. None of them are connected yet.</p>
+              <p className="text-xs text-zinc-400">The three things you will connect.</p>
             </div>
           </div>
           <button
@@ -75,10 +76,17 @@ export const WelcomeSetupModal: React.FC<WelcomeSetupModalProps> = ({ isOpen, on
         </div>
 
         <div className="p-8 space-y-6 text-center">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-950/60 border border-amber-800/80 text-amber-300 text-xs font-mono font-medium">
-            <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
-            <span>Not connected yet</span>
-          </div>
+          {(step.id === 1 || (step.id === 2 && githubConnected)) ? (
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-800/80 text-emerald-300 text-xs font-mono font-medium">
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>Done</span>
+            </div>
+          ) : (
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-950/60 border border-amber-800/80 text-amber-300 text-xs font-mono font-medium">
+              <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
+              <span>{step.id === 2 ? 'Not connected: use "Connect GitHub" in the top bar' : 'Not connected yet'}</span>
+            </div>
+          )}
           <div className="flex items-center justify-center gap-2 text-zinc-100">
             <StepIcon className="w-5 h-5 text-indigo-400" />
             <h3 className="font-semibold">{step.title}</h3>

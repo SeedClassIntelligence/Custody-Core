@@ -82,7 +82,7 @@ describe('Built browser bundle', () => {
   });
 
   it('contains no service-role variable name or app database password', () => {
-    for (const needle of ['SUPABASE_SERVICE_ROLE_KEY', 'SERVICE_ROLE_KEY', 'service_role', 'CustodyAppPass', 'MFA_ENCRYPTION_KEY']) {
+    for (const needle of ['SUPABASE_SERVICE_ROLE_KEY', 'SERVICE_ROLE_KEY', 'service_role', 'CustodyAppPass', 'MFA_ENCRYPTION_KEY', 'GITHUB_APP_PRIVATE_KEY', 'GITHUB_APP_CLIENT_SECRET', 'BEGIN RSA PRIVATE KEY']) {
       const hit = files.find((f) => f.text.includes(needle));
       expect(hit?.name, `"${needle}" found in ${hit?.name}`).toBeUndefined();
     }

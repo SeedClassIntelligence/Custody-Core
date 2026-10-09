@@ -1,6 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { createInitialEmptyState, purgeLegacyBrowserState, AppState } from './utils/storage';
-import { fetchProjects, fetchProjectEvents, claimProject } from './utils/api';
+import {
+  fetchProjects,
+  fetchProjectEvents,
+  claimProject,
+  fetchGitHubStatus,
+  startGitHubInstall,
+  addRepositories,
+  fetchDoors,
+  closeDoor,
+  GitHubStatus,
+  ServerDoor
+} from './utils/api';
 
 // Components
 import { Header } from './components/Header';
@@ -33,6 +44,10 @@ function Workspace({ auth }: { auth: AuthInfo }) {
   const [currentTab, setCurrentTab] = useState<string>('dashboard');
   const [roleMode, setRoleMode] = useState<RoleMode>('creator');
   const [selectedDoorId, setSelectedDoorId] = useState<string>('');
+  const [github, setGithub] = useState<GitHubStatus | null>(null);
+  const [githubNotice, setGithubNotice] = useState<{ ok: boolean; text: string } | null>(null);
+  const [doors, setDoors] = useState<ServerDoor[]>([]);
+  const [doorsError, setDoorsError] = useState<string | null>(null);
 
   // Modals state
   const [isSetupOpen, setIsSetupOpen] = useState(false);
@@ -58,7 +73,49 @@ function Workspace({ auth }: { auth: AuthInfo }) {
     init();
   }, []);
 
+  // GitHub connection, and the result of coming back from GitHub's install page (/?github=...).
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const outcome = params.get('github');
+    if (outcome) {
+      const reasons: Record<string, string> = {
+        start_again: 'The connection was not started from this browser, or took too long. Start again from Custody Core.',
+        not_your_installation: 'GitHub says the account that installed the app cannot access that installation.',
+        no_user_authorization: 'GitHub did not send back the sign-in step. The App must have "Request user authorization (OAuth) during installation" on.',
+        github_refused: 'GitHub refused a request. Try again.',
+        server_not_configured: 'The server is missing settings for the GitHub connection.'
+      };
+      setGithubNotice(
+        outcome === 'connected'
+          ? { ok: true, text: 'GitHub is connected.' }
+          : outcome === 'requested'
+            ? { ok: true, text: 'Installation requested. An owner of the GitHub organization must approve it, then connect again.' }
+            : { ok: false, text: `GitHub was not connected. ${reasons[params.get('reason') ?? ''] ?? 'Try again.'}` }
+      );
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+    fetchGitHubStatus()
+      .then(setGithub)
+      .catch(() => setGithub(null));
+  }, []);
+
+  const connectGitHub = async () => {
+    try {
+      window.location.href = await startGitHubInstall();
+    } catch (err: any) {
+      setGithubNotice({ ok: false, text: err.message || 'Could not start the GitHub connection.' });
+    }
+  };
+
   const activeProjectId = state?.activeProjectId;
+  useEffect(() => {
+    if (!activeProjectId) return;
+    setDoorsError(null);
+    fetchDoors(activeProjectId)
+      .then(setDoors)
+      .catch((err: any) => setDoorsError(err.message || 'Could not load doors.'));
+  }, [activeProjectId]);
+
   useEffect(() => {
     if (!activeProjectId) return;
     let cancelled = false;
@@ -85,6 +142,34 @@ function Workspace({ auth }: { auth: AuthInfo }) {
 
   const activeProject = state.projects.find((p) => p.id === state.activeProjectId) || null;
   const selectedDoor = state.doors.find((d) => d.id === selectedDoorId) || state.doors[0] || null;
+  const selectedServerDoor = doors.find((d) => d.id === selectedDoorId) || doors[0] || null;
+
+  const reloadProjects = async () => {
+    const { projects } = await fetchProjects();
+    setState((prev) => (prev ? { ...prev, projects } : prev));
+  };
+  const reloadEvents = async () => {
+    if (!activeProjectId) return;
+    const events = await fetchProjectEvents(activeProjectId).catch(() => null);
+    if (events) setState((prev) => (prev ? { ...prev, events } : prev));
+  };
+  const handleAddRepositories = async (names: string[]) => {
+    if (!activeProjectId) return;
+    await addRepositories(activeProjectId, names);
+    await reloadProjects();
+    await reloadEvents();
+  };
+  const handleDoorOpened = (door: ServerDoor) => {
+    setDoors((prev) => [door, ...prev.filter((d) => d.id !== door.id)]);
+    setSelectedDoorId(door.id);
+    void reloadEvents();
+  };
+  const handleCloseDoor = async (doorId: string) => {
+    if (!activeProjectId) return;
+    const closed = await closeDoor(activeProjectId, doorId);
+    setDoors((prev) => prev.map((d) => (d.id === closed.id ? closed : d)));
+    await reloadEvents();
+  };
   const selectedWorkspace = selectedDoor ? state.workspaces.find((w) => w.door_id === selectedDoor.id) : undefined;
 
   // Claim a project: the server records it and its first event. A failure is shown, never papered over.
@@ -109,12 +194,27 @@ function Workspace({ auth }: { auth: AuthInfo }) {
         roleMode={roleMode}
         onSelectRoleMode={setRoleMode}
         connections={state.connections}
+        github={github}
+        onConnectGitHub={connectGitHub}
         onOpenSetup={() => setIsSetupOpen(true)}
         userEmail={auth.email}
         onSignOut={() => void auth.signOut()}
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {githubNotice && (
+          <div
+            className={`mb-6 p-4 rounded-xl text-xs flex justify-between gap-4 border ${
+              githubNotice.ok ? 'bg-emerald-950/40 border-emerald-800 text-emerald-200' : 'bg-rose-950/50 border-rose-800 text-rose-200'
+            }`}
+          >
+            <span>{githubNotice.text}</span>
+            <button onClick={() => setGithubNotice(null)} className="opacity-70 hover:opacity-100">
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {loadError && (
           <div className="mb-6 p-4 bg-rose-950/50 border border-rose-800 rounded-xl text-xs text-rose-200">
             Projects could not be loaded: {loadError}
@@ -129,22 +229,32 @@ function Workspace({ auth }: { auth: AuthInfo }) {
             onOpenNewDoor={() => setIsOpenDoorOpen(true)}
             onClaimNewProject={() => setIsClaimOpen(true)}
             onSelectTab={setCurrentTab}
+            github={github}
+            doors={doors}
+            doorsError={doorsError}
+            onConnectGitHub={connectGitHub}
+            onAddRepositories={handleAddRepositories}
+            onSelectDoor={(id) => {
+              setSelectedDoorId(id);
+              setCurrentTab('door_details');
+            }}
           />
         )}
 
         {currentTab === 'door_details' &&
-          (selectedDoor && activeProject ? (
+          (selectedServerDoor && activeProject ? (
             <DoorDetailsView
-              door={selectedDoor}
+              door={selectedServerDoor}
+              doors={doors}
               project={activeProject}
-              onCloseDoor={async () => setIsClosingReportOpen(true)}
-              onOpenInviteModal={() => setIsInviteOpen(true)}
+              onSelectDoor={setSelectedDoorId}
+              onCloseDoor={handleCloseDoor}
             />
           ) : (
             <div className="p-12 text-center text-zinc-400 bg-zinc-950 border border-zinc-800 rounded-2xl space-y-3">
-              <h3 className="font-semibold text-zinc-200 text-sm">Doors: Not connected yet</h3>
+              <h3 className="font-semibold text-zinc-200 text-sm">No doors yet</h3>
               <p className="text-xs text-zinc-500 max-w-md mx-auto">
-                Doors will give an outside developer narrow, temporary, signed access. None exist.
+                Open a door from the project page to give a developer access through the git gateway.
               </p>
             </div>
           ))}
@@ -181,7 +291,7 @@ function Workspace({ auth }: { auth: AuthInfo }) {
         {currentTab === 'acceptance' && <AcceptanceSuiteView />}
       </main>
 
-      <WelcomeSetupModal isOpen={isSetupOpen} onClose={() => setIsSetupOpen(false)} />
+      <WelcomeSetupModal isOpen={isSetupOpen} onClose={() => setIsSetupOpen(false)} githubConnected={!!github?.connected} />
 
       <ClaimProjectModal
         isOpen={isClaimOpen}
@@ -194,7 +304,8 @@ function Workspace({ auth }: { auth: AuthInfo }) {
           isOpen={isOpenDoorOpen}
           onClose={() => setIsOpenDoorOpen(false)}
           project={activeProject}
-          agreementTemplates={state.agreementTemplates}
+          githubConnected={!!github?.connected}
+          onDoorOpened={handleDoorOpened}
         />
       )}
 

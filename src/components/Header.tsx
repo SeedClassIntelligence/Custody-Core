@@ -13,6 +13,7 @@ import {
   Database
 } from 'lucide-react';
 import { RoleMode, Connection } from '../types/custody';
+import type { GitHubStatus } from '../utils/api';
 
 interface HeaderProps {
   currentTab: string;
@@ -20,6 +21,8 @@ interface HeaderProps {
   roleMode: RoleMode;
   onSelectRoleMode: (mode: RoleMode) => void;
   connections: Connection[];
+  github: GitHubStatus | null;
+  onConnectGitHub: () => void;
   onOpenSetup: () => void;
   userEmail: string;
   onSignOut: () => void;
@@ -31,6 +34,8 @@ export const Header: React.FC<HeaderProps> = ({
   roleMode,
   onSelectRoleMode,
   connections,
+  github,
+  onConnectGitHub,
   onOpenSetup,
   userEmail,
   onSignOut
@@ -52,7 +57,6 @@ export const Header: React.FC<HeaderProps> = ({
       });
   }, []);
 
-  const ghConn = connections.find(c => c.kind === 'github' && c.status === 'locked');
   const s3Conn = connections.find(c => (c.kind === 'storage_s3' || c.kind === 'storage_drive') && c.status === 'connected');
 
   return (
@@ -65,7 +69,7 @@ export const Header: React.FC<HeaderProps> = ({
           <span className="text-zinc-600">|</span>
           <span className="text-zinc-300">Phase 1: Custody Core</span>
           <span className="rounded bg-indigo-950/80 border border-indigo-700/60 px-1.5 py-0.5 text-[10px] font-medium text-indigo-300">
-            Milestone 2 Active
+            Milestone 3 Active
           </span>
         </div>
 
@@ -81,10 +85,14 @@ export const Header: React.FC<HeaderProps> = ({
           <span className="text-zinc-700">•</span>
           <div className="flex items-center gap-1.5">
             <FolderLock className="w-3 h-3 text-zinc-400" />
-            <span>GitHub App: {ghConn ? (
-              <strong className="text-zinc-200">Connected</strong>
+            <span>GitHub: {github?.connected ? (
+              <strong className="text-emerald-400">Connected ({github.account_login})</strong>
+            ) : github && !github.configured ? (
+              <span className="text-amber-400">GitHub App not set up on the server</span>
             ) : (
-              <span className="text-zinc-500">Not connected yet (Milestone 3)</span>
+              <button onClick={onConnectGitHub} className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2">
+                Connect GitHub
+              </button>
             )}</span>
           </div>
           <span className="text-zinc-700">•</span>

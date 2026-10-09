@@ -24,7 +24,6 @@ app at it through `TEST_DATABASE_URL`, and runs the whole suite. The test setup 
 database: it loads every screen, claims a project, verifies its record, tampers with it, downloads an export and
 verifies that too. Screenshots land in `docs/screenshots/milestone-1/`.
 
-The tenant-isolation test is expected to fail until Milestone 2 (login) is built.
 
 ## Event log
 
@@ -41,6 +40,12 @@ Nothing is mocked: users are created and signed in by the auth server, authentic
 - `npm test` starts the stack by itself if Docker is running (the first start downloads images and takes a few minutes).
 - If Docker is not available, only the login tests fail, with that reason; the rest of the suite still runs.
 - `npm run auth-stack:start | auth-stack:stop | auth-stack:status` control it by hand.
+
+## Git gateway
+
+Developers clone and push through Custody Core, never GitHub: `<app>/git/<door id>/<owner>/<repo>.git`. Setup of the
+GitHub App, what the gateway enforces, and what is not built yet: `docs/GITHUB_APP_SETUP.md`. The gateway needs `git`
+and `gitleaks` on the server (`npm run tools:gitleaks`; the Dockerfile installs both).
 
 ## Deploying
 

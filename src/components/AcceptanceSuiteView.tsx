@@ -29,7 +29,8 @@ const SPEC_SCENARIOS: AcceptanceTestResult[] = [
     status: 'idle',
     log: [
       'Spec Requirement: Developers never receive direct access to GitHub repository.',
-      'Verification path: Git remote points to platform-managed Git Gateway.'
+      'Verification path: Git remote points to platform-managed Git Gateway.',
+      'Built (Milestone 3): developers clone and push through /git/<door>/<owner>/<repo>.git with a door credential; tests/git_gateway.test.ts.'
     ]
   },
   {
@@ -39,7 +40,8 @@ const SPEC_SCENARIOS: AcceptanceTestResult[] = [
     status: 'idle',
     log: [
       'Spec Requirement: Pre-receive hook verifies ref matches authorized door prefix.',
-      'Verification path: Tested against unapproved refs and main.'
+      'Verification path: Tested against unapproved refs and main.',
+      'Built (Milestone 3): pushes to main, other branches and tags are refused; tests/git_gateway.test.ts.'
     ]
   },
   {
@@ -49,7 +51,8 @@ const SPEC_SCENARIOS: AcceptanceTestResult[] = [
     status: 'idle',
     log: [
       'Spec Requirement: Gitleaks AST pre-receive scan halts push on entropy match.',
-      'Verification path: Emits git.push_rejected event into project hash chain.'
+      'Verification path: Emits git.push_rejected event into project hash chain.',
+      'Built (Milestone 3): gitleaks 8.28.0 scans every new commit in the pre-receive hook; a private key is refused; tests/git_gateway.test.ts.'
     ]
   },
   {
@@ -67,7 +70,8 @@ const SPEC_SCENARIOS: AcceptanceTestResult[] = [
     description: 'Within 5 seconds of Close the door, the workspace\'s next git request is refused with 403 Forbidden.',
     status: 'idle',
     log: [
-      'Spec Requirement: Immediate credential revocation and door state transition in gateway cache.'
+      'Spec Requirement: Immediate credential revocation and door state transition in gateway cache.',
+      'Built (Milestone 3): every git request checks the database, so the next request after closing is refused; tests/git_gateway.test.ts.'
     ]
   },
   {
@@ -132,7 +136,7 @@ const SPEC_SCENARIOS: AcceptanceTestResult[] = [
     status: 'idle',
     log: [
       'Spec Requirement: Row-level tenant scoping enforced across all database queries.',
-      'Verification path: tests/schema_and_tenant.test.ts (currently failing on purpose; login arrives in Milestone 2).'
+      'Verification path: tests/schema_and_tenant.test.ts (needs the local Supabase Auth stack, Docker).'
     ]
   }
 ];

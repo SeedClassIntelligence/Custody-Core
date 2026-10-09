@@ -59,3 +59,102 @@ export async function claimProject(input: { name: string; purpose: string }): Pr
   }
   return payload.project as Project;
 }
+
+// --- GitHub connection ---------------------------------------------------------------------------------------
+
+export interface GitHubStatus {
+  configured: boolean;
+  connected: boolean;
+  account_login: string | null;
+  account_type: string | null;
+}
+
+async function jsonOrThrow(res: Response, what: string): Promise<any> {
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `${what} failed (server returned ${res.status}).`);
+  return body;
+}
+
+export async function fetchGitHubStatus(): Promise<GitHubStatus> {
+  return jsonOrThrow(await authFetch('/api/v1/github'), 'Reading the GitHub connection');
+}
+
+/** Starts installing the GitHub App: the server sets a short-lived cookie for this browser and returns GitHub's page. */
+export async function startGitHubInstall(): Promise<string> {
+  const body = await jsonOrThrow(await authFetch('/api/v1/github/install', { method: 'POST' }), 'Starting the GitHub connection');
+  return body.url as string;
+}
+
+export interface GitHubRepository {
+  id: number;
+  full_name: string;
+  default_branch: string;
+  private: boolean;
+}
+
+export async function fetchGitHubRepositories(): Promise<GitHubRepository[]> {
+  return (await jsonOrThrow(await authFetch('/api/v1/github/repositories'), 'Listing GitHub repositories')).repositories;
+}
+
+export async function addRepositories(projectId: string, fullNames: string[]) {
+  return (await jsonOrThrow(
+    await authFetch(`/api/v1/projects/${projectId}/repositories`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ full_names: fullNames })
+    }),
+    'Adding repositories'
+  )).repositories;
+}
+
+// --- Doors ---------------------------------------------------------------------------------------------------
+
+export interface ServerDoor {
+  id: string;
+  project_id: string;
+  developer_email: string;
+  job_description: string;
+  rights_type: string;
+  status: 'draft' | 'open' | 'closed' | string;
+  opens_at: string | null;
+  expires_at: string;
+  closed_at: string | null;
+  closed_reason: string | null;
+  created_at: string;
+  branch_prefix: string;
+  repositories: Array<{ repository_id: string; full_name: string; access: 'read' | 'write' }>;
+  credential: { id: string; created_at: string; last_used_at: string | null } | null;
+  remotes: Array<{ full_name: string; url: string }>;
+}
+
+export async function fetchDoors(projectId: string): Promise<ServerDoor[]> {
+  return (await jsonOrThrow(await authFetch(`/api/v1/projects/${projectId}/doors`), 'Loading doors')).doors;
+}
+
+export async function createDoor(
+  projectId: string,
+  input: {
+    developer_email: string;
+    job_description: string;
+    rights_type: string;
+    expires_at: string;
+    repositories: Array<{ repository_id: string; access: 'read' | 'write' }>;
+  }
+): Promise<ServerDoor> {
+  return (await jsonOrThrow(
+    await authFetch(`/api/v1/projects/${projectId}/doors`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input)
+    }),
+    'Creating the door'
+  )).door;
+}
+
+export async function openDoor(projectId: string, doorId: string): Promise<{ door: ServerDoor; credential: { username: string; token: string } }> {
+  return jsonOrThrow(await authFetch(`/api/v1/projects/${projectId}/doors/${doorId}/open`, { method: 'POST' }), 'Opening the door');
+}
+
+export async function closeDoor(projectId: string, doorId: string): Promise<ServerDoor> {
+  return (await jsonOrThrow(await authFetch(`/api/v1/projects/${projectId}/doors/${doorId}/close`, { method: 'POST' }), 'Closing the door')).door;
+}

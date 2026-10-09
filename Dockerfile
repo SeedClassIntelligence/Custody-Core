@@ -21,12 +21,17 @@ ARG VITE_SUPABASE_ANON_KEY
 RUN test -n "$VITE_SUPABASE_URL" && test -n "$VITE_SUPABASE_ANON_KEY" \
   || (echo "Build arguments VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are required." >&2; exit 1)
 RUN npm run build
+# The git gateway's secret scanner: a pinned gitleaks release, checked against its published SHA-256.
+RUN npm run tools:gitleaks
 
 FROM node:22-bookworm-slim
 WORKDIR /app
-ENV NODE_ENV=production PORT=3000
+ENV NODE_ENV=production PORT=3000 GATEWAY_DATA_DIR=/tmp/custody-core-gateway
+# The git gateway runs git itself (git http-backend, fetch, push).
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
+COPY --from=build /app/.tools/gitleaks ./.tools/gitleaks
 COPY --from=build /app/dist ./dist
 COPY server.ts ./
 COPY server ./server

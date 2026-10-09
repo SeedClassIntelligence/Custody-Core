@@ -94,6 +94,8 @@ process or a container: Render, Railway, Fly.io, Google Cloud Run and similar. N
 | `MFA_ENCRYPTION_KEY` | `openssl rand -base64 32`. **Keep a copy**: if lost, everyone sets up their authenticator again. | run time |
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | Project URL and anon / publishable key | run time |
 | `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` | Same two values | **build** time (baked into the browser app) |
+| `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_PRIVATE_KEY` | From the GitHub App you create: `docs/GITHUB_APP_SETUP.md` | run time |
+| `APP_URL` | The app's public address, e.g. `https://custody.example.com` (used in the git addresses given to developers) | run time |
 | `DATABASE_SSL_CA` | Optional, recommended: Supabase's certificate (Project Settings > Database > SSL configuration > Download certificate), as file contents or a path. Turns on certificate checking. | run time |
 | `NODE_ENV` | `production` (`npm start` and the Dockerfile set it already) | run time |
 | `PORT` | Set by most hosts; defaults to 3000 | run time |
@@ -112,8 +114,9 @@ Secrets are passed only at `docker run` (or as the host's secret settings), neve
 
 ### Without Docker (Render, Railway and similar "Node" services)
 
-- Build command: `npm ci && npm run build` (with the `VITE_` values set for the build)
+- Build command: `npm ci && npm run build && npm run tools:gitleaks` (with the `VITE_` values set for the build)
 - Start command: `npm start`
+- The host must have `git` installed (most Node images do; `node:*-slim` does not).
 
 ### After the first start
 
@@ -121,6 +124,8 @@ Secrets are passed only at `docker run` (or as the host's secret settings), neve
 2. `https://<your app>/api/v1/health` shows `"database":{"status":"connected","configured":true}`.
 3. From a machine with the same settings: `npm run verify-live` reports all `PASS`.
 4. Sign up with a real address, confirm the email, set up the authenticator, claim a test project, verify it.
+5. `/api/v1/health` shows `"github_app_configured": true` and `"secret_scanner": "installed"`. Then follow the live
+   check at the end of `docs/GITHUB_APP_SETUP.md`.
 
 ## Afterwards
 - `npm run migrate` will report nothing to do. If a future migration is added, run `npm run build:deploy-sql`

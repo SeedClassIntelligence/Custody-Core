@@ -125,6 +125,7 @@ const apiRouter = express.Router();
               json_build_object(
                 'id', r.id,
                 'full_name', r.full_name,
+                'github_repo_id', r.github_repo_id,
                 'default_branch', r.default_branch,
                 'is_core', r.is_core,
                 'locked_at', r.locked_at
