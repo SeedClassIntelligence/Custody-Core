@@ -117,7 +117,8 @@ const SPEC_SCENARIOS: AcceptanceTestResult[] = [
     description: 'Deleting the default branch or force-pushing to it through the GitHub API with a non-app identity fails.',
     status: 'idle',
     log: [
-      'Spec Requirement: Repository locked ruleset configured upon claiming project.'
+      'Spec Requirement: Repository locked ruleset configured upon claiming project.',
+      'Built: a ruleset (no deletion, no force push on the default branch; only the App bypasses) is created when a repository is added, read back before it counts, and re-checked on demand; tests/repository_lock.test.ts. GitHub enforces it: check live (docs/GITHUB_APP_SETUP.md).'
     ]
   },
   {

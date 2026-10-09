@@ -90,7 +90,7 @@ export const ClaimProjectModal: React.FC<ClaimProjectModalProps> = ({ isOpen, on
           <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl p-3 flex items-start gap-2.5 text-xs text-amber-300">
             <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
             <p className="text-[11px] text-amber-300/90">
-              <span className="font-semibold text-amber-200">Not connected yet:</span> creating and locking private GitHub repositories.
+              <span className="font-semibold text-amber-200">Not connected yet:</span> creating new GitHub repositories. After claiming, add your existing repositories from GitHub on the project page; each one is locked when added.
               For now, claiming records your project name and purpose in the event log, and nothing else.
             </p>
           </div>

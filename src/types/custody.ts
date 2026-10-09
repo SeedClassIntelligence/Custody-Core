@@ -47,9 +47,11 @@ export interface Repository {
   full_name: string;
   default_branch: string;
   is_core: boolean;
-  locked_at: string;
-  allow_forking: boolean;
-  ruleset_active: boolean;
+  /** Set only after the lock was read back from GitHub and checked. Empty when not locked. */
+  locked_at: string | null;
+  lock_checked_at?: string | null;
+  /** Why the last lock attempt did not lock it. */
+  lock_error?: string | null;
 }
 
 export interface Project {

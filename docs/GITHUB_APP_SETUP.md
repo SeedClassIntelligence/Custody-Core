@@ -19,6 +19,7 @@ GitHub > your profile or organization > **Settings** > **Developer settings** > 
 | Webhook > Active | **off** (not used) |
 | Repository permissions > **Contents** | **Read and write** |
 | Repository permissions > **Metadata** | Read-only (always required) |
+| Repository permissions > **Administration** | **Read and write** (to put the lock on each repository and turn off forking) |
 | Every other permission | No access |
 | Where can this GitHub App be installed? | **Any account** if creators have their own organizations; "Only on this account" for your own use |
 
@@ -57,7 +58,31 @@ it never lets code through unscanned. `/api/v1/health` shows `"secret_scanner": 
 If an organization member without owner rights installs it, GitHub turns it into a request; an owner approves
 it on GitHub, then the creator connects again.
 
-## 4. Doors
+## 4. Locking repositories
+
+Each repository added to a project is locked on GitHub right away:
+
+- a repository ruleset named **Custody Core lock** on the default branch: it cannot be **deleted** or
+  **force-pushed** by anyone (organization owners included) except the Custody Core GitHub App;
+- **forking turned off** where GitHub has the setting (private repositories of an organization).
+
+It counts as locked only after Custody Core has read the ruleset back from GitHub and checked it. The project page
+shows each repository as **locked** or **not locked** with the reason, and a **check** button that reads it back
+again: if someone removed or weakened the ruleset on GitHub, that is recorded (`repository.lock_missing`) and the
+lock is put back (`repository.locked`). Every attempt and check is in the project's record (`repository.locked`,
+`repository.lock_verified`, `repository.lock_failed`).
+
+Two things GitHub decides:
+- **Plan.** GitHub only allows rulesets on **private** repositories on a paid plan (Pro, Team or Enterprise). On the
+  free plan the repository stays "not locked" with that reason; upgrade, then press **lock**.
+- **Organization owners** can still edit or delete rulesets on GitHub. The lock stops everyone else, and accidents;
+  a removal by an owner is caught the next time the lock is checked, not prevented.
+
+If you created the App before this permission was added: add **Administration: Read and write** in the App's
+settings. GitHub then asks each organization that installed it to accept the new permission (organization
+settings > GitHub Apps > Custody Core > review request). Until they do, locking says the permission is missing.
+
+## 5. Doors
 
 1. Project page > Code Home > **Add repositories from GitHub**: pick from the repositories the App can see.
 2. **Open a Door**: developer's email, the job, rights, how many days, and per repository: read, or read and push.
@@ -87,7 +112,7 @@ reason) is an event in the project's tamper-evident record, next to `door.create
 
 ## Not built yet
 
-- Locking the repositories on GitHub (rulesets so that only the App can force-push or delete branches).
+- Checking locks on a schedule (today they are checked when added and whenever the creator presses check).
 - Closing doors automatically at their end date (the gateway already refuses an expired door).
 - Developer accounts and agreement signing (the creator hands over the credential).
 - Sandboxed developer workspaces with restricted network access.
@@ -98,6 +123,11 @@ reason) is an event in the project's tamper-evident record, next to `door.create
 `tests/git_gateway.test.ts` runs real `git clone` and `git push` through the real gateway, real database and real
 gitleaks. GitHub is replaced by a local stand-in (`tests/support/githubStandIn.ts`) that checks the App's signed
 JWT with the App's public key and serves real git repositories only to installation tokens it issued, for the
-repositories each token covers. What that cannot prove is GitHub's own behaviour, so after setting up a real App:
+repositories each token covers. `tests/repository_lock.test.ts` checks the lock against the same stand-in, which keeps
+rulesets and repository settings and refuses what GitHub documents it refuses (rulesets on private repositories
+without a paid plan, requests beyond the installation's permissions). What that cannot prove is GitHub's own behaviour, so after setting up a real App:
 connect a test organization, open a door on a scratch repository, clone, push to `door/<id>/test`, try a push to
-`main` (refused), and close the door (the next `git fetch` is refused).
+`main` (refused), and close the door (the next `git fetch` is refused). For the lock: as an organization member
+(not through Custody Core), `git push --force` to the default branch of a locked repository and try deleting it in
+the GitHub web page; both must be refused. Then delete the "Custody Core lock" ruleset on GitHub, press **check** in
+Custody Core, and see `repository.lock_missing` followed by `repository.locked`.

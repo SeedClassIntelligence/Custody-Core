@@ -27,7 +27,18 @@ export interface StandIn {
   issueUserCode(login: string, installationIds: number[]): string;
   upstreamDir(fullName: string): string;
   tokensIssued(): number;
+  /** Repository settings as GitHub would hold them (rulesets need a paid plan on private repositories). */
+  repoState(fullName: string): RepoState;
+  /** Permissions the installation has granted (default: contents write, metadata read, administration write). */
+  setInstallationPermissions(id: number, permissions: Record<string, 'read' | 'write'>): void;
   stop(): Promise<void>;
+}
+
+export interface RepoState {
+  private: boolean;
+  allow_forking: boolean;
+  rulesets_allowed: boolean;
+  rulesets: Map<number, any>;
 }
 
 function verifyJwt(token: string, publicKey: crypto.KeyObject, appId: string): boolean {
@@ -49,8 +60,15 @@ export async function startGitHubStandIn(): Promise<StandIn> {
   const clientSecret = crypto.randomBytes(20).toString('hex');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'custody-github-standin-'));
 
-  const installations = new Map<number, { login: string; repos: Set<string> }>();
-  const tokens = new Map<string, { installation: number; repos: Set<string> | null; expires: number }>();
+  const installations = new Map<number, { login: string; repos: Set<string>; permissions: Record<string, string> }>();
+  const tokens = new Map<string, { installation: number; repos: Set<string> | null; expires: number; permissions: Record<string, string> }>();
+  const repoStates = new Map<string, RepoState>();
+  let nextRulesetId = 7000;
+  const stateOf = (full: string): RepoState => {
+    const key = full.toLowerCase();
+    if (!repoStates.has(key)) repoStates.set(key, { private: true, allow_forking: true, rulesets_allowed: true, rulesets: new Map() });
+    return repoStates.get(key)!;
+  };
   const userCodes = new Map<string, { login: string; installations: number[] }>();
   const userTokens = new Map<string, { login: string; installations: number[] }>();
   let issued = 0;
@@ -80,9 +98,16 @@ export async function startGitHubStandIn(): Promise<StandIn> {
         repos.add(full);
       }
     }
+    const requested: Record<string, string> = req.body?.permissions ?? inst.permissions;
+    for (const [perm, level] of Object.entries(requested)) {
+      const granted = inst.permissions[perm];
+      if (!granted || (level === 'write' && granted !== 'write')) {
+        return res.status(422).json({ message: 'The permissions requested are not granted to this installation.' });
+      }
+    }
     const token = `ghs_${crypto.randomBytes(18).toString('base64url')}`;
     const expires = Date.now() + 3600_000;
-    tokens.set(token, { installation: Number(req.params.id), repos, expires });
+    tokens.set(token, { installation: Number(req.params.id), repos, expires, permissions: requested });
     issued++;
     res.status(201).json({ token, expires_at: new Date(expires).toISOString() });
   });
@@ -128,6 +153,76 @@ export async function startGitHubStandIn(): Promise<StandIn> {
     const u = userOf(req);
     if (!u) return res.status(401).json({ message: 'Bad credentials' });
     res.json({ total_count: u.installations.length, installations: u.installations.map((id) => ({ id })) });
+  });
+
+  // Repository settings and rulesets (installation tokens only, limited to the token's repositories and permissions).
+  const repoAccess = (req: express.Request, res: express.Response, need?: 'administration') => {
+    const t = tokens.get(/^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1] ?? '');
+    if (!t || t.expires < Date.now()) {
+      res.status(401).json({ message: 'Bad credentials' });
+      return null;
+    }
+    const full = `${req.params.owner}/${req.params.repo}`.toLowerCase();
+    const inst = installations.get(t.installation)!;
+    if (!inst.repos.has(full) || (t.repos && !t.repos.has(full))) {
+      res.status(404).json({ message: 'Not Found' });
+      return null;
+    }
+    if (need && t.permissions[need] !== 'write') {
+      res.status(403).json({ message: 'Resource not accessible by integration' });
+      return null;
+    }
+    return { full, state: stateOf(full) };
+  };
+  const repoJson = (full: string, st: RepoState) => ({ id: 1, full_name: full, private: st.private, allow_forking: st.allow_forking, default_branch: 'main' });
+
+  app.get('/repos/:owner/:repo', (req, res) => {
+    const a = repoAccess(req, res);
+    if (a) res.json(repoJson(a.full, a.state));
+  });
+  app.patch('/repos/:owner/:repo', (req, res) => {
+    const a = repoAccess(req, res, 'administration');
+    if (!a) return;
+    if (typeof req.body?.allow_forking === 'boolean') a.state.allow_forking = req.body.allow_forking;
+    res.json(repoJson(a.full, a.state));
+  });
+  app.get('/repos/:owner/:repo/rulesets', (req, res) => {
+    const a = repoAccess(req, res);
+    if (!a) return;
+    res.json([...a.state.rulesets.values()].map((r) => ({ id: r.id, name: r.name, target: r.target, source_type: 'Repository', source: a.full, enforcement: r.enforcement })));
+  });
+  const validRuleset = (b: any) =>
+    b && typeof b.name === 'string' && ['branch', 'tag', 'push'].includes(b.target) && ['active', 'disabled', 'evaluate'].includes(b.enforcement) &&
+    Array.isArray(b.rules) && b.rules.every((r: any) => typeof r.type === 'string') &&
+    Array.isArray(b.bypass_actors ?? []) && Array.isArray(b.conditions?.ref_name?.include);
+  app.post('/repos/:owner/:repo/rulesets', (req, res) => {
+    const a = repoAccess(req, res, 'administration');
+    if (!a) return;
+    if (a.state.private && !a.state.rulesets_allowed) {
+      return res.status(403).json({ message: 'Upgrade to GitHub Pro or make this repository public to enable this feature.' });
+    }
+    if (!validRuleset(req.body)) return res.status(422).json({ message: 'Invalid request.' });
+    const id = nextRulesetId++;
+    const ruleset = { id, source_type: 'Repository', source: a.full, ...req.body };
+    a.state.rulesets.set(id, ruleset);
+    res.status(201).json(ruleset);
+  });
+  app.get('/repos/:owner/:repo/rulesets/:id', (req, res) => {
+    const a = repoAccess(req, res);
+    if (!a) return;
+    const r = a.state.rulesets.get(Number(req.params.id));
+    if (!r) return res.status(404).json({ message: 'Not Found' });
+    res.json(r);
+  });
+  app.put('/repos/:owner/:repo/rulesets/:id', (req, res) => {
+    const a = repoAccess(req, res, 'administration');
+    if (!a) return;
+    const id = Number(req.params.id);
+    if (!a.state.rulesets.has(id)) return res.status(404).json({ message: 'Not Found' });
+    if (!validRuleset(req.body)) return res.status(422).json({ message: 'Invalid request.' });
+    const ruleset = { id, source_type: 'Repository', source: a.full, ...req.body };
+    a.state.rulesets.set(id, ruleset);
+    res.json(ruleset);
   });
 
   // Real git over smart HTTP, for installation tokens only.
@@ -200,8 +295,16 @@ export async function startGitHubStandIn(): Promise<StandIn> {
       GITHUB_GIT_URL: url
     },
     addInstallation(id, login, repos) {
-      installations.set(id, { login, repos: new Set(repos.map((r) => r.toLowerCase())) });
+      installations.set(id, {
+        login,
+        repos: new Set(repos.map((r) => r.toLowerCase())),
+        permissions: { contents: 'write', metadata: 'read', administration: 'write' }
+      });
     },
+    setInstallationPermissions(id, permissions) {
+      installations.get(id)!.permissions = permissions;
+    },
+    repoState: stateOf,
     createRepo(fullName) {
       // A repository with a main branch, as GitHub has after "Initialize with a README".
       const dir = upstreamDir(fullName);

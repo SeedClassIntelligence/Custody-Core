@@ -158,3 +158,11 @@ export async function openDoor(projectId: string, doorId: string): Promise<{ doo
 export async function closeDoor(projectId: string, doorId: string): Promise<ServerDoor> {
   return (await jsonOrThrow(await authFetch(`/api/v1/projects/${projectId}/doors/${doorId}/close`, { method: 'POST' }), 'Closing the door')).door;
 }
+
+/** Locks a repository on GitHub, or re-checks the lock (and puts it back if it was removed or changed). */
+export async function checkRepositoryLock(projectId: string, repositoryId: string) {
+  return (await jsonOrThrow(
+    await authFetch(`/api/v1/projects/${projectId}/repositories/${repositoryId}/lock`, { method: 'POST' }),
+    'Checking the lock'
+  )).repository;
+}

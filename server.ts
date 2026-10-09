@@ -128,7 +128,9 @@ const apiRouter = express.Router();
                 'github_repo_id', r.github_repo_id,
                 'default_branch', r.default_branch,
                 'is_core', r.is_core,
-                'locked_at', r.locked_at
+                'locked_at', r.locked_at,
+                'lock_checked_at', r.lock_checked_at,
+                'lock_error', r.lock_error
               )
             ) FILTER (WHERE r.id IS NOT NULL), '[]'
           ) as repositories

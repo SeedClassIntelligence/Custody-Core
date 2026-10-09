@@ -5,6 +5,7 @@ import { creatorOf } from './auth';
 import { GitHubError, GitHubNotConfigured, installationRepositories } from './github';
 import { installationOf } from './githubRoutes';
 import { newGatewayToken } from './gateway/router';
+import { LOCK_NAME, lockRepository } from './repositoryLock';
 import { removeDoorMirrors } from './gateway/mirror';
 
 /**
@@ -86,10 +87,10 @@ projectExtrasRouter.post('/repositories', async (req, res) => {
       return res.status(422).json({ error: `The GitHub App cannot see: ${missing.join(', ')}. Give it access to these repositories on GitHub.` });
     }
 
+    const added: any[] = [];
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const added = [];
       for (const n of names as string[]) {
         const gh = visible.get(n.toLowerCase())!;
         const exists = await client.query('SELECT 1 FROM repository WHERE project_id = $1 AND lower(full_name) = lower($2)', [pid(req), gh.full_name]);
@@ -116,15 +117,90 @@ projectExtrasRouter.post('/repositories', async (req, res) => {
         }, client);
       }
       await client.query('COMMIT');
-      res.status(201).json({ repositories: added });
     } catch (err) {
       await client.query('ROLLBACK').catch(() => undefined);
       throw err;
     } finally {
       client.release();
     }
+    // Lock each one on GitHub. A repository that cannot be locked is still added, with the reason shown.
+    const repositories = [];
+    for (const r of added) repositories.push(await applyLock(pool, pid(req), creator.id, installation.installation_id, r));
+    res.status(201).json({ repositories });
   } catch (err) {
     fail(res, err, 'adding repositories');
+  }
+});
+
+/**
+ * Locks (or re-checks) one repository on GitHub, stores the outcome and records it in the project's events:
+ *   repository.locked          first lock, or locked again after it was found removed or changed
+ *   repository.lock_verified   a check found the lock exactly as set
+ *   repository.lock_missing    a check found the lock removed or changed on GitHub (then it is put back)
+ *   repository.lock_failed     GitHub would not lock it (the reason is stored and shown)
+ */
+async function applyLock(pool: pg.Pool, projectId: string, creatorId: string, installationId: number, repo: any) {
+  const result = await lockRepository(installationId, repo.full_name);
+  const wasLocked = !!repo.locked_at;
+  const event = (action: string, payload: Record<string, unknown>) =>
+    insertEvent({
+      project_id: projectId,
+      actor_type: 'creator',
+      actor_id: creatorId,
+      action,
+      subject_type: 'repository',
+      subject_id: repo.id,
+      payload: { full_name: repo.full_name, ...payload }
+    });
+
+  if (wasLocked && result.previous !== 'intact') {
+    await event('repository.lock_missing', {
+      found: result.previous === 'changed' ? 'ruleset changed on GitHub' : 'ruleset not found on GitHub',
+      locked_since: new Date(repo.locked_at).toISOString()
+    });
+  }
+  let row;
+  if (result.locked) {
+    const keepSince = wasLocked && result.previous === 'intact';
+    row = (await pool.query(
+      `UPDATE repository SET locked_at = CASE WHEN $2 THEN locked_at ELSE now() END, lock_ruleset_id = $3,
+              lock_checked_at = now(), lock_error = NULL, updated_at = now()
+        WHERE id = $1 RETURNING *`,
+      [repo.id, keepSince, result.ruleset_id]
+    )).rows[0];
+    await event(keepSince ? 'repository.lock_verified' : 'repository.locked', {
+      ruleset_id: result.ruleset_id,
+      ruleset_name: LOCK_NAME,
+      rules: ['deletion', 'non_fast_forward'],
+      applies_to: 'default branch',
+      bypass: 'Custody Core GitHub App only',
+      allow_forking: result.allow_forking
+    });
+  } else {
+    row = (await pool.query(
+      `UPDATE repository SET locked_at = NULL, lock_checked_at = now(), lock_error = $2, updated_at = now() WHERE id = $1 RETURNING *`,
+      [repo.id, result.error]
+    )).rows[0];
+    await event('repository.lock_failed', { reason: result.error });
+  }
+  return row;
+}
+
+/** Re-checks a repository's lock on GitHub (and puts it back if it was removed or changed). */
+projectExtrasRouter.post('/repositories/:repositoryId/lock', async (req, res) => {
+  const pool = db(res);
+  if (!pool) return;
+  const creator = creatorOf(res);
+  if (!UUID.test(req.params.repositoryId)) return res.status(404).json({ error: 'Repository not found.' });
+  try {
+    if (!(await ownProject(pool, pid(req), creator.id))) return res.status(404).json({ error: 'Project not found.' });
+    const repo = (await pool.query('SELECT * FROM repository WHERE id = $1 AND project_id = $2', [req.params.repositoryId, pid(req)])).rows[0];
+    if (!repo) return res.status(404).json({ error: 'Repository not found.' });
+    const installation = await installationOf(creator.id);
+    if (!installation) return res.status(409).json({ error: 'Connect GitHub first.' });
+    res.json({ repository: await applyLock(pool, pid(req), creator.id, installation.installation_id, repo) });
+  } catch (err) {
+    fail(res, err, 'checking a repository lock');
   }
 });
 

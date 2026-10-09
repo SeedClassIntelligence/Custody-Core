@@ -7,6 +7,7 @@ import {
   fetchGitHubStatus,
   startGitHubInstall,
   addRepositories,
+  checkRepositoryLock,
   fetchDoors,
   closeDoor,
   GitHubStatus,
@@ -159,6 +160,12 @@ function Workspace({ auth }: { auth: AuthInfo }) {
     await reloadProjects();
     await reloadEvents();
   };
+  const handleCheckLock = async (repositoryId: string) => {
+    if (!activeProjectId) return;
+    await checkRepositoryLock(activeProjectId, repositoryId);
+    await reloadProjects();
+    await reloadEvents();
+  };
   const handleDoorOpened = (door: ServerDoor) => {
     setDoors((prev) => [door, ...prev.filter((d) => d.id !== door.id)]);
     setSelectedDoorId(door.id);
@@ -234,6 +241,7 @@ function Workspace({ auth }: { auth: AuthInfo }) {
             doorsError={doorsError}
             onConnectGitHub={connectGitHub}
             onAddRepositories={handleAddRepositories}
+            onCheckLock={handleCheckLock}
             onSelectDoor={(id) => {
               setSelectedDoorId(id);
               setCurrentTab('door_details');

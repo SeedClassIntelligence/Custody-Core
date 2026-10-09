@@ -8,10 +8,10 @@
 -- =============================================================================
 WITH checks(sort, name, expected, actual) AS (
   VALUES
-  (10, 'schema_migrations lists every migration (001, 002, 003, 004, 005, 006)',
-       '001_initial_schema.sql, 002_hashed_timestamp_constraint.sql, 003_database_built_event_chain.sql, 004_creator_email_not_unique.sql, 005_own_second_factor.sql, 006_git_gateway.sql',
+  (10, 'schema_migrations lists every migration (001, 002, 003, 004, 005, 006, 007)',
+       '001_initial_schema.sql, 002_hashed_timestamp_constraint.sql, 003_database_built_event_chain.sql, 004_creator_email_not_unique.sql, 005_own_second_factor.sql, 006_git_gateway.sql, 007_repository_lock.sql',
        CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN 'table schema_migrations is missing'
-            ELSE COALESCE((xpath('/row/v/text()', query_to_xml('SELECT string_agg(version, '', '' ORDER BY version) AS v FROM public.schema_migrations WHERE version IN (''001_initial_schema.sql'', ''002_hashed_timestamp_constraint.sql'', ''003_database_built_event_chain.sql'', ''004_creator_email_not_unique.sql'', ''005_own_second_factor.sql'', ''006_git_gateway.sql'')', false, true, '')))[1]::text, 'none') END),
+            ELSE COALESCE((xpath('/row/v/text()', query_to_xml('SELECT string_agg(version, '', '' ORDER BY version) AS v FROM public.schema_migrations WHERE version IN (''001_initial_schema.sql'', ''002_hashed_timestamp_constraint.sql'', ''003_database_built_event_chain.sql'', ''004_creator_email_not_unique.sql'', ''005_own_second_factor.sql'', ''006_git_gateway.sql'', ''007_repository_lock.sql'')', false, true, '')))[1]::text, 'none') END),
   (20, 'custody_app role exists', 'true', (SELECT (count(*) = 1)::text FROM pg_roles WHERE rolname = 'custody_app')),
   (30, 'custody_app has NO INSERT on event', 'false', CASE WHEN (SELECT count(*) = 1 FROM pg_roles WHERE rolname = 'custody_app') THEN has_table_privilege('custody_app', 'public.event', 'INSERT')::text ELSE 'role missing' END),
   (31, 'custody_app has NO UPDATE on event', 'false', CASE WHEN (SELECT count(*) = 1 FROM pg_roles WHERE rolname = 'custody_app') THEN has_table_privilege('custody_app', 'public.event', 'UPDATE')::text ELSE 'role missing' END),

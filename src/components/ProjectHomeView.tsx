@@ -16,8 +16,53 @@ interface ProjectHomeViewProps {
   doorsError?: string | null;
   onConnectGitHub: () => void;
   onAddRepositories: (fullNames: string[]) => Promise<void>;
+  onCheckLock: (repositoryId: string) => Promise<void>;
   onSelectDoor: (doorId: string) => void;
 }
+
+/** One repository's lock state, as last read back from GitHub, with a button to check it again. */
+const LockLine: React.FC<{ repo: Project['repositories'][number]; canCheck: boolean; onCheck: (id: string) => Promise<void> }> = ({ repo, canCheck, onCheck }) => {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <li className="space-y-0.5">
+      <div className="flex items-center justify-between gap-2">
+        <span>{repo.full_name}</span>
+        <span className="flex items-center gap-2">
+          {repo.locked_at ? (
+            <span className="text-emerald-400" title={`Checked ${repo.lock_checked_at ? new Date(repo.lock_checked_at).toLocaleString() : ''}`}>
+              locked
+            </span>
+          ) : (
+            <span className="text-amber-400">not locked</span>
+          )}
+          {canCheck && (
+            <button
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                setError(null);
+                try {
+                  await onCheck(repo.id);
+                } catch (err: any) {
+                  setError(err.message);
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              className="text-indigo-400 hover:text-indigo-300 disabled:opacity-50 font-sans"
+            >
+              {busy ? 'checking...' : repo.locked_at ? 'check' : 'lock'}
+            </button>
+          )}
+        </span>
+      </div>
+      {!repo.locked_at && repo.lock_error && <div className="text-[11px] text-amber-300/90 font-sans">{repo.lock_error}</div>}
+      {!repo.github_repo_id && <div className="text-[11px] text-zinc-500 font-sans">Name only, not checked with GitHub.</div>}
+      {error && <div className="text-[11px] text-rose-300 font-sans">{error}</div>}
+    </li>
+  );
+};
 
 /** Picks repositories the GitHub App can see and adds them to the project. */
 const AddRepositories: React.FC<{ project: Project; onAdd: (names: string[]) => Promise<void> }> = ({ project, onAdd }) => {
@@ -112,6 +157,7 @@ export const ProjectHomeView: React.FC<ProjectHomeViewProps> = ({
   doorsError,
   onConnectGitHub,
   onAddRepositories,
+  onCheckLock,
   onSelectDoor
 }) => {
   if (!project) {
@@ -179,7 +225,8 @@ export const ProjectHomeView: React.FC<ProjectHomeViewProps> = ({
           {github?.connected ? (
             <p className="text-xs text-zinc-400">
               GitHub connected: <span className="text-zinc-200">{github.account_login}</span>. Developers reach these repositories only through
-              Custody Core's gateway. Locking them on GitHub (rulesets) is not connected yet.
+              Custody Core's gateway. Locked means: on GitHub, nobody but Custody Core can delete or force-push the default branch, and
+              forking is off where GitHub allows it.
             </p>
           ) : github && !github.configured ? (
             <>
@@ -195,12 +242,9 @@ export const ProjectHomeView: React.FC<ProjectHomeViewProps> = ({
             </>
           )}
           {project.repositories.length > 0 && (
-            <ul className="pt-2 text-[11px] font-mono text-zinc-300 space-y-0.5">
+            <ul className="pt-2 text-[11px] font-mono text-zinc-300 space-y-1.5">
               {project.repositories.map((repo) => (
-                <li key={repo.id}>
-                  {repo.full_name}
-                  {!repo.github_repo_id && <span className="text-zinc-500"> (name only, not checked with GitHub)</span>}
-                </li>
+                <LockLine key={repo.id} repo={repo} canCheck={!!github?.connected} onCheck={onCheckLock} />
               ))}
             </ul>
           )}

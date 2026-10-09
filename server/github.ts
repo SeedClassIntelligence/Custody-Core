@@ -197,3 +197,18 @@ export function upstreamGitUrl(fullName: string): string {
 export function gitAuthHeader(token: string): string {
   return `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
 }
+
+/** A REST call to GitHub's API with an installation token. Throws GitHubError on any non-2xx answer. */
+export async function githubApi(method: string, apiPath: string, token: string, body?: unknown): Promise<any> {
+  const config = requireConfig();
+  return call(`${config.apiUrl}${apiPath}`, {
+    method,
+    bearer: token,
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {})
+  });
+}
+
+/** The App's numeric id (what a ruleset names as the actor allowed to bypass it). */
+export function githubAppId(): number {
+  return Number(requireConfig().appId);
+}
