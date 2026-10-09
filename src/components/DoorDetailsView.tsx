@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { DoorClosed, AlertCircle } from 'lucide-react';
 import { Project } from '../types/custody';
-import { ServerDoor, fetchDoorAgreement, inviteDeveloper } from '../utils/api';
+import { ServerDoor, fetchDoorAgreement, inviteDeveloper, fetchSnapshots, downloadSnapshot, Snapshot } from '../utils/api';
 
 interface DoorDetailsViewProps {
   door: ServerDoor;
@@ -10,6 +10,44 @@ interface DoorDetailsViewProps {
   onSelectDoor: (doorId: string) => void;
   onCloseDoor: (doorId: string) => Promise<void>;
   onDoorChanged: (door: ServerDoor) => void;
+}
+
+/** The backup snapshot taken when the door closed: its status, and each repository's bundle to download. */
+function SnapshotSection({ door, projectId }: { door: ServerDoor; projectId: string }) {
+  const [snaps, setSnaps] = useState<Snapshot[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (door.snapshot_status !== 'done') return;
+    fetchSnapshots(projectId)
+      .then((all) => setSnaps(all.filter((s) => s.door_id === door.id)))
+      .catch((err) => setError(err.message));
+  }, [door.id, door.snapshot_status, projectId]);
+  if (!door.snapshot_status) return null;
+  return (
+    <div className="space-y-2 text-xs">
+      <h4 className="font-semibold uppercase tracking-wider text-zinc-400">Backup snapshot</h4>
+      {door.snapshot_status === 'pending' && (
+        <div className="text-amber-300">
+          Being taken{door.snapshot_attempts ? ` (attempt ${door.snapshot_attempts} failed, retrying: ${door.snapshot_error})` : ''}.
+        </div>
+      )}
+      {door.snapshot_status === 'failed' && <div className="text-rose-300">Could not be taken after several attempts: {door.snapshot_error}</div>}
+      {snaps?.map((s) => (
+        <div key={s.id} className="flex flex-wrap items-center justify-between gap-2 bg-zinc-900 border border-zinc-800 rounded px-2 py-1.5">
+          <span className="font-mono text-zinc-200">
+            {s.full_name} · {Object.keys(s.refs).length} branch{Object.keys(s.refs).length === 1 ? '' : 'es'} · {(s.size_bytes / 1024).toFixed(1)} KB
+          </span>
+          <button className="text-indigo-400 hover:text-indigo-300" onClick={() => downloadSnapshot(projectId, s).catch((e) => setError(e.message))}>
+            Download (git clone works on it)
+          </button>
+          <span className="w-full font-mono text-[10px] text-zinc-500 break-all">SHA-256 {s.sha256}</span>
+        </div>
+      ))}
+      {snaps && snaps.length === 0 && <div className="text-zinc-400">Nothing to keep: the door's repositories had no branches to save.</div>}
+      {error && <div className="text-rose-300">{error}</div>}
+      <p className="text-[11px] text-zinc-500">Stored on the Custody Core server. Storage you own (your own bucket or drive) is not connected yet.</p>
+    </div>
+  );
 }
 
 /** The agreement: whether it was sent and signed, by whom, and its full text on request. */
@@ -194,6 +232,7 @@ export const DoorDetailsView: React.FC<DoorDetailsViewProps> = ({ door, doors, p
         </div>
 
         <AgreementSection door={door} projectId={project.id} onDoorChanged={onDoorChanged} />
+        <SnapshotSection door={door} projectId={project.id} />
 
         {door.remotes.length > 0 && (
           <div className="space-y-1.5 text-xs">
@@ -209,8 +248,8 @@ export const DoorDetailsView: React.FC<DoorDetailsViewProps> = ({ door, doors, p
         <div className="flex items-start gap-2 text-xs text-zinc-400 border-t border-zinc-800/80 pt-4">
           <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
           <span>
-            Not connected yet: sandboxed workspaces, closing automatically at expiry (the gateway already refuses an expired door), and a backup
-            snapshot on close. Every fetch, push and refused push is in the Event Chain.
+            The door closes by itself at its end date (checked every 30 seconds, and at server start for anything missed), and a backup snapshot
+            is taken when it closes. Not connected yet: sandboxed workspaces. Every fetch, push and refused push is in the Event Chain.
           </span>
         </div>
       </div>

@@ -20,6 +20,8 @@ import { githubApiRouter, githubCallbackRouter } from './server/githubRoutes';
 import { githubConfig } from './server/github';
 import { projectExtrasRouter } from './server/doors';
 import { developerRouter } from './server/developerRoutes';
+import { schedulerStatus, startScheduler } from './server/scheduler';
+import { snapshotsRouter } from './server/snapshotRoutes';
 import { verifyAccountChain } from './shared/crypto';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -75,6 +77,7 @@ const apiRouter = express.Router();
         github_app_configured: githubConfig() !== null,
         secret_scanner: findScanner() ? 'installed' : 'missing'
       },
+      scheduler: (({ started_at, last_tick_at, last_error }) => ({ started_at, last_tick_at, ok: started_at ? !last_error : null }))(schedulerStatus()),
       time: new Date().toISOString()
     });
   });
@@ -103,6 +106,7 @@ const apiRouter = express.Router();
   apiRouter.use('/github', githubApiRouter);
   apiRouter.use('/projects/:id', projectExtrasRouter);
   apiRouter.use('/developer', developerRouter);
+  apiRouter.use('/projects/:id/snapshots', snapshotsRouter);
 
   apiRouter.get('/me', (_req, res) => {
     const creator = creatorOf(res);
@@ -333,6 +337,8 @@ export async function startServer() {
     try {
       const migrationRes = await runMigrations();
       console.log('[DB]', migrationRes.message);
+      // Doors that passed their end date while the server was down are closed now, before anything else is served.
+      if (migrationRes.success) await startScheduler().firstRun;
     } catch (err: any) {
       console.warn('[DB Migration Warning]', err.message);
     }

@@ -11,7 +11,7 @@
 --     append_event), 004 (creator email no longer unique), 005 (authenticator-code step run by the app, with
 --     the wrong-code limit, and the per-account record account_event), 006 (the git gateway: GitHub App
 --     installations, gateway credentials, door rules), 007 (repository lock state), 008 (developer accounts,
---     invitations, signed agreements)
+--     invitations, signed agreements), 009 (scheduler: snapshot state on doors, snapshot records final)
 --   * records each in schema_migrations exactly as `npm run migrate` does
 --   * applies the custody_app grants (server/roles.sql): no INSERT on event or account_event, EXECUTE on
 --     append_event and append_account_event, attempts can be added but never changed or deleted
@@ -709,6 +709,50 @@ $mig$;
   END IF;
 END
 $apply6$;
+
+-- ---------------------------------------------------------------------------
+-- 009_scheduler_and_snapshots.sql  (skipped if it is already recorded in schema_migrations)
+-- ---------------------------------------------------------------------------
+DO $apply7$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '009_scheduler_and_snapshots.sql') THEN
+    EXECUTE $mig$
+-- 009: the scheduler (doors close at their end date, locks are re-checked) and backup snapshots on close.
+--
+-- When a door that was open closes (by the creator or at its end date), a snapshot of its work is due: for each of
+-- the door's repositories, a git bundle of the default branch and the door's own branches, fetched from GitHub,
+-- verified, and stored with its SHA-256. Closing never waits for it: the door records that a snapshot is pending,
+-- and the scheduler takes it, retrying if GitHub or the storage is unavailable.
+
+ALTER TABLE door ADD COLUMN snapshot_status TEXT CHECK (snapshot_status IN ('pending', 'done', 'failed'));
+ALTER TABLE door ADD COLUMN snapshot_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE door ADD COLUMN snapshot_next_attempt_at TIMESTAMPTZ;
+ALTER TABLE door ADD COLUMN snapshot_error TEXT;
+CREATE INDEX idx_door_snapshot_pending ON door (snapshot_next_attempt_at) WHERE snapshot_status = 'pending';
+CREATE INDEX idx_door_open_expiry ON door (expires_at) WHERE status IN ('draft', 'awaiting_signature', 'open');
+
+ALTER TABLE mirror_snapshot ADD COLUMN door_id UUID REFERENCES door (id);
+ALTER TABLE mirror_snapshot ADD COLUMN trigger TEXT;
+ALTER TABLE mirror_snapshot ADD COLUMN refs JSONB;          -- {"refs/heads/main": "<sha>", ...} as bundled
+CREATE INDEX idx_mirror_snapshot_door ON mirror_snapshot (door_id);
+
+-- A snapshot record never changes once written.
+CREATE FUNCTION mirror_snapshot_is_final() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'mirror_snapshot %: a snapshot record cannot be changed or deleted', OLD.id USING ERRCODE = 'check_violation';
+END
+$$;
+CREATE TRIGGER trg_mirror_snapshot_is_final BEFORE UPDATE OR DELETE ON mirror_snapshot FOR EACH ROW EXECUTE FUNCTION mirror_snapshot_is_final();
+
+$mig$;
+    INSERT INTO schema_migrations (version) VALUES ('009_scheduler_and_snapshots.sql');
+    RAISE NOTICE 'applied 009_scheduler_and_snapshots.sql';
+  ELSE
+    RAISE NOTICE 'skipped 009_scheduler_and_snapshots.sql (already applied)';
+  END IF;
+END
+$apply7$;
 
 -- ---------------------------------------------------------------------------
 -- server/roles.sql  (the custody_app grants; safe to repeat)

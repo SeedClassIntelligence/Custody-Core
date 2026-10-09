@@ -6,6 +6,7 @@ import { gatewayRouter } from '../../server/gateway/router';
 import { githubApiRouter, githubCallbackRouter } from '../../server/githubRoutes';
 import { projectExtrasRouter } from '../../server/doors';
 import { developerRouter } from '../../server/developerRoutes';
+import { snapshotsRouter } from '../../server/snapshotRoutes';
 
 /**
  * The real API routers behind a test login step that sets the creator, as the real login does after its checks
@@ -35,6 +36,7 @@ export async function startHarness(): Promise<Harness> {
   api.use('/github', githubApiRouter);
   api.use('/projects/:id', projectExtrasRouter);
   api.use('/developer', developerRouter);
+  api.use('/projects/:id/snapshots', snapshotsRouter);
   app.use('/api/v1', api);
   const server = http.createServer(app);
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));

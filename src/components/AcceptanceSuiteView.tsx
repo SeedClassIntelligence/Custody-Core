@@ -80,7 +80,8 @@ const SPEC_SCENARIOS: AcceptanceTestResult[] = [
     description: 'Closing the door deletes the Kubernetes namespace, wipes volumes, revokes Infisical identities, and takes a final mirror snapshot.',
     status: 'idle',
     log: [
-      'Spec Requirement: Ephemeral workspace fully destroyed; git bundle written to creator backup.'
+      'Spec Requirement: Ephemeral workspace fully destroyed; git bundle written to creator backup.',
+      'Partly built: on close the credential is revoked, gateway copies deleted, and a verified git bundle snapshot is stored on the server (not yet in storage the creator owns). Workspaces are not built.'
     ]
   },
   {
@@ -89,7 +90,8 @@ const SPEC_SCENARIOS: AcceptanceTestResult[] = [
     description: 'When expires_at is reached, the door closes automatically without creator intervention.',
     status: 'idle',
     log: [
-      'Spec Requirement: Temporal workflow timer triggers automated door closure.'
+      'Spec Requirement: Temporal workflow timer triggers automated door closure.',
+      'Built (without Temporal): the server\'s scheduler closes doors at their end date every 30 s and, at start, any it missed while down; tests/scheduler.test.ts.'
     ]
   },
   {
