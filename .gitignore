@@ -8,3 +8,5 @@ coverage/
 !.env.example
 browser-check-output/
 custody-core.zip
+.tools/
+.gateway-data/

@@ -9,12 +9,15 @@
 --   * records migration 001 (already applied to this database by the app) after checking it is really there
 --   * applies every later migration in order: 002 (hashed_timestamp constraint), 003 (database-built event chain,
 --     append_event), 004 (creator email no longer unique), 005 (authenticator-code step run by the app, with
---     the wrong-code limit, and the per-account record account_event)
+--     the wrong-code limit, and the per-account record account_event), 006 (the git gateway: GitHub App
+--     installations, gateway credentials, door rules)
 --   * records each in schema_migrations exactly as `npm run migrate` does
 --   * applies the custody_app grants (server/roles.sql): no INSERT on event or account_event, EXECUTE on
 --     append_event and append_account_event, attempts can be added but never changed or deleted
 --   * closes Supabase's built-in REST API (roles anon and authenticated) to every Custody Core table and
 --     function, and turns on row-level security (only custody_app has a policy)
+-- It does NOT set custody_app's password: a new custody_app has none (nobody can sign in as it) until the
+-- server starts with APP_DB_PASSWORD, or you set one yourself (docs/deploy/README.md, "The app account's password").
 -- It does NOT add, change or delete any event, project or creator.
 --
 -- Safe to run twice: a migration already recorded is skipped, and the grants are idempotent.
@@ -479,6 +482,116 @@ END
 $apply3$;
 
 -- ---------------------------------------------------------------------------
+-- 006_git_gateway.sql  (skipped if it is already recorded in schema_migrations)
+-- ---------------------------------------------------------------------------
+DO $apply4$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '006_git_gateway.sql') THEN
+    EXECUTE $mig$
+-- 006: the git gateway.
+--
+-- A creator connects their GitHub organization once (a GitHub App installation). A door gives one outside
+-- developer a gateway credential for chosen repositories of one project. The developer's git remote is
+-- Custody Core, never GitHub: the gateway checks the credential on every request, lets them push only to
+-- branches under door/<door id>/, scans every push for secrets, and only then forwards it to GitHub.
+
+-- The GitHub App installation a creator connected (one per creator). The installation id is not a secret;
+-- the App's private key stays in the server's environment.
+CREATE TABLE github_installation (
+  creator_id UUID PRIMARY KEY REFERENCES creator (id) ON DELETE CASCADE,
+  installation_id BIGINT NOT NULL CHECK (installation_id > 0),
+  account_login TEXT NOT NULL,
+  account_type TEXT NOT NULL,
+  connected_by_github_login TEXT NOT NULL,   -- the GitHub user who proved access to the installation
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Doors are for a developer named by email; developer accounts and signing come later.
+ALTER TABLE door ADD COLUMN developer_email TEXT;
+ALTER TABLE door ADD CONSTRAINT chk_door_status
+  CHECK (status IN ('draft', 'awaiting_signature', 'opening', 'open', 'closing', 'closed', 'failed'));
+ALTER TABLE door_repository ADD CONSTRAINT chk_door_repository_access CHECK (access IN ('read', 'write'));
+CREATE INDEX idx_door_repository_repository ON door_repository (repository_id);
+
+-- A closed door stays closed: a new door is a new record.
+CREATE FUNCTION door_closed_is_final() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.status = 'closed' AND NEW.status <> 'closed' THEN
+    RAISE EXCEPTION 'door %: a closed door cannot be reopened', OLD.id USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END
+$$;
+CREATE TRIGGER trg_door_closed_is_final BEFORE UPDATE ON door FOR EACH ROW EXECUTE FUNCTION door_closed_is_final();
+
+-- The secret the developer's git client sends. Only its SHA-256 is stored; the value is shown once.
+CREATE TABLE gateway_credential (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  door_id UUID NOT NULL REFERENCES door (id) ON DELETE CASCADE,
+  token_hash CHAR(64) NOT NULL UNIQUE CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_used_at TIMESTAMPTZ,
+  revoked_at TIMESTAMPTZ
+);
+CREATE INDEX idx_gateway_credential_door ON gateway_credential (door_id);
+
+-- A credential's secret and door never change, and a revocation can never be undone.
+CREATE FUNCTION gateway_credential_guard() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.token_hash <> OLD.token_hash OR NEW.door_id <> OLD.door_id OR NEW.created_at <> OLD.created_at THEN
+    RAISE EXCEPTION 'gateway_credential %: only last_used_at and revoked_at can change', OLD.id USING ERRCODE = 'check_violation';
+  END IF;
+  IF OLD.revoked_at IS NOT NULL AND NEW.revoked_at IS DISTINCT FROM OLD.revoked_at THEN
+    RAISE EXCEPTION 'gateway_credential %: a revocation cannot be undone', OLD.id USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END
+$$;
+CREATE TRIGGER trg_gateway_credential_guard BEFORE UPDATE ON gateway_credential
+  FOR EACH ROW EXECUTE FUNCTION gateway_credential_guard();
+
+$mig$;
+    INSERT INTO schema_migrations (version) VALUES ('006_git_gateway.sql');
+    RAISE NOTICE 'applied 006_git_gateway.sql';
+  ELSE
+    RAISE NOTICE 'skipped 006_git_gateway.sql (already applied)';
+  END IF;
+END
+$apply4$;
+
+-- ---------------------------------------------------------------------------
+-- 007_repository_lock.sql  (skipped if it is already recorded in schema_migrations)
+-- ---------------------------------------------------------------------------
+DO $apply5$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '007_repository_lock.sql') THEN
+    EXECUTE $mig$
+-- 007: locking a project's repositories on GitHub.
+--
+-- When a repository is added to a project, Custody Core puts a ruleset on it: the default branch cannot be
+-- deleted or force-pushed by anyone except the Custody Core GitHub App, and forking is turned off where GitHub
+-- allows it. The repository counts as locked (locked_at) only after the ruleset has been read back from GitHub
+-- and checked. Every check after that reads it back again and records it if it was removed or changed.
+
+ALTER TABLE repository ADD COLUMN lock_ruleset_id BIGINT;
+ALTER TABLE repository ADD COLUMN lock_checked_at TIMESTAMPTZ;
+-- Why the last attempt did not lock it, in words for the creator (for example the GitHub plan does not allow
+-- rulesets on private repositories). Empty when locked.
+ALTER TABLE repository ADD COLUMN lock_error TEXT;
+
+$mig$;
+    INSERT INTO schema_migrations (version) VALUES ('007_repository_lock.sql');
+    RAISE NOTICE 'applied 007_repository_lock.sql';
+  ELSE
+    RAISE NOTICE 'skipped 007_repository_lock.sql (already applied)';
+  END IF;
+END
+$apply5$;
+
+-- ---------------------------------------------------------------------------
 -- server/roles.sql  (the custody_app grants; safe to repeat)
 -- ---------------------------------------------------------------------------
 -- Custody Core Restricted Database Role: custody_app
@@ -490,7 +603,9 @@ $apply3$;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'custody_app') THEN
-    CREATE ROLE custody_app WITH LOGIN PASSWORD 'CustodyAppPass702!';
+    -- No password here: this file is public. The server sets it from APP_DB_PASSWORD after running this file;
+    -- until then nobody can sign in as custody_app.
+    CREATE ROLE custody_app WITH LOGIN;
   END IF;
 END
 $$;

@@ -52,12 +52,15 @@ $${tag}$;
 --   * records migration 001 (already applied to this database by the app) after checking it is really there
 --   * applies every later migration in order: 002 (hashed_timestamp constraint), 003 (database-built event chain,
 --     append_event), 004 (creator email no longer unique), 005 (authenticator-code step run by the app, with
---     the wrong-code limit, and the per-account record account_event)
+--     the wrong-code limit, and the per-account record account_event), 006 (the git gateway: GitHub App
+--     installations, gateway credentials, door rules)
 --   * records each in schema_migrations exactly as \`npm run migrate\` does
 --   * applies the custody_app grants (server/roles.sql): no INSERT on event or account_event, EXECUTE on
 --     append_event and append_account_event, attempts can be added but never changed or deleted
 --   * closes Supabase's built-in REST API (roles anon and authenticated) to every Custody Core table and
 --     function, and turns on row-level security (only custody_app has a policy)
+-- It does NOT set custody_app's password: a new custody_app has none (nobody can sign in as it) until the
+-- server starts with APP_DB_PASSWORD, or you set one yourself (docs/deploy/README.md, "The app account's password").
 -- It does NOT add, change or delete any event, project or creator.
 --
 -- Safe to run twice: a migration already recorded is skipped, and the grants are idempotent.

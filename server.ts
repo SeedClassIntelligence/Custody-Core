@@ -6,6 +6,7 @@ dotenv.config();
 
 import {
   getDbPool,
+  appDatabaseConfigProblem,
   runMigrations,
   getProjectEvents,
   verifyServerProjectEvents,
@@ -13,6 +14,11 @@ import {
 } from './server/db';
 import { authenticate, creatorOf } from './server/auth';
 import { mfaRouter } from './server/mfa';
+import { gatewayRouter } from './server/gateway/router';
+import { findScanner } from './server/gateway/scanner';
+import { githubApiRouter, githubCallbackRouter } from './server/githubRoutes';
+import { githubConfig } from './server/github';
+import { projectExtrasRouter } from './server/doors';
 import { verifyAccountChain } from './shared/crypto';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -28,6 +34,10 @@ function serverError(res: express.Response, err: any, what: string) {
 }
 
 export const app = express();
+// The git gateway streams git's own request bodies, so it comes before any body parsing.
+app.use('/git', gatewayRouter);
+// Where GitHub sends the browser back after the App is installed.
+app.use('/github', githubCallbackRouter);
 app.use(express.json());
 
 // --- API Routes (/api/v1/*) ---
@@ -37,7 +47,6 @@ const apiRouter = express.Router();
   apiRouter.get('/health', async (_req, res) => {
     const hasDb = getDbPool() !== null;
     let dbStatus = 'not_connected';
-    let dbError = null;
 
     if (hasDb) {
       try {
@@ -47,19 +56,23 @@ const apiRouter = express.Router();
         client.release();
         dbStatus = 'connected';
       } catch (err: any) {
+        // The reason stays in the server log: this endpoint is open to anyone.
         dbStatus = 'error';
-        dbError = err.message;
+        console.error('[health] database check failed:', err?.message ?? err);
       }
     }
 
     res.json({
       status: 'ok',
       service: 'Custody Core Server',
-      milestone: 'Milestone 2: login with required multifactor authentication',
+      milestone: 'Milestone 3: git gateway',
       database: {
         status: dbStatus,
-        configured: hasDb,
-        error: dbError
+        configured: hasDb
+      },
+      gateway: {
+        github_app_configured: githubConfig() !== null,
+        secret_scanner: findScanner() ? 'installed' : 'missing'
       },
       time: new Date().toISOString()
     });
@@ -86,6 +99,9 @@ const apiRouter = express.Router();
     }
   });
 
+  apiRouter.use('/github', githubApiRouter);
+  apiRouter.use('/projects/:id', projectExtrasRouter);
+
   apiRouter.get('/me', (_req, res) => {
     const creator = creatorOf(res);
     res.json({ creator: { id: creator.id, email: creator.email } });
@@ -109,9 +125,12 @@ const apiRouter = express.Router();
               json_build_object(
                 'id', r.id,
                 'full_name', r.full_name,
+                'github_repo_id', r.github_repo_id,
                 'default_branch', r.default_branch,
                 'is_core', r.is_core,
-                'locked_at', r.locked_at
+                'locked_at', r.locked_at,
+                'lock_checked_at', r.lock_checked_at,
+                'lock_error', r.lock_error
               )
             ) FILTER (WHERE r.id IS NOT NULL), '[]'
           ) as repositories
@@ -301,6 +320,11 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
 });
 
 export async function startServer() {
+  // A database is configured but the app has no password for its own account: refuse to start, rather than
+  // quietly run as "not connected".
+  const configProblem = appDatabaseConfigProblem();
+  if (configProblem) throw new Error(configProblem);
+
   // Try auto-running migrations if DATABASE_URL is provided
   const db = getDbPool();
   if (db) {

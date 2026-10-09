@@ -91,6 +91,8 @@ async function main() {
       SUPABASE_URL: authStack.apiUrl,
       // A throwaway key for stored authenticator keys (server only; never the real one).
       MFA_ENCRYPTION_KEY: randomBytes(32).toString('base64'),
+      // A throwaway password for the app's database account on the throwaway database.
+      APP_DB_PASSWORD: randomBytes(24).toString('base64'),
       SUPABASE_ANON_KEY: authStack.anonKey,
       VITE_SUPABASE_URL: authStack.apiUrl,
       VITE_SUPABASE_ANON_KEY: authStack.anonKey

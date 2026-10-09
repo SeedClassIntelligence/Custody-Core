@@ -1,5 +1,6 @@
 import pg from 'pg';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
@@ -65,18 +66,82 @@ export function getAppDatabaseUrl(): string | null {
   const baseResolved = getResolvedDatabaseUrl();
   if (!baseResolved) return null;
 
-  // The application must connect as the restricted custody_app role, never as postgres superuser
+  // The application must connect as the restricted custody_app role, never as postgres superuser.
+  // Its password comes only from APP_DB_PASSWORD: there is no built-in default, because anything written
+  // in this (public) repository is known to everyone. Without it the app does not connect at all.
   try {
     const parsed = new URL(baseResolved);
-    if (parsed.username === 'postgres') {
-      parsed.username = 'custody_app';
-      parsed.password = process.env.APP_DB_PASSWORD || 'CustodyAppPass702!';
+    // Supabase's connection pooler names the account "<role>.<project ref>" (postgres.abcd -> custody_app.abcd).
+    const admin = /^postgres(\.[A-Za-z0-9]+)?$/.exec(decodeURIComponent(parsed.username));
+    if (admin) {
+      const password = getAppDbPassword();
+      if (!password) return null;
+      parsed.username = `custody_app${admin[1] ?? ''}`;
+      parsed.password = password;
       return parsed.toString();
     }
     return parsed.toString();
   } catch {
     return baseResolved;
   }
+}
+
+/** The custody_app password from APP_DB_PASSWORD, or null when it is missing or too short to be a real secret. */
+export function getAppDbPassword(): string | null {
+  const password = process.env.APP_DB_PASSWORD;
+  if (!password || password.length < 16) return null;
+  return password;
+}
+
+/**
+ * Why the app cannot connect to a configured database, or null if it can. The server refuses to start
+ * with a reason instead of running "not connected" by accident.
+ */
+export function appDatabaseConfigProblem(): string | null {
+  if (!getResolvedDatabaseUrl() || process.env.APP_DATABASE_URL) return null;
+  if (getAppDbPassword()) return null;
+  return process.env.APP_DB_PASSWORD
+    ? 'APP_DB_PASSWORD is shorter than 16 characters. Generate one with: openssl rand -base64 24'
+    : 'APP_DB_PASSWORD is not set. The app connects to the database as custody_app with this password. Generate one with: openssl rand -base64 24';
+}
+
+/**
+ * The SCRAM-SHA-256 verifier PostgreSQL stores for a password (RFC 5802 / RFC 7677, the same format as
+ * pg_authid.rolpassword). PostgreSQL accepts it in ALTER ROLE ... PASSWORD and keeps it as given.
+ */
+export function scramVerifier(password: string, salt: Buffer = crypto.randomBytes(16), iterations = 4096): string {
+  const salted = crypto.pbkdf2Sync(password.normalize('NFKC'), salt, iterations, 32, 'sha256');
+  const clientKey = crypto.createHmac('sha256', salted).update('Client Key').digest();
+  const storedKey = crypto.createHash('sha256').update(clientKey).digest();
+  const serverKey = crypto.createHmac('sha256', salted).update('Server Key').digest();
+  return `SCRAM-SHA-256$${iterations}:${salt.toString('base64')}$${storedKey.toString('base64')}:${serverKey.toString('base64')}`;
+}
+
+let sslWarned = false;
+
+/**
+ * TLS settings for a connection. A local database gets none. DATABASE_SSL_CA (a PEM certificate, or a path to
+ * one, such as Supabase's "SSL certificate" from Project Settings > Database) makes the server check the
+ * database's certificate. Without it the connection is still encrypted but the certificate is not checked,
+ * and the server says so once in its log.
+ */
+export function sslFor(url: string): pg.PoolConfig['ssl'] {
+  let host = '';
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    // not a URL; treat as remote
+  }
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]') return false;
+  const ca = process.env.DATABASE_SSL_CA;
+  if (ca) {
+    return { ca: ca.includes('-----BEGIN') ? ca : fs.readFileSync(ca, 'utf8'), rejectUnauthorized: true };
+  }
+  if (!sslWarned) {
+    sslWarned = true;
+    console.warn('[DB] DATABASE_SSL_CA is not set: the connection is encrypted, but the database certificate is not checked.');
+  }
+  return { rejectUnauthorized: false };
 }
 
 export function getDbPool(): pg.Pool | null {
@@ -87,7 +152,7 @@ export function getDbPool(): pg.Pool | null {
   if (!appPool) {
     appPool = new Pool({
       connectionString: databaseUrl,
-      ssl: databaseUrl.includes('localhost') ? false : { rejectUnauthorized: false }
+      ssl: sslFor(databaseUrl)
     });
   }
   return appPool;
@@ -99,7 +164,7 @@ export function getAdminPool(): pg.Pool | null {
   if (!adminPool) {
     adminPool = new Pool({
       connectionString: adminUrl,
-      ssl: adminUrl.includes('localhost') ? false : { rejectUnauthorized: false }
+      ssl: sslFor(adminUrl)
     });
   }
   return adminPool;
@@ -133,6 +198,13 @@ export async function runMigrations(): Promise<{ success: boolean; message: stri
     try {
       await client.query(fs.readFileSync(rolesFile, 'utf8'));
       await client.query(lockdown);
+      // roles.sql creates custody_app without a password; the one in APP_DB_PASSWORD is set (or rotated) here,
+      // so it never has to be written into a file.
+      const appPassword = getAppDbPassword();
+      if (appPassword && !process.env.APP_DATABASE_URL) {
+        // Sent as a SCRAM verifier, not the password itself, so a database that logs DDL never logs the secret.
+        await client.query(`ALTER ROLE custody_app WITH LOGIN PASSWORD ${client.escapeLiteral(scramVerifier(appPassword))}`);
+      }
     } catch (roleErr: any) {
       return { success: false, message: `Migrations applied, but configuring the custody_app role failed: ${roleErr.message}` };
     } finally {

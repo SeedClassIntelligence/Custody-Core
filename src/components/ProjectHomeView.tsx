@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { FolderLock, DoorOpen, Plus, ArrowRight, AlertCircle, Database } from 'lucide-react';
 import { Project, CustodyEvent } from '../types/custody';
 import { formatHash } from '../utils/crypto';
+import { fetchGitHubRepositories, GitHubRepository, GitHubStatus, ServerDoor } from '../utils/api';
 
 interface ProjectHomeViewProps {
   project?: Project | null;
@@ -10,7 +11,132 @@ interface ProjectHomeViewProps {
   onOpenNewDoor: () => void;
   onClaimNewProject: () => void;
   onSelectTab: (tab: string) => void;
+  github: GitHubStatus | null;
+  doors: ServerDoor[];
+  doorsError?: string | null;
+  onConnectGitHub: () => void;
+  onAddRepositories: (fullNames: string[]) => Promise<void>;
+  onCheckLock: (repositoryId: string) => Promise<void>;
+  onSelectDoor: (doorId: string) => void;
 }
+
+/** One repository's lock state, as last read back from GitHub, with a button to check it again. */
+const LockLine: React.FC<{ repo: Project['repositories'][number]; canCheck: boolean; onCheck: (id: string) => Promise<void> }> = ({ repo, canCheck, onCheck }) => {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <li className="space-y-0.5">
+      <div className="flex items-center justify-between gap-2">
+        <span>{repo.full_name}</span>
+        <span className="flex items-center gap-2">
+          {repo.locked_at ? (
+            <span className="text-emerald-400" title={`Checked ${repo.lock_checked_at ? new Date(repo.lock_checked_at).toLocaleString() : ''}`}>
+              locked
+            </span>
+          ) : (
+            <span className="text-amber-400">not locked</span>
+          )}
+          {canCheck && (
+            <button
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                setError(null);
+                try {
+                  await onCheck(repo.id);
+                } catch (err: any) {
+                  setError(err.message);
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              className="text-indigo-400 hover:text-indigo-300 disabled:opacity-50 font-sans"
+            >
+              {busy ? 'checking...' : repo.locked_at ? 'check' : 'lock'}
+            </button>
+          )}
+        </span>
+      </div>
+      {!repo.locked_at && repo.lock_error && <div className="text-[11px] text-amber-300/90 font-sans">{repo.lock_error}</div>}
+      {!repo.github_repo_id && <div className="text-[11px] text-zinc-500 font-sans">Name only, not checked with GitHub.</div>}
+      {error && <div className="text-[11px] text-rose-300 font-sans">{error}</div>}
+    </li>
+  );
+};
+
+/** Picks repositories the GitHub App can see and adds them to the project. */
+const AddRepositories: React.FC<{ project: Project; onAdd: (names: string[]) => Promise<void> }> = ({ project, onAdd }) => {
+  const [repos, setRepos] = useState<GitHubRepository[] | null>(null);
+  const [picked, setPicked] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const have = new Set(project.repositories.map((r) => r.full_name.toLowerCase()));
+
+  if (!repos) {
+    return (
+      <div className="space-y-1">
+        <button
+          onClick={async () => {
+            setError(null);
+            try {
+              setRepos(await fetchGitHubRepositories());
+            } catch (err: any) {
+              setError(err.message);
+            }
+          }}
+          className="text-xs text-indigo-400 hover:text-indigo-300 font-medium"
+        >
+          + Add repositories from GitHub
+        </button>
+        {error && <div className="text-xs text-rose-300">{error}</div>}
+      </div>
+    );
+  }
+  const available = repos.filter((r) => !have.has(r.full_name.toLowerCase()));
+  return (
+    <div className="space-y-2 border border-zinc-800 rounded-lg p-3">
+      {available.length === 0 ? (
+        <p className="text-xs text-zinc-400">No other repositories are shared with the GitHub App. Give it access on GitHub, then try again.</p>
+      ) : (
+        available.map((r) => (
+          <label key={r.full_name} className="flex items-center gap-2 text-xs font-mono text-zinc-200">
+            <input
+              type="checkbox"
+              checked={picked.includes(r.full_name)}
+              onChange={(e) => setPicked(e.target.checked ? [...picked, r.full_name] : picked.filter((n) => n !== r.full_name))}
+            />
+            {r.full_name} {r.private ? '' : <span className="text-amber-400">(public)</span>}
+          </label>
+        ))
+      )}
+      {error && <div className="text-xs text-rose-300">{error}</div>}
+      <div className="flex gap-3 text-xs">
+        <button
+          disabled={busy || picked.length === 0}
+          onClick={async () => {
+            setBusy(true);
+            setError(null);
+            try {
+              await onAdd(picked);
+              setRepos(null);
+              setPicked([]);
+            } catch (err: any) {
+              setError(err.message);
+            } finally {
+              setBusy(false);
+            }
+          }}
+          className="bg-indigo-600 disabled:opacity-50 text-white font-semibold px-3 py-1.5 rounded-lg"
+        >
+          {busy ? 'Adding...' : `Add ${picked.length || ''}`.trim()}
+        </button>
+        <button onClick={() => setRepos(null)} className="text-zinc-400">
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+};
 
 const NotConnected: React.FC = () => (
   <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-950/60 border border-amber-800/80 text-amber-300 text-[11px] font-mono font-medium">
@@ -25,7 +151,14 @@ export const ProjectHomeView: React.FC<ProjectHomeViewProps> = ({
   eventsError,
   onOpenNewDoor,
   onClaimNewProject,
-  onSelectTab
+  onSelectTab,
+  github,
+  doors,
+  doorsError,
+  onConnectGitHub,
+  onAddRepositories,
+  onCheckLock,
+  onSelectDoor
 }) => {
   if (!project) {
     return (
@@ -89,30 +222,57 @@ export const ProjectHomeView: React.FC<ProjectHomeViewProps> = ({
             <FolderLock className="w-3.5 h-3.5 text-indigo-400" />
             Code Home
           </h3>
-          <NotConnected />
-          <p className="text-xs text-zinc-400">
-            Private repositories in your own GitHub organization, locked against forking and force-pushes.
-          </p>
+          {github?.connected ? (
+            <p className="text-xs text-zinc-400">
+              GitHub connected: <span className="text-zinc-200">{github.account_login}</span>. Developers reach these repositories only through
+              Custody Core's gateway. Locked means: on GitHub, nobody but Custody Core can delete or force-push the default branch, and
+              forking is off where GitHub allows it.
+            </p>
+          ) : github && !github.configured ? (
+            <>
+              <NotConnected />
+              <p className="text-xs text-zinc-400">The GitHub App is not set up on this server (see docs/GITHUB_APP_SETUP.md).</p>
+            </>
+          ) : (
+            <>
+              <NotConnected />
+              <button onClick={onConnectGitHub} className="block text-xs text-indigo-400 hover:text-indigo-300 font-medium">
+                Connect your GitHub organization
+              </button>
+            </>
+          )}
           {project.repositories.length > 0 && (
-            <ul className="pt-2 text-[11px] font-mono text-zinc-300 space-y-0.5">
+            <ul className="pt-2 text-[11px] font-mono text-zinc-300 space-y-1.5">
               {project.repositories.map((repo) => (
-                <li key={repo.id}>
-                  {repo.full_name} <span className="text-zinc-500">(recorded name only, lock not verified)</span>
-                </li>
+                <LockLine key={repo.id} repo={repo} canCheck={!!github?.connected} onCheck={onCheckLock} />
               ))}
             </ul>
           )}
+          {github?.connected && <AddRepositories project={project} onAdd={onAddRepositories} />}
         </div>
 
         <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-5 space-y-2">
           <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
             <DoorOpen className="w-3.5 h-3.5 text-emerald-400" />
-            Doors & Developer Workspaces
+            Doors
           </h3>
-          <NotConnected />
-          <p className="text-xs text-zinc-400">
-            Narrow, temporary, signed access for an outside developer. No doors exist.
-          </p>
+          {doorsError ? (
+            <p className="text-xs text-rose-300">{doorsError}</p>
+          ) : doors.length === 0 ? (
+            <p className="text-xs text-zinc-400">Narrow, temporary access for an outside developer, through the git gateway. No doors yet.</p>
+          ) : (
+            <ul className="text-xs space-y-1">
+              {doors.map((d) => (
+                <li key={d.id}>
+                  <button onClick={() => onSelectDoor(d.id)} className="w-full flex justify-between text-left hover:bg-zinc-900 rounded px-1 py-0.5">
+                    <span className="text-zinc-200 truncate">{d.developer_email} · {d.job_description}</span>
+                    <span className={d.status === 'open' ? 'text-emerald-400' : 'text-zinc-500'}>{d.status}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="text-[11px] text-zinc-500">Sandboxed developer workspaces: not connected yet.</p>
         </div>
       </div>
 

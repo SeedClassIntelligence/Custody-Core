@@ -20,6 +20,8 @@ export async function setup() {
   process.env.TEST_DATABASE_URL = testUrl;
   // A throwaway key for the authenticator step; never the real one.
   process.env.MFA_ENCRYPTION_KEY = randomBytes(32).toString('base64');
+  // A throwaway password for the app's own database account (custody_app); there is no built-in one.
+  process.env.APP_DB_PASSWORD = randomBytes(24).toString('base64');
 
   // Login tests need the local Supabase Auth stack (Docker). If it cannot start, only those tests fail,
   // loudly and with the reason; the rest of the suite still runs.

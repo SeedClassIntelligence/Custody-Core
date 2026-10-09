@@ -7,7 +7,9 @@
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'custody_app') THEN
-    CREATE ROLE custody_app WITH LOGIN PASSWORD 'CustodyAppPass702!';
+    -- No password here: this file is public. The server sets it from APP_DB_PASSWORD after running this file;
+    -- until then nobody can sign in as custody_app.
+    CREATE ROLE custody_app WITH LOGIN;
   END IF;
 END
 $$;
