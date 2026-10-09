@@ -131,6 +131,9 @@ export interface ServerDoor {
   agreement_signer_name?: string | null;
   agreement_key_fingerprint?: string | null;
   invite?: { created_at: string; expires_at: string; accepted_at: string | null } | null;
+  snapshot_status?: 'pending' | 'done' | 'failed' | null;
+  snapshot_error?: string | null;
+  snapshot_attempts?: number;
 }
 
 export async function fetchDoors(projectId: string): Promise<ServerDoor[]> {
@@ -242,4 +245,34 @@ export async function signDoorAgreement(doorId: string, statement: string, signa
 
 export async function getDoorCredential(doorId: string): Promise<{ credential: { username: string; token: string }; remotes: Array<{ full_name: string; url: string }>; branch_prefix: string }> {
   return jsonOrThrow(await authFetch(`/api/v1/developer/doors/${doorId}/credential`, { method: 'POST' }), 'Getting your git credential');
+}
+
+// --- Backup snapshots -----------------------------------------------------------------------------------------
+
+export interface Snapshot {
+  id: string;
+  door_id: string | null;
+  trigger: string;
+  refs: Record<string, string>;
+  sha256: string;
+  size_bytes: number;
+  created_at: string;
+  full_name: string;
+}
+
+export async function fetchSnapshots(projectId: string): Promise<Snapshot[]> {
+  return (await jsonOrThrow(await authFetch(`/api/v1/projects/${projectId}/snapshots`), 'Loading snapshots')).snapshots;
+}
+
+/** Downloads a snapshot bundle (with the login token) and hands it to the browser as a file. */
+export async function downloadSnapshot(projectId: string, s: Snapshot): Promise<void> {
+  const res = await authFetch(`/api/v1/projects/${projectId}/snapshots/${s.id}/bundle`);
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Download failed (${res.status}).`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${s.full_name.replace('/', '__')}-${s.created_at.slice(0, 10)}.bundle`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }

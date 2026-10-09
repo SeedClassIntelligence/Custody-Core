@@ -168,7 +168,7 @@ export const OpenDoorModal: React.FC<OpenDoorModalProps> = ({ isOpen, onClose, p
                   </select>
                 </label>
                 <label className="block space-y-1">
-                  <span className="text-xs text-zinc-400">Access ends after (days)</span>
+                  <span className="text-xs text-zinc-400">Closes by itself after (days)</span>
                   <input
                     type="number"
                     min={1}

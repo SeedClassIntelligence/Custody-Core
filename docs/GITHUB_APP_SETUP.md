@@ -115,10 +115,9 @@ reason) is an event in the project's tamper-evident record, next to `door.create
 
 ## Not built yet
 
-- Checking locks on a schedule (today they are checked when added and whenever the creator presses check).
-- Closing doors automatically at their end date (the gateway already refuses an expired door).
 - Sandboxed developer workspaces with restricted network access.
-- A backup snapshot when a door closes.
+- Storage the creator owns for snapshots (their own bucket or drive): today snapshots are kept on the server
+  (`docs/SCHEDULER.md`).
 
 ## How this is tested
 

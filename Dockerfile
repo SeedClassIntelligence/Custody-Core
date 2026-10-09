@@ -26,7 +26,7 @@ RUN npm run tools:gitleaks
 
 FROM node:22-bookworm-slim
 WORKDIR /app
-ENV NODE_ENV=production PORT=3000 GATEWAY_DATA_DIR=/tmp/custody-core-gateway
+ENV NODE_ENV=production PORT=3000 GATEWAY_DATA_DIR=/tmp/custody-core-gateway BACKUP_DIR=/data/backups
 # The git gateway runs git itself (git http-backend, fetch, push).
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
@@ -36,6 +36,9 @@ COPY --from=build /app/dist ./dist
 COPY server.ts ./
 COPY server ./server
 COPY shared ./shared
+# Backup snapshots of closed doors. Mount a persistent volume here, or they are lost when the container is replaced.
+RUN mkdir -p /data/backups && chown -R node:node /data
+VOLUME /data
 USER node
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \

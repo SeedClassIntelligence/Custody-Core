@@ -52,6 +52,11 @@ and `gitleaks` on the server (`npm run tools:gitleaks`; the Dockerfile installs 
 A door opens only after the invited developer signs its agreement with a key from their own device, on an account with
 the same authenticator-code step as creators. `docs/AGREEMENT_SIGNATURES.md`.
 
+## Scheduler and backups
+
+Doors close by themselves at their end date (also any missed while the server was down), a backup snapshot (git
+bundle) is taken when a door closes, and repository locks are re-checked every few hours. `docs/SCHEDULER.md`.
+
 ## Deploying
 
 `npm run build` then `npm start` (or the `Dockerfile`). Step by step, with every setting the host needs:
