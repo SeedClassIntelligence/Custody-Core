@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { DoorClosed, AlertCircle } from 'lucide-react';
 import { Project } from '../types/custody';
-import { ServerDoor } from '../utils/api';
+import { ServerDoor, fetchDoorAgreement, inviteDeveloper } from '../utils/api';
 
 interface DoorDetailsViewProps {
   door: ServerDoor;
@@ -9,16 +9,87 @@ interface DoorDetailsViewProps {
   project: Project;
   onSelectDoor: (doorId: string) => void;
   onCloseDoor: (doorId: string) => Promise<void>;
+  onDoorChanged: (door: ServerDoor) => void;
+}
+
+/** The agreement: whether it was sent and signed, by whom, and its full text on request. */
+function AgreementSection({ door, projectId, onDoorChanged }: { door: ServerDoor; projectId: string; onDoorChanged: (d: ServerDoor) => void }) {
+  const [text, setText] = useState<string | null>(null);
+  const [link, setLink] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const inviteState = door.invite
+    ? door.invite.accepted_at
+      ? `accepted ${new Date(door.invite.accepted_at).toLocaleString()}`
+      : new Date(door.invite.expires_at).getTime() < Date.now()
+        ? 'link expired'
+        : `link sent, valid until ${new Date(door.invite.expires_at).toLocaleString()}`
+    : 'not sent';
+  return (
+    <div className="space-y-2 text-xs">
+      <h4 className="font-semibold uppercase tracking-wider text-zinc-400">Agreement</h4>
+      {door.agreement_signed_at ? (
+        <div className="text-emerald-300">
+          Signed by {door.agreement_signer_name} ({door.developer_email}) on {new Date(door.agreement_signed_at).toLocaleString()}, with a key made on
+          their own device (fingerprint <span className="font-mono">{door.agreement_key_fingerprint?.slice(0, 16)}…</span>). The server checked the
+          signature; the signed statement, signature and public key are in the Event Chain (agreement.signed).
+        </div>
+      ) : (
+        <div className="text-zinc-300">Not signed yet. Invitation: {inviteState}.</div>
+      )}
+      {door.agreement_sha256 && <div className="font-mono text-[10px] text-zinc-500 break-all">SHA-256 {door.agreement_sha256}</div>}
+      <div className="flex gap-3">
+        {door.agreement_sha256 && (
+          <button
+            className="text-indigo-400 hover:text-indigo-300"
+            onClick={async () => {
+              try {
+                setText(text ? null : (await fetchDoorAgreement(projectId, door.id)).agreement_text);
+              } catch (err: any) {
+                setError(err.message);
+              }
+            }}
+          >
+            {text ? 'Hide the agreement' : 'Read the agreement'}
+          </button>
+        )}
+        {(door.status === 'draft' || door.status === 'awaiting_signature') && (
+          <button
+            className="text-indigo-400 hover:text-indigo-300"
+            onClick={async () => {
+              try {
+                const r = await inviteDeveloper(projectId, door.id);
+                setLink(r.invite.url);
+                onDoorChanged(r.door);
+              } catch (err: any) {
+                setError(err.message);
+              }
+            }}
+          >
+            {door.status === 'draft' ? 'Send the invitation' : 'Send a new link'}
+          </button>
+        )}
+      </div>
+      {link && (
+        <div className="space-y-1">
+          <div className="text-amber-300">New link (shown once; the previous one no longer works):</div>
+          <code className="block font-mono text-[11px] text-zinc-200 bg-zinc-900 border border-zinc-800 rounded px-2 py-1 break-all">{link}</code>
+        </div>
+      )}
+      {text && <pre className="whitespace-pre-wrap font-mono text-[11px] text-zinc-300 bg-zinc-900 border border-zinc-800 rounded p-3 max-h-80 overflow-y-auto">{text}</pre>}
+      {error && <div className="text-rose-300">{error}</div>}
+    </div>
+  );
 }
 
 const STATUS_STYLE: Record<string, string> = {
   open: 'bg-emerald-950/60 border-emerald-800 text-emerald-300',
   draft: 'bg-zinc-800 border-zinc-700 text-zinc-300',
+  awaiting_signature: 'bg-amber-950/60 border-amber-800 text-amber-300',
   closed: 'bg-zinc-900 border-zinc-700 text-zinc-500'
 };
 
 /** What is stored about a door, from the server. Closing it revokes the gateway credential at once. */
-export const DoorDetailsView: React.FC<DoorDetailsViewProps> = ({ door, doors, project, onSelectDoor, onCloseDoor }) => {
+export const DoorDetailsView: React.FC<DoorDetailsViewProps> = ({ door, doors, project, onSelectDoor, onCloseDoor, onDoorChanged }) => {
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -61,7 +132,7 @@ export const DoorDetailsView: React.FC<DoorDetailsViewProps> = ({ door, doors, p
               Project {project.name} · Developer {door.developer_email} · Rights: {door.rights_type}
             </p>
             <span className={`inline-block text-[11px] font-mono px-2 py-0.5 rounded-full border ${STATUS_STYLE[door.status] ?? STATUS_STYLE.draft}`}>
-              {expired ? 'open (expired: the gateway refuses it)' : door.status}
+              {expired ? 'open (expired: the gateway refuses it)' : door.status === 'awaiting_signature' ? 'waiting for the developer to sign' : door.status}
             </span>
           </div>
           {door.status !== 'closed' && (
@@ -76,7 +147,7 @@ export const DoorDetailsView: React.FC<DoorDetailsViewProps> = ({ door, doors, p
                 </button>
               ) : (
                 <div className="text-xs text-zinc-300 space-y-2 text-right max-w-xs">
-                  <p>The developer's next git request will be refused, and the gateway's copies of these repositories are deleted. This cannot be undone.</p>
+                  <p>The developer's next git request will be refused, any unused invitation link stops working, and the gateway's copies of these repositories are deleted. This cannot be undone.</p>
                   <div className="flex justify-end gap-2">
                     <button onClick={() => setConfirming(false)} className="text-zinc-400 px-3 py-1.5">
                       Cancel
@@ -122,6 +193,8 @@ export const DoorDetailsView: React.FC<DoorDetailsViewProps> = ({ door, doors, p
           </div>
         </div>
 
+        <AgreementSection door={door} projectId={project.id} onDoorChanged={onDoorChanged} />
+
         {door.remotes.length > 0 && (
           <div className="space-y-1.5 text-xs">
             <h4 className="font-semibold uppercase tracking-wider text-zinc-400">Gateway addresses</h4>
@@ -136,8 +209,8 @@ export const DoorDetailsView: React.FC<DoorDetailsViewProps> = ({ door, doors, p
         <div className="flex items-start gap-2 text-xs text-zinc-400 border-t border-zinc-800/80 pt-4">
           <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
           <span>
-            Not connected yet: developer signing of the agreement, sandboxed workspaces, closing automatically at expiry (the gateway already
-            refuses an expired door), and a backup snapshot on close. Every fetch, push and refused push is in the Event Chain.
+            Not connected yet: sandboxed workspaces, closing automatically at expiry (the gateway already refuses an expired door), and a backup
+            snapshot on close. Every fetch, push and refused push is in the Event Chain.
           </span>
         </div>
       </div>

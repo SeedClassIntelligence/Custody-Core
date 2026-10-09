@@ -53,7 +53,8 @@ $${tag}$;
 --   * applies every later migration in order: 002 (hashed_timestamp constraint), 003 (database-built event chain,
 --     append_event), 004 (creator email no longer unique), 005 (authenticator-code step run by the app, with
 --     the wrong-code limit, and the per-account record account_event), 006 (the git gateway: GitHub App
---     installations, gateway credentials, door rules)
+--     installations, gateway credentials, door rules), 007 (repository lock state), 008 (developer accounts,
+--     invitations, signed agreements)
 --   * records each in schema_migrations exactly as \`npm run migrate\` does
 --   * applies the custody_app grants (server/roles.sql): no INSERT on event or account_event, EXECUTE on
 --     append_event and append_account_event, attempts can be added but never changed or deleted

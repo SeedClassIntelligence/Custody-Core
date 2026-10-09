@@ -125,6 +125,12 @@ export interface ServerDoor {
   repositories: Array<{ repository_id: string; full_name: string; access: 'read' | 'write' }>;
   credential: { id: string; created_at: string; last_used_at: string | null } | null;
   remotes: Array<{ full_name: string; url: string }>;
+  agreement_version?: string | null;
+  agreement_sha256?: string | null;
+  agreement_signed_at?: string | null;
+  agreement_signer_name?: string | null;
+  agreement_key_fingerprint?: string | null;
+  invite?: { created_at: string; expires_at: string; accepted_at: string | null } | null;
 }
 
 export async function fetchDoors(projectId: string): Promise<ServerDoor[]> {
@@ -165,4 +171,75 @@ export async function checkRepositoryLock(projectId: string, repositoryId: strin
     await authFetch(`/api/v1/projects/${projectId}/repositories/${repositoryId}/lock`, { method: 'POST' }),
     'Checking the lock'
   )).repository;
+}
+
+// --- Invitations and signing ---------------------------------------------------------------------------------
+
+export async function inviteDeveloper(projectId: string, doorId: string): Promise<{ door: ServerDoor; invite: { url: string; expires_at: string } }> {
+  return jsonOrThrow(await authFetch(`/api/v1/projects/${projectId}/doors/${doorId}/invite`, { method: 'POST' }), 'Sending the invitation');
+}
+
+export async function fetchDoorAgreement(projectId: string, doorId: string) {
+  return (await jsonOrThrow(await authFetch(`/api/v1/projects/${projectId}/doors/${doorId}/agreement`), 'Reading the agreement')).agreement as {
+    agreement_version: string | null;
+    agreement_text: string | null;
+    agreement_sha256: string | null;
+    agreement_signed_at: string | null;
+    agreement_signed_message: string | null;
+    agreement_signature: string | null;
+    public_key_spki: string | null;
+    fingerprint: string | null;
+  };
+}
+
+export interface DeveloperDoor {
+  id: string;
+  project_id: string;
+  project_name: string;
+  creator_name: string;
+  job_description: string;
+  rights_type: string;
+  status: string;
+  expires_at: string;
+  opens_at: string | null;
+  closed_at: string | null;
+  developer_email: string;
+  agreement_version: string | null;
+  agreement_text: string | null;
+  agreement_sha256: string | null;
+  agreement_signed_at: string | null;
+  branch_prefix: string;
+  repositories: Array<{ full_name: string; access: string }>;
+  credential: { id: string; created_at: string; last_used_at: string | null } | null;
+  remotes: Array<{ full_name: string; url: string }>;
+}
+
+export async function fetchInvite(token: string) {
+  return (await jsonOrThrow(await authFetch(`/api/v1/developer/invites/${encodeURIComponent(token)}`), 'Opening the invitation')).invite;
+}
+
+export async function acceptInvite(token: string): Promise<string> {
+  return (await jsonOrThrow(await authFetch(`/api/v1/developer/invites/${encodeURIComponent(token)}/accept`, { method: 'POST' }), 'Accepting the invitation')).door_id;
+}
+
+export async function fetchDeveloperDoors(): Promise<{ developer_identity?: string; key: { fingerprint: string } | null; doors: DeveloperDoor[] }> {
+  return jsonOrThrow(await authFetch('/api/v1/developer/doors'), 'Loading your doors');
+}
+
+export async function registerDeveloperKey(publicKeySpki: string) {
+  return (await jsonOrThrow(
+    await authFetch('/api/v1/developer/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ public_key_spki: publicKeySpki }) }),
+    'Registering your signing key'
+  )).key;
+}
+
+export async function signDoorAgreement(doorId: string, statement: string, signature: string) {
+  return jsonOrThrow(
+    await authFetch(`/api/v1/developer/doors/${doorId}/sign`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ statement, signature }) }),
+    'Signing'
+  );
+}
+
+export async function getDoorCredential(doorId: string): Promise<{ credential: { username: string; token: string }; remotes: Array<{ full_name: string; url: string }>; branch_prefix: string }> {
+  return jsonOrThrow(await authFetch(`/api/v1/developer/doors/${doorId}/credential`, { method: 'POST' }), 'Getting your git credential');
 }

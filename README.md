@@ -47,6 +47,11 @@ Developers clone and push through Custody Core, never GitHub: `<app>/git/<door i
 GitHub App, what the gateway enforces, and what is not built yet: `docs/GITHUB_APP_SETUP.md`. The gateway needs `git`
 and `gitleaks` on the server (`npm run tools:gitleaks`; the Dockerfile installs both).
 
+## Developers and agreements
+
+A door opens only after the invited developer signs its agreement with a key from their own device, on an account with
+the same authenticator-code step as creators. `docs/AGREEMENT_SIGNATURES.md`.
+
 ## Deploying
 
 `npm run build` then `npm start` (or the `Dockerfile`). Step by step, with every setting the host needs:
