@@ -18,7 +18,7 @@ import {
 import { Header } from './components/Header';
 import { ProjectHomeView } from './components/ProjectHomeView';
 import { DoorDetailsView } from './components/DoorDetailsView';
-import { DeveloperWorkspace } from './components/DeveloperWorkspace';
+import { DeveloperDoorsView } from './components/DeveloperDoorsView';
 import { ActivityLogView } from './components/ActivityLogView';
 import { MirrorBackupView } from './components/MirrorBackupView';
 import { AcceptanceSuiteView } from './components/AcceptanceSuiteView';
@@ -31,6 +31,46 @@ import { ClosingReportModal } from './components/ClosingReportModal';
 import { DeveloperInviteModal } from './components/DeveloperInviteModal';
 import { RoleMode } from './types/custody';
 import { AuthGate, AuthInfo } from './auth/AuthGate';
+
+const INVITE_KEY = 'custody-core.pending-invite';
+
+/**
+ * An invitation link (/?invite=...) is kept in this browser until it is handled, so it survives signing up,
+ * confirming the email in another tab, and setting up the authenticator. It is removed from the address bar at once.
+ */
+function readPendingInvite(): string | null {
+  try {
+    const fromUrl = new URLSearchParams(window.location.search).get('invite');
+    if (fromUrl) {
+      localStorage.setItem(INVITE_KEY, fromUrl);
+      const url = new URL(window.location.href);
+      url.searchParams.delete('invite');
+      window.history.replaceState(null, '', url.pathname + url.search);
+    }
+    return localStorage.getItem(INVITE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+// Read at page load, before the login screen: the link's parameter must be kept even if the person signs up first.
+readPendingInvite();
+
+function storedInvite(): string | null {
+  try {
+    return localStorage.getItem(INVITE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function clearPendingInvite() {
+  try {
+    localStorage.removeItem(INVITE_KEY);
+  } catch {
+    // storage unavailable: nothing kept
+  }
+}
 
 export default function App() {
   return <AuthGate>{(auth) => <Workspace auth={auth} />}</AuthGate>;
@@ -49,6 +89,7 @@ function Workspace({ auth }: { auth: AuthInfo }) {
   const [githubNotice, setGithubNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const [doors, setDoors] = useState<ServerDoor[]>([]);
   const [doorsError, setDoorsError] = useState<string | null>(null);
+  const [pendingInvite, setPendingInvite] = useState<string | null>(() => storedInvite());
 
   // Modals state
   const [isSetupOpen, setIsSetupOpen] = useState(false);
@@ -73,6 +114,14 @@ function Workspace({ auth }: { auth: AuthInfo }) {
     }
     init();
   }, []);
+
+  // An invitation link opens the developer's view.
+  useEffect(() => {
+    if (pendingInvite) {
+      setRoleMode('developer');
+      setCurrentTab('workspace');
+    }
+  }, [pendingInvite]);
 
   // GitHub connection, and the result of coming back from GitHub's install page (/?github=...).
   useEffect(() => {
@@ -177,7 +226,6 @@ function Workspace({ auth }: { auth: AuthInfo }) {
     setDoors((prev) => prev.map((d) => (d.id === closed.id ? closed : d)));
     await reloadEvents();
   };
-  const selectedWorkspace = selectedDoor ? state.workspaces.find((w) => w.door_id === selectedDoor.id) : undefined;
 
   // Claim a project: the server records it and its first event. A failure is shown, never papered over.
   const handleClaimProject = async (data: { name: string; purpose: string }) => {
@@ -257,6 +305,10 @@ function Workspace({ auth }: { auth: AuthInfo }) {
               project={activeProject}
               onSelectDoor={setSelectedDoorId}
               onCloseDoor={handleCloseDoor}
+              onDoorChanged={(d) => {
+                setDoors((prev) => prev.map((x) => (x.id === d.id ? d : x)));
+                void reloadEvents();
+              }}
             />
           ) : (
             <div className="p-12 text-center text-zinc-400 bg-zinc-950 border border-zinc-800 rounded-2xl space-y-3">
@@ -267,22 +319,16 @@ function Workspace({ auth }: { auth: AuthInfo }) {
             </div>
           ))}
 
-        {currentTab === 'workspace' &&
-          (selectedDoor && activeProject ? (
-            <DeveloperWorkspace
-              door={selectedDoor}
-              project={activeProject}
-              workspace={selectedWorkspace}
-              onCloseDoorRequested={() => setIsClosingReportOpen(true)}
-            />
-          ) : (
-            <div className="p-12 text-center text-zinc-400 bg-zinc-950 border border-zinc-800 rounded-2xl space-y-3">
-              <h3 className="font-semibold text-zinc-200 text-sm">Developer Workspace: Not connected yet</h3>
-              <p className="text-xs text-zinc-500 max-w-md mx-auto">
-                A developer's sandboxed workspace will appear here once a door is open. No door is open.
-              </p>
-            </div>
-          ))}
+        {currentTab === 'workspace' && (
+          <DeveloperDoorsView
+            email={auth.email}
+            pendingInvite={pendingInvite}
+            onInviteHandled={() => {
+              clearPendingInvite();
+              setPendingInvite(null);
+            }}
+          />
+        )}
 
         {currentTab === 'activity' && <ActivityLogView events={state.events} projectId={activeProject?.id} />}
 

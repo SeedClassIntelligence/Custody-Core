@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { DoorOpen, X, Copy, Check, AlertTriangle } from 'lucide-react';
 import { Project } from '../types/custody';
-import { createDoor, openDoor, ServerDoor } from '../utils/api';
+import { createDoor, inviteDeveloper, ServerDoor } from '../utils/api';
 
 interface OpenDoorModalProps {
   isOpen: boolean;
@@ -39,7 +39,7 @@ function CopyLine({ text }: { text: string }) {
   );
 }
 
-/** Creates a door and opens it. The credential is shown once, here, and never again. */
+/** Creates a door and invites the developer. The door opens when they sign; the credential goes to them, not here. */
 export const OpenDoorModal: React.FC<OpenDoorModalProps> = ({ isOpen, onClose, project, githubConnected, onDoorOpened }) => {
   const [email, setEmail] = useState('');
   const [job, setJob] = useState('');
@@ -48,7 +48,7 @@ export const OpenDoorModal: React.FC<OpenDoorModalProps> = ({ isOpen, onClose, p
   const [access, setAccess] = useState<Record<string, '' | 'read' | 'write'>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ door: ServerDoor; token: string } | null>(null);
+  const [result, setResult] = useState<{ door: ServerDoor; link: string; linkExpires: string } | null>(null);
 
   if (!isOpen) return null;
 
@@ -76,9 +76,9 @@ export const OpenDoorModal: React.FC<OpenDoorModalProps> = ({ isOpen, onClose, p
         expires_at: new Date(Date.now() + days * 86400_000).toISOString(),
         repositories: chosen.map(([repository_id, a]) => ({ repository_id, access: a }))
       });
-      const opened = await openDoor(project.id, door.id);
-      setResult({ door: opened.door, token: opened.credential.token });
-      onDoorOpened(opened.door);
+      const invited = await inviteDeveloper(project.id, door.id);
+      setResult({ door: invited.door, link: invited.invite.url, linkExpires: invited.invite.expires_at });
+      onDoorOpened(invited.door);
     } catch (err: any) {
       setError(err.message || 'The door could not be opened.');
     } finally {
@@ -110,31 +110,22 @@ export const OpenDoorModal: React.FC<OpenDoorModalProps> = ({ isOpen, onClose, p
               <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-950/40 border border-amber-800/70 text-amber-200 text-xs">
                 <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
                 <span>
-                  This credential is shown <strong>once</strong>. Send it to {result.door.developer_email} privately (not in the same
-                  message as the addresses below). Custody Core keeps only a fingerprint of it. Closing the door ends it immediately.
+                  This invitation link is shown <strong>once</strong>. Send it to {result.door.developer_email}. It works only for an account
+                  with that email address, until {new Date(result.linkExpires).toLocaleString()}. Custody Core does not send emails yet.
                 </span>
               </div>
-              <div className="space-y-1.5">
-                <div className="text-xs text-zinc-400">Credential (git asks for a password: use this; any user name works)</div>
-                <CopyLine text={result.token} />
-              </div>
-              <div className="space-y-1.5">
-                <div className="text-xs text-zinc-400">Clone through Custody Core (not GitHub):</div>
-                {result.door.remotes.map((r) => (
-                  <CopyLine key={r.url} text={`git clone ${r.url}`} />
-                ))}
-              </div>
-              <div className="space-y-1.5">
-                <div className="text-xs text-zinc-400">Pushes are accepted only to branches under the door's prefix, after a secret scan:</div>
-                <CopyLine text={`git push origin HEAD:${result.door.branch_prefix}my-change`} />
-              </div>
+              <CopyLine text={result.link} />
+              <ol className="text-xs text-zinc-300 space-y-1 list-decimal list-inside">
+                <li>They open the link, create an account with that address, confirm the email and set up an authenticator app.</li>
+                <li>They read the agreement and sign it with a key made on their own device.</li>
+                <li>The door opens, and they get their own git credential. You never see it.</li>
+              </ol>
               <p className="text-xs text-zinc-500">
-                Access ends {new Date(result.door.expires_at).toLocaleString()} (the gateway refuses it from then on). Developer signing and sandboxed workspaces are not connected yet:
-                the developer uses their own machine with this credential.
+                You can send a new link from the door's page (the old one stops working). The agreement stays the same.
               </p>
               <div className="flex justify-end">
                 <button onClick={close} className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-4 py-2.5 rounded-xl">
-                  I have saved the credential
+                  Done
                 </button>
               </div>
             </div>
@@ -211,7 +202,7 @@ export const OpenDoorModal: React.FC<OpenDoorModalProps> = ({ isOpen, onClose, p
                   Cancel
                 </button>
                 <button disabled={busy} className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold px-4 py-2.5 rounded-xl">
-                  {busy ? 'Opening...' : 'Open the door'}
+                  {busy ? 'Creating...' : 'Create and invite'}
                 </button>
               </div>
             </form>

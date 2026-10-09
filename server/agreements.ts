@@ -13,9 +13,8 @@ import crypto from 'node:crypto';
  */
 
 export const AGREEMENT_VERSION = 'custody-core-door-agreement/1';
-export const SIGNATURE_PURPOSE = 'custody-core/agreement-signature/v1';
-export const CONSENT_TEXT =
-  'I agree to sign this agreement electronically, and that my electronic signature has the same effect as a handwritten signature.';
+export { SIGNATURE_PURPOSE, CONSENT_TEXT, canonicalStatement } from '../shared/agreementStatement';
+export type { SignedStatement } from '../shared/agreementStatement';
 
 const RIGHTS: Record<string, { title: string; body: string }> = {
   contribute: {
@@ -100,24 +99,6 @@ export function renderAgreement(a: AgreementInput): { version: string; text: str
   ];
   const text = lines.join('\n') + '\n';
   return { version: AGREEMENT_VERSION, text, sha256: crypto.createHash('sha256').update(text, 'utf8').digest('hex') };
-}
-
-/** The exact statement a developer signs (canonical JSON: sorted keys, no spaces). */
-export interface SignedStatement {
-  purpose: string;
-  agreement_sha256: string;
-  door_id: string;
-  project_id: string;
-  developer_email: string;
-  developer_identity: string;
-  signer_name: string;
-  consent: string;
-  signed_at: string;
-}
-
-export function canonicalStatement(s: SignedStatement): string {
-  const keys = Object.keys(s).sort() as Array<keyof SignedStatement>;
-  return JSON.stringify(Object.fromEntries(keys.map((k) => [k, s[k]])));
 }
 
 export interface PublicKeyInfo {

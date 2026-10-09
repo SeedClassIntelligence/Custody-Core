@@ -86,15 +86,18 @@ settings > GitHub Apps > Custody Core > review request). Until they do, locking 
 
 1. Project page > Code Home > **Add repositories from GitHub**: pick from the repositories the App can see.
 2. **Open a Door**: developer's email, the job, rights, how many days, and per repository: read, or read and push.
-3. The credential is shown **once**. Send it to the developer privately, separately from the git addresses.
+   **Create and invite** gives a link, shown once. Send it to the developer.
+3. The developer signs up with that email address (with an authenticator app, like creators), reads the agreement
+   and signs it with a key from their own device. The door opens, and they get their own git credential: the creator
+   never sees it. Details and how to check a signature: `docs/AGREEMENT_SIGNATURES.md`.
 4. The developer:
    ```
    git clone https://custody.example.com/git/<door id>/<owner>/<repo>.git
    # user name: anything; password: the credential
    git push origin HEAD:door/<door id>/my-change
    ```
-5. **Close the door** on its page: the very next git request with that credential is refused, and the gateway's
-   copies of the repositories are deleted.
+5. **Close the door** on its page: the very next git request with that credential is refused, any unused invitation
+   link stops working, and the gateway's copies of the repositories are deleted.
 
 What the gateway enforces on every request:
 - the credential exists, is not revoked, and belongs to this door; the door is open and not past its end date;
@@ -114,7 +117,6 @@ reason) is an event in the project's tamper-evident record, next to `door.create
 
 - Checking locks on a schedule (today they are checked when added and whenever the creator presses check).
 - Closing doors automatically at their end date (the gateway already refuses an expired door).
-- Developer accounts and agreement signing (the creator hands over the credential).
 - Sandboxed developer workspaces with restricted network access.
 - A backup snapshot when a door closes.
 

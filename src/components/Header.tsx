@@ -152,10 +152,7 @@ export const Header: React.FC<HeaderProps> = ({
               }`}
             >
               <Terminal className="w-3.5 h-3.5" />
-              Developer Workspace
-              <span className="text-[10px] text-zinc-400 bg-zinc-800/80 px-1.5 py-0.2 rounded border border-zinc-700">
-                Not connected yet
-              </span>
+              My Doors (developer)
             </button>
             <button
               onClick={() => onSelectTab('activity')}
