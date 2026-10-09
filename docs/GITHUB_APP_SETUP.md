@@ -74,7 +74,11 @@ lock is put back (`repository.locked`). Every attempt and check is in the projec
 
 Two things GitHub decides:
 - **Plan.** GitHub only allows rulesets on **private** repositories on a paid plan (Pro, Team or Enterprise). On the
-  free plan the repository stays "not locked" with that reason; upgrade, then press **lock**.
+  free plan the repository stays "not locked" with that reason; upgrade, then press **lock**. What that does and does
+  not change: developers given a door still cannot reach the code on GitHub, because they get no GitHub access at all,
+  only a gateway credential, and the gateway only accepts their pushes to their own door branches. The GitHub lock is
+  an extra layer against changes made directly on GitHub by people who do have GitHub access (organization members and
+  outside collaborators); without it, they can delete or force-push the default branch there.
 - **Organization owners** can still edit or delete rulesets on GitHub. The lock stops everyone else, and accidents;
   a removal by an owner is caught the next time the lock is checked, not prevented.
 

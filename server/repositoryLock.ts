@@ -53,7 +53,14 @@ function explain(err: unknown): string {
   if (err instanceof GitHubError) {
     const m = err.message;
     if (/upgrade to github pro|make this repository public|not available for this repository/i.test(m)) {
-      return 'GitHub only allows rulesets on private repositories with a paid plan (Pro, Team or Enterprise). Upgrade the organization\'s plan, then check the lock again.';
+      return [
+        'Not locked on GitHub: GitHub only allows this lock on private repositories with a paid plan (Pro, Team or Enterprise).',
+        'Developers you give a door still cannot reach this code on GitHub: they get no GitHub access, only a gateway credential,',
+        'and the gateway only accepts their pushes to their own door branches.',
+        'The GitHub lock is an extra layer against changes made directly on GitHub by people who do have GitHub access',
+        '(organization members and outside collaborators): without it, they can delete or force-push the default branch there.',
+        'To add it, upgrade the organization\'s plan, then press lock.'
+      ].join(' ');
     }
     if (/not granted to this installation|resource not accessible by integration/i.test(m) || err.status === 403) {
       return 'The GitHub App does not have the "Administration: Read and write" permission on this repository. Accept the updated permissions on GitHub (organization settings > GitHub Apps), then check the lock again.';

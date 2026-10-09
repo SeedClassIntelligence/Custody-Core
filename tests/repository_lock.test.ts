@@ -122,6 +122,9 @@ describe('Repository lock (GitHub ruleset + forking off, read back before it cou
     const repo = r.body.repositories[0];
     expect(repo.locked_at).toBeNull();
     expect(repo.lock_error).toMatch(/paid plan/);
+    // Says plainly what still holds without the lock, and what the lock adds.
+    expect(repo.lock_error).toMatch(/Developers you give a door still cannot reach this code on GitHub/);
+    expect(repo.lock_error).toMatch(/extra layer against changes made directly on GitHub/);
     expect(standIn.repoState(`${ORG}/free`).rulesets.size).toBe(0);
     expect((await actions()).at(-1)).toMatchObject({ action: 'repository.lock_failed' });
   });
