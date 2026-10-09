@@ -11,6 +11,8 @@ import { gatewayRouter } from '../server/gateway/router';
 import { mirrorPath } from '../server/gateway/mirror';
 import { githubApiRouter, githubCallbackRouter } from '../server/githubRoutes';
 import { projectExtrasRouter } from '../server/doors';
+import { developerRouter } from '../server/developerRoutes';
+import { acceptSignAndGetCredential } from './support/developerFlow';
 import { forgetInstallationTokens } from '../server/github';
 import { assertPoolTargetsTestDb } from './support/safety';
 import { startGitHubStandIn, StandIn } from './support/githubStandIn';
@@ -72,6 +74,9 @@ describe('Git gateway (doors, credentials, branch policy, secret scan, GitHub fo
 
   const creator = { id: '', userId: `user-${crypto.randomUUID()}`, email: `creator_${Date.now()}@example.com` };
   const other = { id: '', userId: `user-${crypto.randomUUID()}`, email: `other_${Date.now()}@example.com` };
+  // Developers have their own logins (rows like any signed-in person).
+  const dev = { id: '', userId: `user-${crypto.randomUUID()}`, email: 'dev@example.com' };
+  const dev2 = { id: '', userId: `user-${crypto.randomUUID()}`, email: 'dev2@example.com' };
   const ORG = `org${Date.now()}`;
   const APP = `${ORG}/app`;
   const DOCS = `${ORG}/docs`;
@@ -108,7 +113,7 @@ describe('Git gateway (doors, credentials, branch policy, secret scan, GitHub fo
     standIn.createRepo(APP);
     standIn.createRepo(DOCS);
 
-    for (const c of [creator, other]) {
+    for (const c of [creator, other, dev, dev2]) {
       c.id = (await db.query('INSERT INTO creator (identity_id, display_name, email) VALUES ($1, $2, $3) RETURNING id', [c.userId, 'Test', c.email])).rows[0].id;
     }
     projectId = (await db.query(`INSERT INTO project (creator_id, name, purpose, status) VALUES ($1, 'Gateway test', 'Testing the gateway', 'active') RETURNING id`, [creator.id])).rows[0].id;
@@ -128,6 +133,7 @@ describe('Git gateway (doors, credentials, branch policy, secret scan, GitHub fo
     });
     api.use('/github', githubApiRouter);
     api.use('/projects/:id', projectExtrasRouter);
+    api.use('/developer', developerRouter);
     app.use('/api/v1', api);
     server = http.createServer(app);
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
@@ -214,20 +220,22 @@ describe('Git gateway (doors, credentials, branch policy, secret scan, GitHub fo
       expect(created.body.door.branch_prefix).toBe(`door/${doorId}/`);
     });
 
-    it('opens with a credential that is shown once and stored only as a hash', async () => {
-      const opened = await api(creator, 'POST', `/projects/${projectId}/doors/${doorId}/open`);
-      expect(opened.status).toBe(200);
-      token = opened.body.credential.token;
+    it('opens only after the invited developer signs, and the credential goes to the developer, stored only as a hash', async () => {
+      const invited = await api(creator, 'POST', `/projects/${projectId}/doors/${doorId}/invite`);
+      expect(invited.status).toBe(200);
+      expect(invited.body.door.status).toBe('awaiting_signature');
+      token = await acceptSignAndGetCredential(api, dev, invited.body.invite.url);
       expect(token).toMatch(/^ccg_[A-Za-z0-9_-]{43}$/);
-      expect(opened.body.door.status).toBe('open');
-      expect(opened.body.door.remotes.map((r: any) => r.url)).toContain(`${base}/git/${doorId}/${APP.toLowerCase()}.git`);
-      const stored = (await db.query('SELECT token_hash FROM gateway_credential WHERE door_id = $1', [doorId])).rows[0].token_hash;
+      const listed = await api(creator, 'GET', `/projects/${projectId}/doors`);
+      const door = listed.body.doors.find((d: any) => d.id === doorId);
+      expect(door.status).toBe('open');
+      expect(door.remotes.map((r: any) => r.url)).toContain(`${base}/git/${doorId}/${APP.toLowerCase()}.git`);
+      const stored = (await db.query('SELECT token_hash FROM gateway_credential WHERE door_id = $1 AND revoked_at IS NULL', [doorId])).rows[0].token_hash;
       expect(stored).toBe(crypto.createHash('sha256').update(token).digest('hex'));
       expect(JSON.stringify(await actions())).not.toContain(token);
-      expect((await api(creator, 'POST', `/projects/${projectId}/doors/${doorId}/open`)).status).toBe(409);
-      // The list never shows the credential again.
-      const listed = await api(creator, 'GET', `/projects/${projectId}/doors`);
+      // The creator never sees the credential.
       expect(JSON.stringify(listed.body)).not.toContain(token);
+      expect((await api(creator, 'POST', `/projects/${projectId}/doors/${doorId}/invite`)).status).toBe(409);
     });
 
     it('refuses git requests with no credential, a wrong one, or for another door', async () => {
@@ -335,7 +343,7 @@ describe('Git gateway (doors, credentials, branch policy, secret scan, GitHub fo
       const names = (await actions()).map((e) => e.action);
       expect(names.slice(-2)).toEqual(['credential.revoked', 'door.closed']);
       expect((await api(creator, 'POST', `/projects/${projectId}/doors/${doorId}/close`)).status).toBe(409);
-      expect((await api(creator, 'POST', `/projects/${projectId}/doors/${doorId}/open`)).status).toBe(409);
+      expect((await api(creator, 'POST', `/projects/${projectId}/doors/${doorId}/invite`)).status).toBe(409);
       // The database itself keeps a closed door closed and a revoked credential revoked.
       await expect(admin.query(`UPDATE door SET status = 'open' WHERE id = $1`, [doorId])).rejects.toThrow(/cannot be reopened/);
       await expect(admin.query('UPDATE gateway_credential SET revoked_at = NULL WHERE door_id = $1', [doorId])).rejects.toThrow(/cannot be undone/);
@@ -350,7 +358,8 @@ describe('Git gateway (doors, credentials, branch policy, secret scan, GitHub fo
         repositories: [{ repository_id: repoIds[APP.toLowerCase()], access: 'write' }]
       });
       const id = created.body.door.id;
-      const t = (await api(creator, 'POST', `/projects/${projectId}/doors/${id}/open`)).body.credential.token;
+      const invited = await api(creator, 'POST', `/projects/${projectId}/doors/${id}/invite`);
+      const t = await acceptSignAndGetCredential(api, dev2, invited.body.invite.url);
       expect((await gitc(['ls-remote', remote(id, APP, t)])).code).toBe(0);
       await admin.query(`UPDATE door SET expires_at = now() - interval '1 second' WHERE id = $1`, [id]);
       const r = await fetch(`${base}/git/${id}/${APP}.git/info/refs?service=git-upload-pack`, { headers: { Authorization: `Basic ${Buffer.from(`door:${t}`).toString('base64')}` } });
@@ -362,7 +371,7 @@ describe('Git gateway (doors, credentials, branch policy, secret scan, GitHub fo
       const result = await verifyServerProjectEvents(projectId);
       expect(result.isValid).toBe(true);
       const names = (await actions()).map((e) => e.action);
-      for (const a of ['repository.added', 'door.created', 'door.opened', 'git.fetch', 'git.push', 'git.push_rejected', 'credential.revoked', 'door.closed']) {
+      for (const a of ['repository.added', 'door.created', 'door.invited', 'door.invite_accepted', 'agreement.signed', 'door.opened', 'credential.issued', 'git.fetch', 'git.push', 'git.push_rejected', 'credential.revoked', 'door.closed']) {
         expect(names).toContain(a);
       }
     });

@@ -4,19 +4,21 @@ import { getDbPool, insertEvent } from './db';
 import { creatorOf } from './auth';
 import { GitHubError, GitHubNotConfigured, installationRepositories } from './github';
 import { installationOf } from './githubRoutes';
-import { newGatewayToken } from './gateway/router';
+import crypto from 'node:crypto';
 import { LOCK_NAME, lockRepository } from './repositoryLock';
-import { removeDoorMirrors } from './gateway/mirror';
+import { closeDoorInTransaction, afterDoorClosed } from './doorLifecycle';
+import { renderAgreement } from './agreements';
 
 /**
  * Doors (mounted at /api/v1/projects/:id/... after login). A door gives one outside developer access to chosen
  * repositories of one project, through the git gateway, until it is closed or expires.
  *
- *   draft  --open-->  open  --close-->  closed   (a closed door is final; the database enforces it)
+ *   draft --invite--> awaiting_signature --developer signs (developerRoutes.ts)--> open --close--> closed
  *
- * Opening issues the gateway credential and shows it once. Closing revokes it (the next git request is refused)
- * and deletes the door's mirrors from the gateway. Every step is an event in the project's record.
- * Developer accounts, agreement signing and workspaces are not built yet: the creator hands the credential over.
+ * Inviting fixes the agreement text and gives the creator a link to send. The door opens only when the invited
+ * developer, signed in with their own account, signs the agreement with their own key; the developer then gets the
+ * gateway credential themselves. Closing revokes it (the next git request is refused) and deletes the door's
+ * mirrors. A closed door is final; the database enforces it. Every step is an event in the project's record.
  */
 
 const RIGHTS = ['contribute', 'license', 'transfer', 'maintain'];
@@ -49,7 +51,7 @@ export function gatewayBase(req: express.Request): string {
   return `${req.protocol}://${req.get('host')}`;
 }
 
-function remotesFor(req: express.Request, doorId: string, repos: Array<{ full_name: string }>) {
+export function remotesFor(req: express.Request, doorId: string, repos: Array<{ full_name: string }>) {
   return repos.map((r) => ({ full_name: r.full_name, url: `${gatewayBase(req)}/git/${doorId}/${r.full_name}.git` }));
 }
 
@@ -206,10 +208,15 @@ projectExtrasRouter.post('/repositories/:repositoryId/lock', async (req, res) =>
 
 // --- Doors -------------------------------------------------------------------------------------------------
 
-async function loadDoors(pool: pg.Pool | pg.PoolClient, projectId: string, doorId?: string) {
+export async function loadDoors(pool: pg.Pool | pg.PoolClient, projectId: string, doorId?: string) {
   const doors = (await pool.query(
     `SELECT d.id, d.project_id, d.developer_email, d.job_description, d.rights_type, d.status, d.opens_at, d.expires_at,
             d.closed_at, d.closed_reason, d.created_at,
+            d.agreement_version, d.agreement_sha256, d.agreement_signed_at,
+            (d.agreement_signed_message::json ->> 'signer_name') AS agreement_signer_name,
+            (SELECT k.fingerprint FROM developer_key k WHERE k.id = d.agreement_key_id) AS agreement_key_fingerprint,
+            (SELECT json_build_object('created_at', i.created_at, 'expires_at', i.expires_at, 'accepted_at', i.accepted_at)
+               FROM door_invite i WHERE i.door_id = d.id AND i.revoked_at IS NULL ORDER BY i.created_at DESC LIMIT 1) AS invite,
             COALESCE((SELECT json_agg(json_build_object('repository_id', r.id, 'full_name', r.full_name, 'access', dr.access) ORDER BY r.full_name)
                         FROM door_repository dr JOIN repository r ON r.id = dr.repository_id WHERE dr.door_id = d.id), '[]') AS repositories,
             (SELECT json_build_object('id', gc.id, 'created_at', gc.created_at, 'last_used_at', gc.last_used_at)
@@ -308,7 +315,13 @@ projectExtrasRouter.post('/doors', async (req, res) => {
   }
 });
 
-projectExtrasRouter.post('/doors/:doorId/open', async (req, res) => {
+const INVITE_DAYS = 7;
+
+/**
+ * Sends (or re-sends) the invitation: fixes the agreement text on first sending, and returns a link for the creator
+ * to give the developer. Re-sending revokes earlier links; the agreement stays the same.
+ */
+projectExtrasRouter.post('/doors/:doorId/invite', async (req, res) => {
   const pool = db(res);
   if (!pool) return;
   const creator = creatorOf(res);
@@ -316,7 +329,8 @@ projectExtrasRouter.post('/doors/:doorId/open', async (req, res) => {
   try {
     await client.query('BEGIN');
     const door = (await client.query(
-      `SELECT d.* FROM door d JOIN project p ON p.id = d.project_id
+      `SELECT d.*, p.name AS project_name, c.display_name AS creator_name, c.email AS creator_email
+         FROM door d JOIN project p ON p.id = d.project_id JOIN creator c ON c.id = p.creator_id
         WHERE d.id = $1 AND d.project_id = $2 AND p.creator_id = $3 FOR UPDATE OF d`,
       [req.params.doorId, pid(req), creator.id]
     )).rows[0];
@@ -324,44 +338,101 @@ projectExtrasRouter.post('/doors/:doorId/open', async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Door not found.' });
     }
-    if (door.status !== 'draft') {
+    if (door.status !== 'draft' && door.status !== 'awaiting_signature') {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: `This door is ${door.status}; only a new (draft) door can be opened.` });
+      return res.status(409).json({ error: `This door is ${door.status}; invitations are for doors that are not open yet.` });
     }
     if (new Date(door.expires_at).getTime() <= Date.now()) {
       await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'This door expired before it was opened. Create a new one.' });
+      return res.status(409).json({ error: 'This door has passed its end date. Create a new one.' });
     }
-    const installation = (await client.query('SELECT installation_id FROM github_installation WHERE creator_id = $1', [creator.id])).rows[0];
+    const installation = (await client.query('SELECT 1 FROM github_installation WHERE creator_id = $1', [creator.id])).rowCount;
     if (!installation) {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'Connect GitHub first: the gateway reaches your repositories through it.' });
     }
-    const { token, hash } = newGatewayToken();
-    const credential = (await client.query('INSERT INTO gateway_credential (door_id, token_hash) VALUES ($1, $2) RETURNING id, created_at', [door.id, hash])).rows[0];
-    await client.query(`UPDATE door SET status = 'open', opens_at = now(), updated_at = now() WHERE id = $1`, [door.id]);
+
+    let agreement = { version: door.agreement_version, sha256: door.agreement_sha256 };
+    if (!door.agreement_sha256) {
+      const repos = (await client.query(
+        `SELECT r.full_name, dr.access FROM door_repository dr JOIN repository r ON r.id = dr.repository_id WHERE dr.door_id = $1 ORDER BY r.full_name`,
+        [door.id]
+      )).rows;
+      const rendered = renderAgreement({
+        creatorName: door.creator_name,
+        creatorEmail: door.creator_email,
+        developerEmail: door.developer_email,
+        projectName: door.project_name,
+        projectId: door.project_id,
+        doorId: door.id,
+        jobDescription: door.job_description,
+        rightsType: door.rights_type,
+        repositories: repos,
+        expiresAt: new Date(door.expires_at).toISOString()
+      });
+      await client.query('UPDATE door SET agreement_version = $2, agreement_text = $3, agreement_sha256 = $4 WHERE id = $1', [
+        door.id, rendered.version, rendered.text, rendered.sha256
+      ]);
+      agreement = { version: rendered.version, sha256: rendered.sha256 };
+    }
+
+    await client.query('UPDATE door_invite SET revoked_at = now() WHERE door_id = $1 AND revoked_at IS NULL AND accepted_at IS NULL', [door.id]);
+    const token = `cci_${crypto.randomBytes(24).toString('base64url')}`;
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const expires = new Date(Math.min(Date.now() + INVITE_DAYS * 86400_000, new Date(door.expires_at).getTime()));
+    const invite = (await client.query(
+      'INSERT INTO door_invite (door_id, token_hash, email, expires_at) VALUES ($1, $2, $3, $4) RETURNING id, expires_at',
+      [door.id, tokenHash, door.developer_email, expires.toISOString()]
+    )).rows[0];
+    await client.query(`UPDATE door SET status = 'awaiting_signature', updated_at = now() WHERE id = $1`, [door.id]);
     await insertEvent({
       project_id: door.project_id,
       actor_type: 'creator',
       actor_id: creator.id,
-      action: 'door.opened',
+      action: 'door.invited',
       subject_type: 'door',
       subject_id: door.id,
-      // The credential itself is never recorded: only which one was issued.
-      payload: { credential_id: credential.id, expires_at: new Date(door.expires_at).toISOString(), branch_prefix: `door/${door.id}/` }
+      // The link itself is never recorded: only which invitation was sent, to whom, and for which agreement.
+      payload: {
+        invite_id: invite.id,
+        developer_email: door.developer_email,
+        invite_expires_at: new Date(invite.expires_at).toISOString(),
+        agreement_version: agreement.version,
+        agreement_sha256: agreement.sha256,
+        resent: door.status === 'awaiting_signature'
+      }
     }, client);
     await client.query('COMMIT');
-    const [opened] = await loadDoors(pool, pid(req), door.id);
+    const [invited] = await loadDoors(pool, pid(req), door.id);
     res.json({
-      door: { ...opened, remotes: remotesFor(req, door.id, opened.repositories) },
-      // Shown once. Only its SHA-256 is stored.
-      credential: { username: 'door', token }
+      door: { ...invited, remotes: [] },
+      // Shown once: only its SHA-256 is stored.
+      invite: { url: `${gatewayBase(req)}/?invite=${token}`, expires_at: new Date(invite.expires_at).toISOString() }
     });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => undefined);
-    fail(res, err, 'opening a door');
+    fail(res, err, 'inviting a developer');
   } finally {
     client.release();
+  }
+});
+
+/** The agreement as fixed on the door (for the creator to read what is being, or was, signed). */
+projectExtrasRouter.get('/doors/:doorId/agreement', async (req, res) => {
+  const pool = db(res);
+  if (!pool) return;
+  try {
+    const row = (await pool.query(
+      `SELECT d.agreement_version, d.agreement_text, d.agreement_sha256, d.agreement_signed_at, d.agreement_signed_message, d.agreement_signature,
+              k.public_key_spki, k.fingerprint
+         FROM door d JOIN project p ON p.id = d.project_id LEFT JOIN developer_key k ON k.id = d.agreement_key_id
+        WHERE d.id = $1 AND d.project_id = $2 AND p.creator_id = $3`,
+      [req.params.doorId, pid(req), creatorOf(res).id]
+    )).rows[0];
+    if (!row) return res.status(404).json({ error: 'Door not found.' });
+    res.json({ agreement: row });
+  } catch (err) {
+    fail(res, err, 'reading an agreement');
   }
 });
 
@@ -385,38 +456,9 @@ projectExtrasRouter.post('/doors/:doorId/close', async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(409).json({ error: 'This door is already closed.' });
     }
-    const revoked = (await client.query(
-      'UPDATE gateway_credential SET revoked_at = now() WHERE door_id = $1 AND revoked_at IS NULL RETURNING id, revoked_at',
-      [door.id]
-    )).rows;
-    await client.query(`UPDATE door SET status = 'closed', closed_at = now(), closed_reason = 'creator_manual', updated_at = now() WHERE id = $1`, [door.id]);
-    for (const c of revoked) {
-      await insertEvent({
-        project_id: door.project_id,
-        actor_type: 'creator',
-        actor_id: creator.id,
-        action: 'credential.revoked',
-        subject_type: 'door',
-        subject_id: door.id,
-        payload: { credential_id: c.id, revoked_at: new Date(c.revoked_at).toISOString() }
-      }, client);
-    }
-    await insertEvent({
-      project_id: door.project_id,
-      actor_type: 'creator',
-      actor_id: creator.id,
-      action: 'door.closed',
-      subject_type: 'door',
-      subject_id: door.id,
-      payload: { reason: 'creator_manual', previous_status: door.status, credentials_revoked: revoked.length, gateway_mirrors_deleted: true }
-    }, client);
+    await closeDoorInTransaction(client, door, { type: 'creator', id: creator.id }, 'creator_manual');
     await client.query('COMMIT');
-    // After the commit: from here on every git request with the old credential is refused.
-    try {
-      removeDoorMirrors(door.id);
-    } catch (err: any) {
-      console.error('[doors] could not delete mirrors of a closed door:', err?.message ?? err);
-    }
+    await afterDoorClosed(door.id);
     const [closed] = await loadDoors(pool, pid(req), door.id);
     res.json({ door: { ...closed, remotes: [] } });
   } catch (err) {

@@ -19,6 +19,7 @@ import { findScanner } from './server/gateway/scanner';
 import { githubApiRouter, githubCallbackRouter } from './server/githubRoutes';
 import { githubConfig } from './server/github';
 import { projectExtrasRouter } from './server/doors';
+import { developerRouter } from './server/developerRoutes';
 import { verifyAccountChain } from './shared/crypto';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -101,6 +102,7 @@ const apiRouter = express.Router();
 
   apiRouter.use('/github', githubApiRouter);
   apiRouter.use('/projects/:id', projectExtrasRouter);
+  apiRouter.use('/developer', developerRouter);
 
   apiRouter.get('/me', (_req, res) => {
     const creator = creatorOf(res);
