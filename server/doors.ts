@@ -44,9 +44,12 @@ function fail(res: express.Response, err: any, what: string) {
   return res.status(500).json({ error: 'Something went wrong on the server.' });
 }
 
-/** The address the developer's git uses. APP_URL when set (recommended behind a proxy), else this request's host. */
+/**
+ * The app's public address, used in git addresses and invitation links: APP_URL when set (recommended behind a
+ * proxy), else the address Render gives the service (RENDER_EXTERNAL_URL), else this request's host.
+ */
 export function gatewayBase(req: express.Request): string {
-  const configured = process.env.APP_URL;
+  const configured = process.env.APP_URL && /^https?:\/\//.test(process.env.APP_URL) ? process.env.APP_URL : process.env.RENDER_EXTERNAL_URL;
   if (configured && /^https?:\/\/[^\s]+$/.test(configured)) return configured.replace(/\/+$/, '');
   return `${req.protocol}://${req.get('host')}`;
 }
