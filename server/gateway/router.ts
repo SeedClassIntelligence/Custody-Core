@@ -130,8 +130,16 @@ async function record(a: DoorAccess, action: string, payload: Record<string, unk
   }
 }
 
-/** Runs `git http-backend` (CGI) for one request and streams its answer back. */
-function httpBackend(req: express.Request, res: express.Response, env: Record<string, string>): Promise<void> {
+/**
+ * Runs `git http-backend` (CGI) for one request and streams its answer back. beforeEnd runs after git has finished
+ * and before the response ends, so whatever it records is in place by the time the client's git command returns.
+ */
+function httpBackend(
+  req: express.Request,
+  res: express.Response,
+  env: Record<string, string>,
+  beforeEnd?: () => Promise<void>
+): Promise<void> {
   return new Promise((resolve) => {
     const child = spawn('git', ['http-backend'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
     let head = Buffer.alloc(0);
@@ -171,12 +179,18 @@ function httpBackend(req: express.Request, res: express.Response, env: Record<st
 
     child.on('close', (code) => {
       if (code !== 0 && stderr.trim()) console.error('[gateway] git http-backend:', stderr.trim().split('\n').slice(-3).join(' | '));
-      if (!headersSent) {
-        if (!res.headersSent) res.status(500).type('text/plain').send('The gateway could not serve this request.\n');
-      } else {
-        res.end();
-      }
-      resolve();
+      const finish = () => {
+        if (!headersSent) {
+          if (!res.headersSent) res.status(500).type('text/plain').send('The gateway could not serve this request.\n');
+        } else {
+          res.end();
+        }
+        resolve();
+      };
+      if (!beforeEnd) return finish();
+      beforeEnd()
+        .catch((err) => console.error('[gateway] after-request step failed:', err?.message ?? err))
+        .finally(finish);
     });
     child.on('error', () => undefined);
     child.stdin.on('error', () => undefined);
@@ -262,39 +276,46 @@ gatewayRouter.use(async (req, res) => {
   const scanner = findScanner();
   const resultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'custody-push-'));
   const resultFile = path.join(resultDir, 'result.json');
-  try {
-    await withMirrorLock(dir, () =>
-      httpBackend(req, res, {
-        ...env,
-        CUSTODY_GATEWAY_HOOK: HOOK_SCRIPT,
-        CUSTODY_NODE: process.execPath,
-        CUSTODY_DOOR_ID: a.doorId,
-        CUSTODY_UPSTREAM_URL: upstream,
-        CUSTODY_UPSTREAM_AUTH: authHeader,
-        CUSTODY_RESULT_FILE: resultFile,
-        ...(scanner ? { CUSTODY_GITLEAKS: scanner.path, CUSTODY_GITLEAKS_VERSION: scanner.version } : {})
-      })
-    );
+  // The push's outcome is recorded before the developer's git sees the end of the response.
+  const recordOutcome = async () => {
     let outcome: any = null;
     try {
       outcome = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
     } catch {
       outcome = null; // the push ended before the hook ran (nothing was sent, or git refused it earlier)
     }
-    if (outcome) {
-      const refs = (outcome.updates ?? []).map((u: any) => ({ ref: u.ref, old: u.old, new: u.new }));
-      if (outcome.accepted) {
-        await record(a, 'git.push', { updates: refs, scanner: outcome.scanner });
-      } else {
-        await record(a, 'git.push_rejected', {
-          reason: outcome.reason,
-          updates: refs,
-          ...(outcome.findings ? { findings: outcome.findings, finding_count: outcome.finding_count } : {}),
-          ...(outcome.scanner ? { scanner: outcome.scanner } : {}),
-          ...(outcome.upstream_detail ? { upstream_detail: outcome.upstream_detail } : {})
-        });
-      }
+    if (!outcome) return;
+    const refs = (outcome.updates ?? []).map((u: any) => ({ ref: u.ref, old: u.old, new: u.new }));
+    if (outcome.accepted) {
+      await record(a, 'git.push', { updates: refs, scanner: outcome.scanner });
+    } else {
+      await record(a, 'git.push_rejected', {
+        reason: outcome.reason,
+        updates: refs,
+        ...(outcome.findings ? { findings: outcome.findings, finding_count: outcome.finding_count } : {}),
+        ...(outcome.scanner ? { scanner: outcome.scanner } : {}),
+        ...(outcome.upstream_detail ? { upstream_detail: outcome.upstream_detail } : {})
+      });
     }
+  };
+  try {
+    await withMirrorLock(dir, () =>
+      httpBackend(
+        req,
+        res,
+        {
+          ...env,
+          CUSTODY_GATEWAY_HOOK: HOOK_SCRIPT,
+          CUSTODY_NODE: process.execPath,
+          CUSTODY_DOOR_ID: a.doorId,
+          CUSTODY_UPSTREAM_URL: upstream,
+          CUSTODY_UPSTREAM_AUTH: authHeader,
+          CUSTODY_RESULT_FILE: resultFile,
+          ...(scanner ? { CUSTODY_GITLEAKS: scanner.path, CUSTODY_GITLEAKS_VERSION: scanner.version } : {})
+        },
+        recordOutcome
+      )
+    );
   } finally {
     fs.rmSync(resultDir, { recursive: true, force: true });
   }
