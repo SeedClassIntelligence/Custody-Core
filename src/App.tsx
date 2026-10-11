@@ -94,6 +94,7 @@ function Workspace({ auth }: { auth: AuthInfo }) {
   // Modals state
   const [isSetupOpen, setIsSetupOpen] = useState(false);
   const [isClaimOpen, setIsClaimOpen] = useState(false);
+  const [claimRepoInitial, setClaimRepoInitial] = useState<string | null>(null);
   const [isOpenDoorOpen, setIsOpenDoorOpen] = useState(false);
   const [isInviteOpen, setIsInviteOpen] = useState(false);
   const [isClosingReportOpen, setIsClosingReportOpen] = useState(false);
@@ -228,8 +229,24 @@ function Workspace({ auth }: { auth: AuthInfo }) {
   };
 
   // Claim a project: the server records it and its first event. A failure is shown, never papered over.
-  const handleClaimProject = async (data: { name: string; purpose: string }) => {
-    const project = await claimProject(data);
+  const handleClaimProject = async (data: { name: string; purpose: string; repositoryFullName?: string }) => {
+    const project = await claimProject({ name: data.name, purpose: data.purpose });
+    if (data.repositoryFullName) {
+      await addRepositories(project.id, [data.repositoryFullName]);
+      const { projects } = await fetchProjects();
+      const updated = projects.find((p) => p.id === project.id) || project;
+      setState((prev) =>
+        prev
+          ? {
+              ...prev,
+              projects: [updated, ...prev.projects.filter((p) => p.id !== updated.id)],
+              activeProjectId: updated.id
+            }
+          : prev
+      );
+      await reloadEvents();
+      return;
+    }
     setState((prev) =>
       prev
         ? {
@@ -282,7 +299,14 @@ function Workspace({ auth }: { auth: AuthInfo }) {
             events={state.events}
             eventsError={eventsError}
             onOpenNewDoor={() => setIsOpenDoorOpen(true)}
-            onClaimNewProject={() => setIsClaimOpen(true)}
+            onClaimNewProject={() => {
+              setClaimRepoInitial(null);
+              setIsClaimOpen(true);
+            }}
+            onClaimWithRepo={(repo) => {
+              setClaimRepoInitial(repo);
+              setIsClaimOpen(true);
+            }}
             onSelectTab={setCurrentTab}
             github={github}
             doors={doors}
@@ -349,8 +373,13 @@ function Workspace({ auth }: { auth: AuthInfo }) {
 
       <ClaimProjectModal
         isOpen={isClaimOpen}
-        onClose={() => setIsClaimOpen(false)}
+        onClose={() => {
+          setIsClaimOpen(false);
+          setClaimRepoInitial(null);
+        }}
         onClaimProject={handleClaimProject}
+        github={github}
+        initialRepoFullName={claimRepoInitial}
       />
 
       {activeProject && (

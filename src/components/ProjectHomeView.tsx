@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { FolderLock, DoorOpen, Plus, ArrowRight, AlertCircle, Database } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { FolderLock, DoorOpen, Plus, ArrowRight, AlertCircle, Database, Loader2 } from 'lucide-react';
 import { Project, CustodyEvent } from '../types/custody';
 import { formatHash } from '../utils/crypto';
 import { fetchGitHubRepositories, GitHubRepository, GitHubStatus, ServerDoor } from '../utils/api';
@@ -10,6 +10,7 @@ interface ProjectHomeViewProps {
   eventsError?: string | null;
   onOpenNewDoor: () => void;
   onClaimNewProject: () => void;
+  onClaimWithRepo?: (fullName: string) => void;
   onSelectTab: (tab: string) => void;
   github: GitHubStatus | null;
   doors: ServerDoor[];
@@ -145,22 +146,26 @@ const NotConnected: React.FC = () => (
   </span>
 );
 
-export const ProjectHomeView: React.FC<ProjectHomeViewProps> = ({
-  project,
-  events,
-  eventsError,
-  onOpenNewDoor,
-  onClaimNewProject,
-  onSelectTab,
-  github,
-  doors,
-  doorsError,
-  onConnectGitHub,
-  onAddRepositories,
-  onCheckLock,
-  onSelectDoor
-}) => {
-  if (!project) {
+const EmptyProjectsWithGitHub: React.FC<{
+  github: GitHubStatus | null;
+  onClaimNewProject: () => void;
+  onClaimWithRepo: (fullName: string) => void;
+  onConnectGitHub: () => void;
+}> = ({ github, onClaimNewProject, onClaimWithRepo, onConnectGitHub }) => {
+  const [repos, setRepos] = useState<GitHubRepository[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (github?.connected) {
+      setLoading(true);
+      fetchGitHubRepositories()
+        .then(setRepos)
+        .catch(() => setRepos([]))
+        .finally(() => setLoading(false));
+    }
+  }, [github?.connected]);
+
+  if (!github?.connected) {
     return (
       <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-12 text-center space-y-5 shadow-xl">
         <div className="w-14 h-14 rounded-2xl bg-indigo-600/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 mx-auto">
@@ -172,16 +177,126 @@ export const ProjectHomeView: React.FC<ProjectHomeViewProps> = ({
             Claiming a project records it, with your own statement of its purpose, in a tamper-evident event log.
           </p>
         </div>
-        <div className="flex justify-center gap-3 pt-2">
+        <div className="flex flex-wrap justify-center gap-3 pt-2">
+          {github && !github.connected && (
+            <button
+              onClick={onConnectGitHub}
+              className="bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-700 text-xs font-semibold px-4 py-2.5 rounded-xl flex items-center gap-2 transition-colors"
+            >
+              <span>Connect GitHub Organization</span>
+            </button>
+          )}
           <button
             onClick={onClaimNewProject}
-            className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-5 py-3 rounded-xl flex items-center gap-2 transition-colors"
+            className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-5 py-2.5 rounded-xl flex items-center gap-2 transition-colors"
           >
             <Plus className="w-4 h-4" />
             <span>Claim Your First Project</span>
           </button>
         </div>
       </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-6 shadow-xl space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-800 pb-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+              <FolderLock className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold text-zinc-100">Your GitHub Repositories</h2>
+              <p className="text-xs text-zinc-400">
+                Connected to GitHub as <span className="text-indigo-400 font-medium">@{github.account_login}</span>. Choose a repository below to claim and bring under Custody Core protection:
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClaimNewProject}
+            className="bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-700 text-xs font-medium px-3.5 py-2 rounded-xl flex items-center gap-1.5 self-start sm:self-auto transition-colors"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>Custom Project</span>
+          </button>
+        </div>
+
+        {loading ? (
+          <div className="flex items-center justify-center py-12 gap-2 text-xs text-zinc-400 font-mono">
+            <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
+            <span>Loading repositories from GitHub...</span>
+          </div>
+        ) : repos.length === 0 ? (
+          <div className="text-center py-8 space-y-2">
+            <p className="text-xs text-zinc-400">No repositories are shared with the GitHub App yet.</p>
+            <button
+              onClick={onConnectGitHub}
+              className="text-xs text-indigo-400 hover:text-indigo-300 font-medium"
+            >
+              Update repository permissions on GitHub
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+            {repos.map((r) => (
+              <div
+                key={r.id}
+                className="bg-zinc-900/60 border border-zinc-800 hover:border-zinc-700 rounded-xl p-4 flex flex-col justify-between gap-3 transition-colors"
+              >
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-zinc-100 font-mono truncate">{r.full_name}</span>
+                    <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400">
+                      {r.private ? 'Private' : 'Public'}
+                    </span>
+                  </div>
+                  {r.description && (
+                    <p className="text-xs text-zinc-400 line-clamp-2">{r.description}</p>
+                  )}
+                </div>
+                <div className="flex justify-end pt-1">
+                  <button
+                    onClick={() => onClaimWithRepo(r.full_name)}
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Claim & Protect</span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export const ProjectHomeView: React.FC<ProjectHomeViewProps> = ({
+  project,
+  events,
+  eventsError,
+  onOpenNewDoor,
+  onClaimNewProject,
+  onClaimWithRepo,
+  onSelectTab,
+  github,
+  doors,
+  doorsError,
+  onConnectGitHub,
+  onAddRepositories,
+  onCheckLock,
+  onSelectDoor
+}) => {
+  if (!project) {
+    return (
+      <EmptyProjectsWithGitHub
+        github={github}
+        onClaimNewProject={onClaimNewProject}
+        onClaimWithRepo={onClaimWithRepo || onClaimNewProject}
+        onConnectGitHub={onConnectGitHub}
+      />
     );
   }
 

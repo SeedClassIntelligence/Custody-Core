@@ -87,9 +87,11 @@ export async function startGitHubInstall(): Promise<string> {
 
 export interface GitHubRepository {
   id: number;
+  name?: string;
   full_name: string;
   default_branch: string;
   private: boolean;
+  description?: string | null;
 }
 
 export async function fetchGitHubRepositories(): Promise<GitHubRepository[]> {

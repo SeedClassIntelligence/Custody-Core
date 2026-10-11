@@ -140,9 +140,11 @@ export function forgetInstallationTokens(installationId?: number) {
 
 export interface GitHubRepository {
   id: number;
+  name?: string;
   full_name: string;
   default_branch: string;
   private: boolean;
+  description?: string | null;
 }
 
 /** Repositories the installation can see (up to 1,000). */
@@ -154,7 +156,14 @@ export async function installationRepositories(installationId: number): Promise<
     const body = await call(`${config.apiUrl}/installation/repositories?per_page=100&page=${page}`, { bearer: token });
     const repos = Array.isArray(body?.repositories) ? body.repositories : [];
     for (const r of repos) {
-      out.push({ id: Number(r.id), full_name: String(r.full_name), default_branch: String(r.default_branch || 'main'), private: !!r.private });
+      out.push({
+        id: Number(r.id),
+        name: r.name ? String(r.name) : undefined,
+        full_name: String(r.full_name),
+        default_branch: String(r.default_branch || 'main'),
+        private: !!r.private,
+        description: r.description ? String(r.description) : null
+      });
     }
     if (repos.length < 100) break;
   }
