@@ -82,7 +82,10 @@ If the server can never reach the database with the admin account (for example y
 
 ## Deploying the app
 
-Quickest: Render's free plan with the included `render.yaml`, step by step in `docs/deploy/RENDER.md`.
+On your own server (for example a DigitalOcean droplet with Docker): one script does everything,
+`sudo bash docs/deploy/setup-server.sh`, described at the top of that file.
+
+Or, quickest with an account: Render's free plan with the included `render.yaml`, step by step in `docs/deploy/RENDER.md`.
 
 Custody Core is one long-running Node server (API plus the built browser app). It needs a host that runs a
 process or a container: Render, Railway, Fly.io, Google Cloud Run and similar. Not serverless functions.
