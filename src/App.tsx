@@ -27,8 +27,6 @@ import { AcceptanceSuiteView } from './components/AcceptanceSuiteView';
 import { WelcomeSetupModal } from './components/WelcomeSetupModal';
 import { ClaimProjectModal } from './components/ClaimProjectModal';
 import { OpenDoorModal } from './components/OpenDoorModal';
-import { ClosingReportModal } from './components/ClosingReportModal';
-import { DeveloperInviteModal } from './components/DeveloperInviteModal';
 import { RoleMode } from './types/custody';
 import { AuthGate, AuthInfo } from './auth/AuthGate';
 
@@ -96,8 +94,6 @@ function Workspace({ auth }: { auth: AuthInfo }) {
   const [isClaimOpen, setIsClaimOpen] = useState(false);
   const [claimRepoInitial, setClaimRepoInitial] = useState<string | null>(null);
   const [isOpenDoorOpen, setIsOpenDoorOpen] = useState(false);
-  const [isInviteOpen, setIsInviteOpen] = useState(false);
-  const [isClosingReportOpen, setIsClosingReportOpen] = useState(false);
 
   // Everything shown comes from the server. The browser keeps no copy.
   useEffect(() => {
@@ -192,7 +188,6 @@ function Workspace({ auth }: { auth: AuthInfo }) {
   }
 
   const activeProject = state.projects.find((p) => p.id === state.activeProjectId) || null;
-  const selectedDoor = state.doors.find((d) => d.id === selectedDoorId) || state.doors[0] || null;
   const selectedServerDoor = doors.find((d) => d.id === selectedDoorId) || doors[0] || null;
 
   const reloadProjects = async () => {
@@ -392,11 +387,6 @@ function Workspace({ auth }: { auth: AuthInfo }) {
         />
       )}
 
-      {selectedDoor && (
-        <DeveloperInviteModal isOpen={isInviteOpen} onClose={() => setIsInviteOpen(false)} door={selectedDoor} />
-      )}
-
-      <ClosingReportModal isOpen={isClosingReportOpen} onClose={() => setIsClosingReportOpen(false)} report={null} />
     </div>
   );
 }

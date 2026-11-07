@@ -44,7 +44,7 @@ export const MirrorBackupView: React.FC<MirrorBackupViewProps> = ({ project }) =
           <h2 className="text-lg font-bold text-zinc-100">Export Everything</h2>
           <p className="text-xs text-zinc-400 leading-relaxed max-w-2xl">
             Downloads your project record and its full event log, with a manifest listing the SHA-256 hash of each file.
-            Code backups (git bundles) are not included because they are not connected yet.
+            Code backups (git bundles) are not in this download: they are taken when a door closes and downloaded from that door's page.
           </p>
         </div>
         <button
@@ -66,11 +66,11 @@ export const MirrorBackupView: React.FC<MirrorBackupViewProps> = ({ project }) =
         <div className="space-y-1">
           <div className="flex items-center gap-2 font-semibold text-amber-200">
             <HardDrive className="w-4 h-4" />
-            <span>Backup Mirror: Not connected yet</span>
+            <span>Backup storage you own: not connected yet</span>
           </div>
           <p className="text-[11px] text-amber-300/80">
-            Backup snapshots will be written to storage that you own once repository access and storage are connected.
-            No storage is connected and no snapshots exist.
+            When a door closes, a backup snapshot (a git bundle with its SHA-256) is stored on this server and can be downloaded from the
+            door's page. Storage that you own (your own bucket or drive) is not connected yet, so keep your own copy of each bundle.
           </p>
         </div>
       </div>

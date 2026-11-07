@@ -172,38 +172,6 @@ export interface CustodyEvent {
   canonical_payload?: string | null;
 }
 
-export interface ClosingReport {
-  door_id: string;
-  developer_email: string;
-  job_description: string;
-  closed_at: string;
-  closed_reason: string;
-  duration_active_minutes: number;
-  work_preserved: {
-    branches_mirrored: string[];
-    mirror_snapshot_id: string;
-    sha256: string;
-    storage_uri: string;
-    commits_count: number;
-  };
-  credentials_revoked: {
-    gateway_token_revoked_at: string;
-    coder_workspace_identity_deleted_at: string;
-    infisical_secrets_machine_identity_deleted_at: string;
-  };
-  workspace_destroyed: {
-    coder_workspace_id: string;
-    k8s_namespace_deleted: string;
-    storage_volume_erased: boolean;
-    destroyed_at: string;
-  };
-  checklist_items: Array<{
-    item: string;
-    status: 'automated_complete' | 'creator_verify';
-    description: string;
-  }>;
-}
-
 export interface AcceptanceTestResult {
   id: number;
   name: string;
