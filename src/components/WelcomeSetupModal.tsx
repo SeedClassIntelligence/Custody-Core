@@ -24,10 +24,10 @@ const STEPS = [
   },
   {
     id: 3,
-    label: '3. Backup Mirror',
+    label: '3. Backups',
     icon: HardDrive,
-    title: 'Connect your backup storage',
-    body: 'Snapshots of your code will be copied into storage that you own, so your archive survives even if GitHub does not.'
+    title: 'Backups when a door closes',
+    body: 'When a door closes, a snapshot of its repositories is stored on the Custody Core server and you download it from the door\'s page. Storage that you own is not connected yet, so keep your own copy of each download.'
   }
 ];
 
@@ -84,7 +84,7 @@ export const WelcomeSetupModal: React.FC<WelcomeSetupModalProps> = ({ isOpen, on
           ) : (
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-950/60 border border-amber-800/80 text-amber-300 text-xs font-mono font-medium">
               <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
-              <span>{step.id === 2 ? 'Not connected: use "Connect GitHub" in the top bar' : 'Not connected yet'}</span>
+              <span>{step.id === 2 ? 'Not connected: use "Connect GitHub" in the top bar' : 'Storage you own: not connected yet'}</span>
             </div>
           )}
           <div className="flex items-center justify-center gap-2 text-zinc-100">

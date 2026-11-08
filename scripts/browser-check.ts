@@ -186,7 +186,7 @@ async function main() {
     await shot(page, '02-setup-guide-step1');
     await page.getByRole('button', { name: '2. Code Home' }).click();
     await shot(page, '03-setup-guide-step2');
-    await page.getByRole('button', { name: '3. Backup Mirror' }).click();
+    await page.getByRole('button', { name: '3. Backups' }).click();
     await shot(page, '04-setup-guide-step3');
     await page.getByRole('button', { name: 'Close Guide' }).click();
 
@@ -247,8 +247,11 @@ async function main() {
 
     // 7. Developer workspace, demo scenarios.
     await page.getByRole('button', { name: /Developer Workspace/ }).click();
-    await page.getByText('Developer Workspace: Not connected yet').waitFor();
-    check(true, 'Developer Workspace says Not connected yet');
+    await page.getByText('Doors you were invited to').waitFor();
+    check(
+      (await page.getByText('Sandboxed workspaces are not connected yet').count()) > 0,
+      'Developer Workspace says sandboxed workspaces are not connected yet'
+    );
     await shot(page, '11-developer-workspace');
 
     await page.getByRole('button', { name: /Demo Scenarios/ }).click();
@@ -257,7 +260,7 @@ async function main() {
 
     // 8. Mirror & export: download and independently verify.
     await page.getByRole('button', { name: /Mirror & Export/ }).click();
-    await page.getByText('Backup Mirror: Not connected yet').waitFor();
+    await page.getByText('Backup storage you own: not connected yet').waitFor();
     check(
       !(await page.getByRole('button', { name: /Developer Workspace/ }).getAttribute('class'))!.includes('bg-indigo-600'),
       'only the current tab is highlighted (Developer Workspace is not, on Mirror & Export)'

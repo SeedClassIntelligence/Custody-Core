@@ -68,9 +68,6 @@ export const Header: React.FC<HeaderProps> = ({
           <span className="font-mono text-zinc-400">Custody Core</span>
           <span className="text-zinc-600">|</span>
           <span className="text-zinc-300">Phase 1: Custody Core</span>
-          <span className="rounded bg-indigo-950/80 border border-indigo-700/60 px-1.5 py-0.5 text-[10px] font-medium text-indigo-300">
-            Milestone 3 Active
-          </span>
         </div>
 
         <div className="flex items-center gap-3 text-[11px] text-zinc-400">

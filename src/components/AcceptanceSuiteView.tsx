@@ -19,7 +19,8 @@ const SPEC_SCENARIOS: AcceptanceTestResult[] = [
     status: 'idle',
     log: [
       'Spec Requirement: Zero visits to github.com after one-time app connection.',
-      'Verification path: Creator runs entirely through Custody Core dashboard and Git Gateway.'
+      'Verification path: Creator runs entirely through Custody Core dashboard and Git Gateway.',
+      'Largely built: after connecting the GitHub App once, repositories, locks, doors, invitations and closing are all done in Custody Core. Not checked end to end against real GitHub yet (docs/GITHUB_APP_SETUP.md, "How this is tested").'
     ]
   },
   {
@@ -61,7 +62,8 @@ const SPEC_SCENARIOS: AcceptanceTestResult[] = [
     description: 'From the workspace, git push to any outside server fails, and outbound web requests to unapproved domains fail.',
     status: 'idle',
     log: [
-      'Spec Requirement: Strict Cilium egress network policies on Coder Kubernetes pod.'
+      'Spec Requirement: Strict Cilium egress network policies on Coder Kubernetes pod.',
+      'Not built: there are no sandboxed workspaces. Developers work on their own machine with git pointed at Custody Core.'
     ]
   },
   {
@@ -100,7 +102,8 @@ const SPEC_SCENARIOS: AcceptanceTestResult[] = [
     description: 'If a step in Open Door or Close Door fails mid-execution, compensating activities cleanly roll back partial state.',
     status: 'idle',
     log: [
-      'Spec Requirement: Sagas guarantee zero orphaned machine identities or credentials.'
+      'Spec Requirement: Sagas guarantee zero orphaned machine identities or credentials.',
+      'Not built: there is no workflow engine. Door steps are written to the record one by one; there is no automatic rollback.'
     ]
   },
   {
@@ -129,7 +132,8 @@ const SPEC_SCENARIOS: AcceptanceTestResult[] = [
     description: 'Export everything produces an archive whose manifest hashes match every file, and a repository restores from its bundle with git clone.',
     status: 'idle',
     log: [
-      'Spec Requirement: SHA-256 integrity manifest and git bundle creation.'
+      'Spec Requirement: SHA-256 integrity manifest and git bundle creation.',
+      'Built: Export Everything downloads the project record and event log with a SHA-256 manifest (tests/export.test.ts); git bundles are taken when a door closes and verified with git bundle verify (tests/scheduler.test.ts).'
     ]
   },
   {
@@ -143,6 +147,13 @@ const SPEC_SCENARIOS: AcceptanceTestResult[] = [
     ]
   }
 ];
+
+type ScenarioStatus = 'built' | 'partial' | 'not_built';
+// Matches the notes in each scenario's log above. Update both together.
+const SCENARIO_STATUS: Record<number, ScenarioStatus> = {
+  1: 'partial', 2: 'built', 3: 'built', 4: 'built', 5: 'not_built', 6: 'built', 7: 'partial',
+  8: 'built', 9: 'not_built', 10: 'built', 11: 'built', 12: 'built', 13: 'built'
+};
 
 export const AcceptanceSuiteView: React.FC = () => {
   const [expandedId, setExpandedId] = useState<number | null>(null);
@@ -174,7 +185,7 @@ export const AcceptanceSuiteView: React.FC = () => {
             </h2>
           </div>
           <p className="text-xs text-zinc-400 leading-relaxed max-w-2xl">
-            Each milestone implements and tests a specific subset of these 13 criteria. Tests exist for #10 (append-only database rule) and #13 (multi-tenant isolation). This page does not run them or show their results; run npm test for that.
+            Each criterion is marked built, partly built or not built, with the test file that covers it. #5 and #9 are not built. This page does not run any test or show results; run npm test for that.
           </p>
         </div>
       </div>
@@ -183,8 +194,7 @@ export const AcceptanceSuiteView: React.FC = () => {
       <div className="border border-zinc-800 rounded-2xl overflow-hidden bg-zinc-950 divide-y divide-zinc-800/80 shadow-xl">
         {SPEC_SCENARIOS.map((scenario) => {
           const isExpanded = expandedId === scenario.id;
-          const isCovered = scenario.id === 10;
-          const failsOnPurpose = scenario.id === 13;
+          const status = SCENARIO_STATUS[scenario.id] ?? 'not_built';
 
           return (
             <div key={scenario.id} className="p-4 transition-colors hover:bg-zinc-900/30 text-xs">
@@ -201,17 +211,17 @@ export const AcceptanceSuiteView: React.FC = () => {
                       <span className="font-semibold text-zinc-100">
                         {scenario.name}
                       </span>
-                      {isCovered ? (
+                      {status === 'built' ? (
                         <span className="bg-emerald-950 text-emerald-300 border border-emerald-800 px-2 py-0.2 rounded text-[10px] font-mono">
-                          Has a test: see npm test
+                          Built: has tests, see npm test
                         </span>
-                      ) : failsOnPurpose ? (
-                        <span className="bg-rose-950 text-rose-300 border border-rose-800 px-2 py-0.2 rounded text-[10px] font-mono">
-                          Has a test: see npm test (expected to fail until Milestone 2)
+                      ) : status === 'partial' ? (
+                        <span className="bg-amber-950 text-amber-300 border border-amber-800 px-2 py-0.2 rounded text-[10px] font-mono">
+                          Partly built
                         </span>
                       ) : (
                         <span className="bg-zinc-900 text-zinc-500 border border-zinc-800 px-2 py-0.2 rounded text-[10px] font-mono">
-                          Scheduled for Later Milestone
+                          Not built
                         </span>
                       )}
                     </div>
