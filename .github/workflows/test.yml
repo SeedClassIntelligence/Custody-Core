@@ -1,0 +1,54 @@
+name: Tests
+
+# Runs the same checks as a developer would locally: type check, production build, and the whole test suite.
+# GitHub's Ubuntu runners include Docker, so the login tests run against the real local Supabase Auth stack
+# (the Supabase CLI's local stack), not a mock. If that stack cannot start, those tests fail with the reason:
+# a green run therefore means the login tests really ran.
+# Nothing here uses a secret or touches a hosted Supabase project; tests refuse to run against one.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Playwright is only for the local browser check; the test suite does not need its browser download.
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      DO_NOT_TRACK: "1"
+      SUPABASE_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Type check
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Tests
+        run: npm test
+
+      - name: Auth stack log (only if the tests failed)
+        if: failure()
+        run: |
+          docker ps -a || true
+          npm run auth-stack:status || true
