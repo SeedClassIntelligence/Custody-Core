@@ -38,7 +38,7 @@ export async function startEmbeddedTestDb(port?: number): Promise<EmbeddedTestDb
     port: chosenPort,
     persistent: false,
     // Match production: UTF8 with a non-C collation, so ordering bugs show up in tests.
-    initdbFlags: ['--encoding=UTF8', '--locale=C.utf8', '--locale-provider=icu', '--icu-locale=en-US'],
+    initdbFlags: ['--encoding=UTF8', process.platform === 'win32' ? '--locale=C' : '--locale=C.utf8', '--locale-provider=icu', '--icu-locale=en-US'],
     createPostgresUser: process.getuid?.() === 0,
     onLog: () => {},
     onError: () => {}
