@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import { getDbPool } from './db';
-import { githubConfig } from './github';
+import { githubRef, providerFor } from './repositoryProvider';
+import './githubProvider';
 import { afterDoorClosed, closeDoorInTransaction, onDoorClosed } from './doorLifecycle';
 import { applyLock } from './lockService';
 import { backupDirIsDefault, takeDoorSnapshot } from './snapshots';
@@ -102,7 +103,7 @@ export async function takeDueSnapshots(pool: pg.Pool): Promise<number> {
 
 /** Re-checks repository locks not checked in the last LOCK_CHECK_HOURS. */
 export async function checkDueLocks(pool: pg.Pool, olderThanHours = lockCheckHours()): Promise<number> {
-  if (!githubConfig()) return 0;
+  if (!providerFor('github').isConfigured()) return 0;
   const repos = (await pool.query(
     `SELECT r.*, p.id AS project_id_for_lock, gi.installation_id
        FROM repository r JOIN project p ON p.id = r.project_id JOIN github_installation gi ON gi.creator_id = p.creator_id
@@ -128,7 +129,7 @@ export async function checkDueLocks(pool: pg.Pool, olderThanHours = lockCheckHou
         client.release();
       }
       if (!fresh) continue;
-      await applyLock(pool, r.project_id_for_lock, { type: 'system', id: 'scheduler' }, Number(r.installation_id), fresh, { quietWhenUnchanged: true });
+      await applyLock(pool, r.project_id_for_lock, { type: 'system', id: 'scheduler' }, githubRef({ id: fresh.id, full_name: fresh.full_name, installation_id: r.installation_id }), fresh, { quietWhenUnchanged: true });
       checked++;
     } catch (err: any) {
       console.error('[scheduler] lock check failed:', err?.message ?? err);

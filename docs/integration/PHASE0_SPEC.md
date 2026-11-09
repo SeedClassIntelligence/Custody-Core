@@ -384,7 +384,7 @@ Precondition (met): the CI workflow is on `main`, so every phase's gate runs on 
 2. Scopes, revocation, tenant isolation. Gate: CL-08.
 3. Work sessions, backfill, human approval. Gate: CL-09, CL-20. (Built without issuing credentials, on purpose: a credential handed out before the allowed and prohibited paths can be enforced would grant more than the request asked for. Session credentials arrive in Phase 5, together with path enforcement.)
 4. Namespaced context in the ledger. Gate: CL-10. (Built as migration 013; because the context is plain data that the platform must never act on, the same phase also puts **every free-text field of a session request through the secret scanner** before it is recorded: the record is permanent.)
-5. Repository provider interface, materialization, **path enforcement in pre-receive**, and **session credentials** (a `ccg_` credential bound to an approved session, accepted only for `session/<id>/` and its allowed paths). Gate: CL-11.
+5. Repository provider interface, materialization, **path enforcement in pre-receive**, and **session credentials** (a `ccs_` credential, in its own table so door credentials stay untouched, bound to an approved session and accepted only for `session/<id>/` and its allowed paths; see `PHASE5_DESIGN.md`). Gate: CL-11.
 6. Evidence. Gate: CL-12.
 7. Attribution and attestations (014, part). Gate: CL-13 (attestation gated by decision 3).
 8. Promotion. Gate: CL-14.
@@ -405,7 +405,9 @@ Precondition (met): the CI workflow is on `main`, so every phase's gate runs on 
 - Phase 4 (namespaced external context): built. Migration 013, `server/externalContext.ts`, `server/textScan.ts`; gate `tests/external_context.test.ts` (27 tests).
   Deviations from the original design: the context columns are nullable and all-or-nothing (the design had `payload NOT NULL DEFAULT '{}'`), a SHA-256 binds namespace and data, numbers in the
   context must be whole numbers within 2^53 - 1 (anything else is sent as text, so the ledger can always re-derive the hash), and every free-text field of a request is scanned for secrets (TM-11).
-- Phases 5 to 12: not started.
+- Phase 5: **design note written, awaiting the owner's decisions**: `docs/integration/PHASE5_DESIGN.md`, with a reproducible prototype of the filtered-view and push-translation plumbing in
+  `docs/integration/phase5-spike/` (24 of 24 checks pass). Owner accepted decisions D1 to D9 on the condition of alignment with the plan (checked in the note, section 9). **5a built** (provider interface, behavior-preserving); 5b and 5c not started. Its migration will be `014`; attribution, attestation, promotion and webhooks move to `015`.
+- Phases 6 to 12: not started.
 
 ## 9. Owner decisions
 

@@ -6,6 +6,7 @@ import { GitHubError, GitHubNotConfigured, installationRepositories } from './gi
 import { installationOf } from './githubRoutes';
 import crypto from 'node:crypto';
 import { applyLock } from './lockService';
+import { githubRef } from './repositoryProvider';
 import { closeDoorInTransaction, afterDoorClosed } from './doorLifecycle';
 import { renderAgreement } from './agreements';
 
@@ -130,7 +131,7 @@ projectExtrasRouter.post('/repositories', async (req, res) => {
     }
     // Lock each one on GitHub. A repository that cannot be locked is still added, with the reason shown.
     const repositories = [];
-    for (const r of added) repositories.push(await applyLock(pool, pid(req), { type: 'creator', id: creator.id }, installation.installation_id, r));
+    for (const r of added) repositories.push(await applyLock(pool, pid(req), { type: 'creator', id: creator.id }, githubRef({ id: r.id, full_name: r.full_name, installation_id: installation.installation_id }), r));
     res.status(201).json({ repositories });
   } catch (err) {
     fail(res, err, 'adding repositories');
@@ -149,7 +150,7 @@ projectExtrasRouter.post('/repositories/:repositoryId/lock', async (req, res) =>
     if (!repo) return res.status(404).json({ error: 'Repository not found.' });
     const installation = await installationOf(creator.id);
     if (!installation) return res.status(409).json({ error: 'Connect GitHub first.' });
-    res.json({ repository: await applyLock(pool, pid(req), { type: 'creator', id: creator.id }, installation.installation_id, repo) });
+    res.json({ repository: await applyLock(pool, pid(req), { type: 'creator', id: creator.id }, githubRef({ id: repo.id, full_name: repo.full_name, installation_id: installation.installation_id }), repo) });
   } catch (err) {
     fail(res, err, 'checking a repository lock');
   }

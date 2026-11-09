@@ -6,7 +6,8 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { getDbPool, insertEvent } from '../db';
-import { GitHubError, GitHubNotConfigured, gitAuthHeader, installationToken, upstreamGitUrl } from '../github';
+import { ProviderError, ProviderNotConfigured, githubRef, providerFor } from '../repositoryProvider';
+import '../githubProvider';
 import { findScanner } from './scanner';
 import { UpstreamError, gitEnv, mirrorPath, refreshMirror, withMirrorLock } from './mirror';
 
@@ -233,15 +234,16 @@ gatewayRouter.use(async (req, res) => {
   const a = result.access;
   if (service === 'git-receive-pack' && a.access !== 'write') return deny(res, 403, 'This door gives read access to this repository, not write access.');
 
+  const provider = providerFor('github');
   let authHeader: string;
+  let upstream: string;
   try {
-    authHeader = gitAuthHeader(await installationToken(a.installationId, a.fullName.split('/')[1]));
+    ({ authHeader, url: upstream } = await provider.remote(githubRef({ id: a.repositoryId, full_name: a.fullName, installation_id: a.installationId })));
   } catch (err: any) {
-    if (err instanceof GitHubNotConfigured) return deny(res, 503, 'The GitHub App is not set up on this server.');
-    console.error('[gateway] installation token:', err?.message ?? err);
-    return deny(res, 502, err instanceof GitHubError ? `GitHub refused access: ${err.message}` : 'GitHub could not be reached.');
+    if (err instanceof ProviderNotConfigured) return deny(res, 503, err.publicMessage);
+    console.error('[gateway] provider credentials:', err?.message ?? err);
+    return deny(res, 502, err instanceof ProviderError ? `${provider.label} refused access: ${err.message}` : `${provider.label} could not be reached.`);
   }
-  const upstream = upstreamGitUrl(a.fullName);
   const dir = mirrorPath(a.doorId, a.repositoryId);
 
   if (endpoint === 'info/refs') {
