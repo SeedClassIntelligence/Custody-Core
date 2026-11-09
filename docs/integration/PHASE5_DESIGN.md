@@ -85,7 +85,7 @@ A production local-filesystem provider (spec section 5) is deferred to the vault
 
 One pure module (`server/pathRules.ts`), no git, tested to exhaustion before anything uses it.
 
-**Dialect.** `*` matches any run of characters except `/`; a whole segment `**` matches zero or more whole segments; `?` matches one character except `/`; everything else is literal. No character classes, no braces, no negation,
+**Dialect.** `*` matches any run of characters except `/`; a whole segment `**` matches zero or more whole segments, except that a **final** `**` needs at least one (`docs/**` is everything under `docs/`, not a file that happens to be called `docs`); `?` matches one character except `/`; everything else is literal. No character classes, no braces, no negation,
 nothing clever. Patterns are validated at request time (Phase 3 already rejects `..`, absolute paths, backslashes, control characters).
 
 **Anchoring.** Patterns are anchored at the repository root, with one exception: a **prohibited** pattern with no `/` (for example `.env*`) matches that name **at any depth**, as `.gitignore` does. Someone who writes `.env*` means every `.env`.
@@ -181,7 +181,11 @@ Real git throughout; a provider double over local bare repositories for most tes
 Three pull requests, each green on GitHub before the next starts:
 
 - **5a. Provider interface. Built.** `server/repositoryProvider.ts` (the interface, `RepositoryRef`, the two error kinds, the registry) and `server/githubProvider.ts` (GitHub behind it). The gateway, the backup snapshots, the lock service, the scheduler and the door routes now ask the provider. Behavior-preserving: **no existing test file was changed** and all of them pass; 15 new tests cover the seam (what it returns and throws, that the returned remote really lets git in and a wrong one does not, read-only credentials, unreachable and unconfigured GitHub, the lock, and a check that those modules no longer import GitHub's functions). The GitHub *connection* flow (listing what the App can see, OAuth) deliberately stays in the GitHub modules: it is not repository access.
-- **5b. Path engine and view builder.** Libraries with their tests; no endpoint, no migration beyond what they need; includes the determinism and leakage tests and a benchmark on a synthetic 20 000-file repository.
+- **5b. Path engine and view builder. Built.** `server/pathRules.ts` (pure) and `server/viewBuilder.ts`, with `npm run bench:view`. No endpoint, no migration, nothing wired into the gateway yet.
+  - `tests/path_rules.test.ts` (90 tests): every rule of the dialect and every refusal, Unicode and case tricks, `.git` in eleven spellings, the CI-file rule, hostile patterns, and a **property test that checks the matcher against a second, independently written one on 15 000 random pairs** plus invariants over random rule sets (write implies read, prohibited beats allowed, no `.git` component is ever writable).
+  - `tests/view_builder.test.ts` (30 tests, real git repositories): exactly the allowed files; none of the excluded **objects** (including a `.env` that exists only in old history), checked by object id and by trying to fetch them from a clone; one commit and no history; deterministic (twice, after deletion, and independent of how the rules are written); symlinks, submodules and non-UTF-8 names omitted and counted but never named; limits at their exact edges; base-commit checks including a commit that exists only on a side branch.
+  - **Benchmark** (`npm run bench:view`, this container): a 20 000-file repository, session allowed to read 7 111 of them: view built in 2.0 s cold, 0.6 s rebuilt, 1.1 MiB on disk; allowed to read **all** 20 000 (the file limit, the worst case): 0.8 s, identical commit on rebuild. The risk "large repositories make the build slow" is small at the design's limits.
+  - **Decisions made while building, for review:** a final `**` needs at least one segment (above); a write needs the path to be *readable* too (no blind writes), as the design said; sensitive CI names match at any depth; the "view" branch is named `main` whatever the real default branch is called.
 - **5c. Credentials, provisioning, the session gateway, events, cleanup.** Migration 014, the endpoint, the hook, the route, the scheduler cleanup, and the end-to-end tests.
 
 ## 8. Risks
@@ -193,6 +197,12 @@ Three pull requests, each green on GitHub before the next starts:
 | An older `git` in the Docker image behaves differently from 2.43 | The build checks and records the version; the hostile matrix runs against the image's git in CI |
 | GitHub-specific behavior not covered by the local prototype | Same push code path and lease semantics as doors, which are already tested against the GitHub stand-in; one end-to-end test through the stand-in |
 | A mistake exposes more than the request allowed | Failure refuses; the credential exists only after a successful build; a leak test asserts the view's object list, not just its file list |
+
+## 8a. Things building 5b added to the list for 5c
+
+1. **An added file must not overwrite a real one.** The view lacks symlinks, submodules and unreadable files, but the real tree has them. A session that "adds" a path that exists in the real parent tree as a symlink or submodule would silently replace it when its commit is replayed. Translation must refuse an **add** whose path exists in the real parent, a **modify or delete** whose path is not a regular file there, and any change whose real parent differs in mode from what the view showed.
+2. **The request check must start using `patternProblem`.** Phase 3 refuses control characters but not invisible or separator ones (zero-width, bidirectional overrides, line separators); `PathRules` refuses them, so a request that Phase 3 accepts could fail at provisioning. A test records this one known difference; wiring `patternProblem` into the request check closes it.
+3. **The path rules and the push check must be the same code**, so one decision serves the view and the push: `PathRules.explainWrite` is the single place a push path is judged.
 
 ## 9. Alignment with the platform's purpose and the build plan
 
