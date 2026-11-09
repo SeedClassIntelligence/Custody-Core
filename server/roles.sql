@@ -35,6 +35,10 @@ REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE account_event FROM custody_app;
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE mfa_legacy_reset FROM custody_app;
 GRANT EXECUTE ON FUNCTION append_account_event(text, text, text, text, jsonb) TO custody_app;
 
+-- Service principals (migration 010). The app has no DELETE anywhere, so expired client assertions are removed
+-- by one narrow SECURITY DEFINER function.
+GRANT EXECUTE ON FUNCTION purge_expired_client_assertions() TO custody_app;
+
 -- The app role must not be able to create objects (for example look-alike functions) in this schema.
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 

@@ -57,6 +57,11 @@ the same authenticator-code step as creators. `docs/AGREEMENT_SIGNATURES.md`.
 Doors close by themselves at their end date (also any missed while the server was down), a backup snapshot (git
 bundle) is taken when a door closes, and repository locks are re-checked every few hours. `docs/SCHEDULER.md`.
 
+## Machine callers
+
+Automated callers (CI, agents, other platforms) log in to `/api/v2/*` with a signed assertion, as a service principal
+provisioned with `npm run principal`. `docs/SERVICE_PRINCIPALS.md`; the plan is `docs/integration/PHASE0_SPEC.md`.
+
 ## Deploying
 
 `npm run build` then `npm start` (or the `Dockerfile`). Step by step, with every setting the host needs:
