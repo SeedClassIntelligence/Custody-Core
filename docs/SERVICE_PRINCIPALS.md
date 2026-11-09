@@ -1,6 +1,6 @@
 # Service principals (machine callers)
 
-Phase 1 of `docs/integration/PHASE0_SPEC.md`. A service principal is a machine caller (an orchestrator, an IDE, CI, an
+Phases 1 and 2 of `docs/integration/PHASE0_SPEC.md`. A service principal is a machine caller (an orchestrator, an IDE, CI, an
 automated agent) that logs in to `/api/v2/*` with a signed assertion instead of a person's password and authenticator
 code. The person login on `/api/v1/*` is unchanged.
 
@@ -9,12 +9,16 @@ code. The person login on `/api/v1/*` is unchanged.
 | Built | Not built yet (later phases) |
 |---|---|
 | Principals, owned by one creator, with stored scopes | Anything a principal can *do*: work sessions, evidence, promotion |
-| Public-key registry (Ed25519 and ES256), revocation, suspension | Separation rules between execution and approval scopes (Phase 2) |
+| Public-key registry (Ed25519 and ES256), revocation, suspension | Approval by policy (needs the approval endpoints, Phases 3 and 8) |
 | Assertion login with replay protection | A screen for managing principals (provisioning is a command-line script) |
-| `GET /api/v2/whoami`, to prove the login | Limits on repeated failed attempts from one address |
-| Every registration, key change and revocation on the creator's tamper-evident account record | |
+| Scope enforcement (`requireScope`, 403) and project access (`requireProjectAccess`, 404) | Limits on repeated failed attempts from one address |
+| Separation of duties between working scopes and approving scopes, enforced by the database | |
+| Permissions that can only be narrowed after creation | |
+| `GET /api/v2/whoami`, to prove the login | |
+| Every registration, key change, narrowing and revocation on the creator's tamper-evident account record | |
 
-Scopes are stored and returned by `whoami`, but no endpoint checks them yet. `requireScope()` exists for the next phase.
+Scopes are stored per principal and returned by `whoami`. No product endpoint requires one yet (the work-session endpoints arrive in
+Phase 3); the enforcement is built and tested on real requests, ready for them.
 
 ## Provisioning (operator)
 
@@ -43,7 +47,21 @@ registration that contains one.
 
 Scopes: `work-sessions:request`, `work-sessions:read`, `work-sessions:close-own`, `evidence:submit`,
 `repositories:push-session` (execution), and `work-sessions:approve`, `repositories:promote`, `principals:manage`,
-`webhooks:manage` (consequential; kept apart from the execution scopes in Phase 2).
+`webhooks:manage` (consequential).
+
+**Separation of duties.** A principal that holds any consequential scope cannot hold `work-sessions:request`, `evidence:submit` or
+`repositories:push-session`: whoever does the work, or vouches for it, cannot be the one who approves, promotes or manages it. It may hold
+`work-sessions:read`. Use two principals if you need both roles. The database enforces this, so no script or direct SQL can create or edit
+a principal into breaking it. (`create` says so plainly if you try.)
+
+**Permissions only shrink.** After creation a principal's scopes and project list can be reduced, never enlarged, and its environment never
+changes. The database enforces this too. To give a caller more, create a new principal with its own keys.
+
+```bash
+npm run principal -- narrow --principal <id> --scopes work-sessions:read          # keep only these scopes
+npm run principal -- narrow --principal <id> --projects <project id>,<project id>  # limit to these projects
+```
+Narrowing is recorded (`service_principal.narrowed`, with the scopes and projects before and after) and takes effect on the next request.
 
 ## Calling the API (machine caller)
 
@@ -73,6 +91,21 @@ function assertion({ privateJwk, kid, principalId }) {
 For ES256, sign with `crypto.sign('sha256', data, { key, dsaEncoding: 'ieee-p1363' })`: JWS wants the raw 64-byte
 `r || s` form, not OpenSSL's default DER form (which is refused).
 
+## Enforcement (for the code that builds `/api/v2` routes)
+
+```ts
+v2Router.post('/projects/:projectId/work-sessions',
+  requireScope('work-sessions:request'),   // 403 if this principal's stored scopes lack it
+  requireProjectAccess(),                  // 404 unless the project is this creator's and on the principal's list
+  handler);
+```
+- Always after `authenticatePrincipal`: no valid credential is a 401 before it is ever a 403.
+- Scopes and the project list are read from the database on every request, so narrowing, suspending and revoking apply at once.
+- `requireScope` throws when the route is defined if the scope name is not in the registry, so a typo cannot silently mean "no scope needed".
+- Put `requireScope` before `requireProjectAccess`: a caller without the scope is told 403 whatever the project, so it learns nothing about
+  which projects exist. A project that does not exist, belongs to another creator, or is outside the principal's list all answer the same 404.
+- Project ownership is checked against the creator every time, even when the principal's list names the project.
+
 ## What the server checks, in order
 
 1. The header's algorithm is `EdDSA` or `ES256` and is the registered algorithm of the key `kid` names. Keys carried in the
@@ -99,5 +132,5 @@ Operator actions are recorded as actor `system` with `cli:<operating system user
 
 ## Tests
 
-`tests/service_principal.test.ts` (registry, keys, guards, permissions) and `tests/assertion_auth.test.ts` (the login,
-over real HTTP). Neither needs Docker.
+`tests/service_principal.test.ts` (registry, keys, guards, permissions), `tests/assertion_auth.test.ts` (the login, over real HTTP) and
+`tests/scopes.test.ts` (separation, narrowing, scope and project enforcement over real HTTP). None needs Docker.

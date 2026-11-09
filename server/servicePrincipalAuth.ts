@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import express from 'express';
 import type pg from 'pg';
 import { getDbPool } from './db';
-import type { KeyAlgorithm, PublicJwk } from './servicePrincipals';
+import { ALL_SCOPES, type KeyAlgorithm, type PublicJwk } from './servicePrincipals';
 
 /**
  * Login for machine callers on /api/v2. Not the person login (that is /api/v1, untouched).
@@ -171,11 +171,47 @@ export const authenticatePrincipal: express.RequestHandler = async (req, res, ne
   }
 };
 
-/** For routes that need a scope: 403 unless this principal's stored scopes include it. */
+/**
+ * For routes that need a scope: 403 unless this principal's stored scopes include it. The scopes are read from the
+ * database on every request (see verifyClientAssertion), so narrowing, suspending or revoking is effective at once.
+ * Put it after authenticatePrincipal: a caller with no valid credential is a 401 before it is ever a 403.
+ */
 export function requireScope(scope: string): express.RequestHandler {
+  // A typo in a route would otherwise make it unreachable for everyone, or worse, read as "no scope needed".
+  if (!ALL_SCOPES.includes(scope)) throw new Error(`requireScope: "${scope}" is not a known scope.`);
   return (_req, res, next) => {
     if (!principalOf(res).scopes.includes(scope)) return res.status(403).json({ error: `This credential does not have the ${scope} scope.` });
     next();
+  };
+}
+
+/** Whether this principal may act on this project: the creator's own project, and on the principal's list if it has one. */
+export async function projectAccessible(pool: pg.Pool, principal: AuthenticatedPrincipal, projectId: string): Promise<boolean> {
+  if (!UUID.test(projectId)) return false;
+  if (principal.allowedProjectIds && !principal.allowedProjectIds.includes(projectId)) return false;
+  // Always checked against the creator, even when the list names the project: a list is not proof of ownership.
+  const r = await pool.query('SELECT 1 FROM project WHERE id = $1 AND creator_id = $2', [projectId, principal.creatorId]);
+  return r.rowCount === 1;
+}
+
+/**
+ * For routes with a project id in the path. A project that does not exist, belongs to another creator, or is
+ * outside this principal's project list all answer 404, so a caller cannot find out which projects exist.
+ * Order scope checks before this one: a caller without the scope gets 403 whatever the project.
+ */
+export function requireProjectAccess(param = 'projectId'): express.RequestHandler {
+  return async (req, res, next) => {
+    const pool = getDbPool();
+    if (!pool) return res.status(503).json({ error: 'Database not connected.' });
+    try {
+      if (!(await projectAccessible(pool, principalOf(res), String(req.params[param] ?? '')))) {
+        return res.status(404).json({ error: 'No such project.' });
+      }
+      next();
+    } catch (err: any) {
+      console.error('[principal-auth] project access check failed:', err?.message ?? err);
+      return res.status(500).json({ error: 'Something went wrong on the server.' });
+    }
   };
 }
 

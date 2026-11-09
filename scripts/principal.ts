@@ -10,6 +10,7 @@ import {
   PrincipalError,
   addPrincipalKey,
   listPrincipals,
+  narrowPrincipal,
   registerPrincipal,
   revokeKey,
   setPrincipalStatus,
@@ -25,6 +26,7 @@ import {
  *                               --scopes a,b,c [--projects <id>,<id>] [--expires <ISO time>]
  *   npm run principal -- add-key --principal <id> --public-key <public jwk file> [--expires <ISO time>]
  *   npm run principal -- list --creator <creator id>
+ *   npm run principal -- narrow --principal <id> [--scopes a,b] [--projects <id>,<id>]   (only ever removes permissions)
  *   npm run principal -- suspend|activate|revoke --principal <id>
  *   npm run principal -- revoke-key --key <key id>
  *
@@ -113,6 +115,18 @@ async function main() {
         }
         break;
       }
+      case 'narrow':
+        await narrowPrincipal(
+          pool,
+          need(a, 'principal'),
+          {
+            ...(a.scopes !== undefined ? { allowed_scopes: a.scopes.split(',').map((x) => x.trim()).filter(Boolean) } : {}),
+            ...(a.projects !== undefined ? { allowed_project_ids: a.projects.split(',').map((x) => x.trim()).filter(Boolean) } : {})
+          },
+          by()
+        );
+        console.log('Narrowed. Permissions can be removed this way, never added: for more, create a new principal.');
+        break;
       case 'suspend':
         await setPrincipalStatus(pool, need(a, 'principal'), 'suspended', by());
         console.log('Suspended.');
@@ -130,7 +144,7 @@ async function main() {
         console.log('Key revoked. This cannot be undone.');
         break;
       default:
-        console.error(`Unknown command "${command ?? ''}". Commands: keygen, create, add-key, list, suspend, activate, revoke, revoke-key.`);
+        console.error(`Unknown command "${command ?? ''}". Commands: keygen, create, add-key, list, narrow, suspend, activate, revoke, revoke-key.`);
         console.error(`Scopes: ${ALL_SCOPES.join(', ')}`);
         process.exitCode = 2;
     }

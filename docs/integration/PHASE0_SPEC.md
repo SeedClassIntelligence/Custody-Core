@@ -23,7 +23,7 @@ They are fixed below. A reviewer comparing the two should look at these:
 | C10 | RS256 supported | Dropped until a real integration needs it. EdDSA and ES256 only. The JWT `alg` header is pinned to the registered key's algorithm (blocks algorithm confusion, `alg: none`). |
 | C11 | Machine requests land under `apiRouter.use(authenticate)` implicitly | `/api/v2` gets its own principal authentication middleware. The `/api/v1` human middleware is not touched. |
 | C12 | "New tables need Data API lockdown" (my earlier message) | **Retracted.** `server/lockdown.sql` already runs inside every migration and closes the Supabase REST API to every table. What is actually needed is `server/roles.sql` changes (section 3.4) and test coverage. |
-| C13 | Doors map to sessions "automatically" | Existing doors need a **backfill** in migration 011, and door creation in v1 gains a non-breaking insert. Specified in section 6. |
+| C13 | Doors map to sessions "automatically" | Existing doors need a **backfill** in migration 012, and door creation in v1 gains a non-breaking insert. Specified in section 6. |
 
 The first draft's example `base_commit` (`d5db881372b22bb8fa8f5c1e2b904d6e80123456`) was a short hash padded with invented digits. Examples
 below use obviously fake values.
@@ -177,7 +177,7 @@ CREATE TABLE approval_policy (                                          -- C8
 -- rule and rule_sha256 are immutable once created (guard trigger, as above). Changing a rule = retire and create.
 ```
 
-### 3.2 `011_universal_work_sessions.sql`
+### 3.2 `012_universal_work_sessions.sql`
 
 ```sql
 CREATE TABLE work_session (
@@ -249,14 +249,26 @@ High-consequence scopes (**never grantable to a principal that also holds `work-
 `work-sessions:approve`, `repositories:promote`, `principals:manage`, `webhooks:manage`.
 Approval and promotion by a principal are possible only through an active `approval_policy` rule that names it (decision recorded with the policy hash).
 
+**As built in Phase 2 (migration `011_scope_separation_and_narrowing.sql`).** The rule is enforced by the database (a `CHECK`), not only
+by the registry code, and it is stricter than the sentence above in two ways, deliberately:
+1. It is per **principal**, not per project: a principal that holds any high-consequence scope can hold none of `work-sessions:request`,
+   `evidence:submit` or `repositories:push-session`. (Scopes are stored per principal; "same project" would need a per-project grant table and
+   would let one principal both do and sign off work in different projects.) A principal may still read sessions (`work-sessions:read`).
+   Whoever needs both roles uses two principals.
+2. `evidence:submit` and `repositories:push-session` are included with `work-sessions:request`: they produce or vouch for the work.
+Also built: only known scopes are accepted (`CHECK`, compared with the registry by `tests/scopes.test.ts`), and a principal's permissions can only
+be **narrowed** after creation (fewer scopes, a smaller project list; the environment never changes). A trigger enforces it, so a script or direct
+SQL cannot widen a principal either. To give a caller more, create a new principal. The approval-by-policy logic itself arrives with the
+approval endpoints (Phase 3 and 8); nothing can approve or promote yet.
+
 ### 3.4 `server/roles.sql` changes (C4, C12)
 
-Default privileges give `custody_app` `SELECT, INSERT, UPDATE` on new tables. Migrations 010 to 012 therefore require explicit lines:
+Default privileges give `custody_app` `SELECT, INSERT, UPDATE` on new tables. Migrations 010 to 013 therefore require explicit lines:
 - `REVOKE UPDATE, DELETE, TRUNCATE` on `evidence_submission`, `contribution_attribution`, `attestation`, `webhook_delivery` (records the app may add but never change; `webhook_delivery` gets a narrow `SECURITY DEFINER` function for attempt updates, or is moved to an insert-per-attempt design).
 - `GRANT EXECUTE ON FUNCTION purge_expired_client_assertions() TO custody_app`.
 - Tests: extend `tests/data_api_exposure.test.ts` and `tests/schema_and_tenant.test.ts` to cover every new table.
 
-### 3.5 `012_attestation_promotion_and_webhooks.sql` (summary of changes from the first draft)
+### 3.5 `013_attestation_promotion_and_webhooks.sql` (summary of changes from the first draft)
 
 - `contribution_attribution`: as drafted, `sponsor_id UUID REFERENCES creator(id)`, immutable. `author_*` is whatever the principal declares, and is never allowed
   to name a creator unless the work session's sponsor is that creator and the commit arrived through a session credential.
@@ -309,7 +321,7 @@ Request and response shapes are as in the first draft, with these changes: `spon
 ## 6. Compatibility with existing doors
 
 - No existing table is altered destructively. `work_session.door_id` links 1:1 to `door`.
-- Migration 011 **backfills** a `human_door` session for each existing door. Creating a door in `/api/v1` additionally inserts its session; this is the only change on the v1 path, it is additive, and `developer_signing.test.ts` plus `git_gateway.test.ts` must pass unchanged.
+- Migration 012 **backfills** a `human_door` session for each existing door. Creating a door in `/api/v1` additionally inserts its session; this is the only change on the v1 path, it is additive, and `developer_signing.test.ts` plus `git_gateway.test.ts` must pass unchanged.
 - Gateway: door credentials keep `refs/heads/door/<door id>/`; session credentials use `refs/heads/session/<session id>/`. Matching is by credential type, never by guessing.
 - The web app keeps calling `/api/v1/*`; no client change is needed.
 
@@ -348,7 +360,7 @@ Precondition (met): the CI workflow is on `main`, so every phase's gate runs on 
 4. Namespaced context in the ledger. Gate: CL-10.
 5. Repository provider interface, materialization, **path enforcement in pre-receive**. Gate: CL-11.
 6. Evidence. Gate: CL-12.
-7. Attribution and attestations (012, part). Gate: CL-13 (attestation gated by decision 3).
+7. Attribution and attestations (013, part). Gate: CL-13 (attestation gated by decision 3).
 8. Promotion. Gate: CL-14.
 9. Webhooks. Gate: CL-15.
 10. OpenAPI and SDK. Gate: CL-17.
@@ -359,7 +371,10 @@ Precondition (met): the CI workflow is on `main`, so every phase's gate runs on 
 
 - Phase 1 (principals, keys, assertion login): built. See `docs/SERVICE_PRINCIPALS.md`. Registered actor type for operator-run
   provisioning is `system` (the account-event function accepts only creator, developer, system, gateway), with the operator in the actor id.
-- Phases 2 to 12: not started.
+- Phase 2 (scopes, separation of duties, narrowing, project access): built. Migration 011; `requireScope`, `requireProjectAccess`, `narrowPrincipal`;
+  `npm run principal -- narrow`. Later migrations are renumbered: work sessions are 012, attribution/attestation/promotion/webhooks are 013.
+  Gate `tests/scopes.test.ts` (27 tests). The spec's "organization isolation" is tenant (creator) isolation, tested there.
+- Phases 3 to 12: not started.
 
 ## 9. Owner decisions
 
