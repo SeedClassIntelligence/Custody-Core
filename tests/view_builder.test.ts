@@ -145,7 +145,9 @@ describe('what the view holds', () => {
     expect(gitDirOf(dir, ['rev-list', '--count', '--all'])).toBe('1');
     expect(gitDirOf(dir, ['rev-parse', 'main'])).toBe(r.viewCommit);
     expect(gitDirOf(dir, ['log', '-1', '--format=%P', 'main'])).toBe(''); // no parent
-    expect(gitDirOf(dir, ['log', '-1', '--format=%an <%ae>|%cn <%ce>|%aI|%cI', 'main'])).toBe('Custody Core <gateway@custody.invalid>|Custody Core <gateway@custody.invalid>|2000-01-01T00:00:00+00:00|2000-01-01T00:00:00+00:00');
+    // The dates as Unix timestamps (2000-01-01T00:00:00Z is 946684800): how git PRINTS an ISO date changed between versions
+    // (+00:00 in 2.43, Z in newer ones), the instant itself did not.
+    expect(gitDirOf(dir, ['log', '-1', '--format=%an <%ae>|%cn <%ce>|%at|%ct', 'main'])).toBe('Custody Core <gateway@custody.invalid>|Custody Core <gateway@custody.invalid>|946684800|946684800');
     expect(gitDirOf(dir, ['log', '-1', '--format=%s', 'main'])).toBe(`Session base: a view of ${fx.base}`);
     expect(gitDirOf(dir, ['symbolic-ref', 'HEAD'])).toBe('refs/heads/main');
   });
