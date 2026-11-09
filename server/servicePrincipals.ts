@@ -28,6 +28,25 @@ export const HIGH_CONSEQUENCE_SCOPES = ['work-sessions:approve', 'repositories:p
 
 export const ALL_SCOPES: readonly string[] = [...EXECUTION_SCOPES, ...HIGH_CONSEQUENCE_SCOPES];
 
+/**
+ * Scopes that produce work or vouch for it. A principal holding any of them can never hold a high-consequence
+ * scope (separation of duties; also a database CHECK in migration 011). Reading and closing one's own sessions are
+ * not in this list: an approver may read what it is asked to approve.
+ */
+export const WORK_PRODUCING_SCOPES = ['work-sessions:request', 'evidence:submit', 'repositories:push-session'] as const;
+
+/** Why a set of scopes cannot be given to one principal, or null if it can. */
+export function scopeSetProblem(scopes: readonly string[]): string | null {
+  const unknown = scopes.filter((x) => !ALL_SCOPES.includes(x));
+  if (unknown.length) return `Unknown scope(s): ${unknown.join(', ')}.`;
+  const high = scopes.filter((x) => (HIGH_CONSEQUENCE_SCOPES as readonly string[]).includes(x));
+  const producing = scopes.filter((x) => (WORK_PRODUCING_SCOPES as readonly string[]).includes(x));
+  if (high.length && producing.length) {
+    return `A principal that holds ${high.join(', ')} cannot also hold ${producing.join(', ')}: whoever does the work cannot be the one who approves, promotes or manages it. Use two principals.`;
+  }
+  return null;
+}
+
 export const ENVIRONMENTS = ['development', 'staging', 'production'] as const;
 
 // --- Keys -------------------------------------------------------------------------------------------------------
@@ -144,8 +163,8 @@ export async function registerPrincipal(pool: pg.Pool, creatorId: string, input:
   if (!platform || platform.length > 50) throw new PrincipalError('invalid', 'The platform type must be 1 to 50 characters.');
   if (!(ENVIRONMENTS as readonly string[]).includes(input.environment)) throw new PrincipalError('invalid', `The environment must be one of ${ENVIRONMENTS.join(', ')}.`);
   const scopes = [...new Set(input.allowed_scopes ?? [])];
-  const unknown = scopes.filter((s) => !ALL_SCOPES.includes(s));
-  if (unknown.length) throw new PrincipalError('invalid', `Unknown scope(s): ${unknown.join(', ')}.`);
+  const scopeProblem = scopeSetProblem(scopes);
+  if (scopeProblem) throw new PrincipalError('invalid', scopeProblem);
   let expires: string | null = null;
   if (input.expires_at) {
     const t = Date.parse(input.expires_at);
@@ -237,6 +256,56 @@ export async function revokeKey(pool: pg.Pool, keyId: string, by: string): Promi
     if (k.revoked_at) return; // already revoked: nothing to do, nothing to record twice
     await c.query('UPDATE service_principal_key SET revoked_at = now() WHERE id = $1', [keyId]);
     await recordAccountEvent(c, k.creator_id, by, 'service_principal.key_revoked', { principal_id: k.principal_id, key_id: keyId });
+  });
+}
+
+/**
+ * Takes permissions away from a principal that already exists: fewer scopes, or a smaller project list. It can never
+ * add any (the database refuses that too). Recorded on the creator's account record, with before and after.
+ * Giving a caller more means creating a new principal.
+ */
+export async function narrowPrincipal(
+  pool: pg.Pool,
+  principalId: string,
+  change: { allowed_scopes?: string[]; allowed_project_ids?: string[] },
+  by: string
+): Promise<void> {
+  if (change.allowed_scopes === undefined && change.allowed_project_ids === undefined) {
+    throw new PrincipalError('invalid', 'Nothing to change: give allowed_scopes and/or allowed_project_ids.');
+  }
+  await inTransaction(pool, async (c) => {
+    const p = (await c.query('SELECT * FROM service_principal WHERE id = $1 FOR UPDATE', [principalId])).rows[0] as PrincipalRow | undefined;
+    if (!p) throw new PrincipalError('not_found', 'No such principal.');
+    if (p.status === 'revoked') throw new PrincipalError('conflict', 'A revoked principal cannot be changed.');
+
+    let scopes = p.allowed_scopes;
+    if (change.allowed_scopes !== undefined) {
+      scopes = [...new Set(change.allowed_scopes)];
+      const added = scopes.filter((x) => !p.allowed_scopes.includes(x));
+      if (added.length) throw new PrincipalError('invalid', `Permissions can only be narrowed. ${added.join(', ')} would be added; create a new principal for that.`);
+    }
+
+    let projects = p.allowed_project_ids;
+    if (change.allowed_project_ids !== undefined) {
+      projects = [...new Set(change.allowed_project_ids)];
+      if (projects.some((x) => !UUID.test(x))) throw new PrincipalError('invalid', 'allowed_project_ids must be project ids.');
+      if (p.allowed_project_ids !== null) {
+        const added = projects.filter((x) => !p.allowed_project_ids!.includes(x));
+        if (added.length) throw new PrincipalError('invalid', 'Permissions can only be narrowed: the project list cannot gain projects.');
+      } else if (projects.length) {
+        const owned = (await c.query('SELECT id FROM project WHERE creator_id = $1 AND id = ANY($2::uuid[])', [p.creator_id, projects])).rows.length;
+        if (owned !== projects.length) throw new PrincipalError('invalid', 'allowed_project_ids may only name this creator\'s own projects.');
+      }
+    }
+
+    await c.query('UPDATE service_principal SET allowed_scopes = $2, allowed_project_ids = $3, updated_at = now() WHERE id = $1', [principalId, scopes, projects]);
+    await recordAccountEvent(c, p.creator_id, by, 'service_principal.narrowed', {
+      principal_id: principalId,
+      scopes_before: p.allowed_scopes,
+      scopes_after: scopes,
+      project_ids_before: p.allowed_project_ids,
+      project_ids_after: projects
+    });
   });
 }
 
