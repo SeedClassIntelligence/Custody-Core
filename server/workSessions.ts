@@ -4,6 +4,8 @@ import crypto from 'node:crypto';
 import { getDbPool, insertEvent } from './db';
 import { creatorOf } from './auth';
 import { principalOf, projectAccessible, requireScope, type AuthenticatedPrincipal } from './servicePrincipalAuth';
+import { externalContextProblem, externalContextSha256, type ExternalContext } from './externalContext';
+import { scanTextForSecrets } from './textScan';
 
 /**
  * Work sessions (docs/integration/PHASE0_SPEC.md, Phase 3).
@@ -43,9 +45,9 @@ const MACHINE_EXECUTORS = ['ai_assistant', 'ide_runtime', 'ci_runtime', 'platfor
 const FINAL = ['rejected', 'closed', 'expired'];
 export const SESSION_STATUSES = ['requested', 'approved', 'provisioning', 'active', 'awaiting_evidence', 'completed', 'rejected', 'closed', 'expired'];
 
-const TOP_LEVEL_FIELDS = ['project_id', 'repository_id', 'executor', 'sponsor', 'objective', 'base_commit', 'access', 'expires_in_seconds'];
+const TOP_LEVEL_FIELDS = ['project_id', 'repository_id', 'executor', 'sponsor', 'objective', 'base_commit', 'access', 'expires_in_seconds', 'external_context'];
 /** Part of the planned request, not accepted yet. Said plainly instead of being silently ignored. */
-const LATER_FIELDS = ['external_context', 'evidence_requirements'];
+const LATER_FIELDS = ['evidence_requirements'];
 
 export interface SessionRequest {
   project_id: string;
@@ -59,6 +61,7 @@ export interface SessionRequest {
   allowed_write_paths: string[];
   prohibited_paths: string[];
   expires_in_seconds: number;
+  external_context: ExternalContext | null;
 }
 
 type Parsed = { ok: true; value: SessionRequest } | { ok: false; error: string };
@@ -154,6 +157,13 @@ export function parseSessionRequest(body: unknown): Parsed {
     ttl = t;
   }
 
+  let externalContext: ExternalContext | null = null;
+  if (body.external_context !== undefined && body.external_context !== null) {
+    const problem = externalContextProblem(body.external_context);
+    if (problem) return { ok: false, error: problem };
+    externalContext = { namespace: (body.external_context as any).namespace, context: (body.external_context as any).context };
+  }
+
   return {
     ok: true,
     value: {
@@ -167,7 +177,8 @@ export function parseSessionRequest(body: unknown): Parsed {
       allowed_read_paths: read,
       allowed_write_paths: write,
       prohibited_paths: prohibited,
-      expires_in_seconds: ttl
+      expires_in_seconds: ttl,
+      external_context: externalContext
     }
   };
 }
@@ -179,7 +190,8 @@ const SELECT_SESSION = `
          s.executor_type, s.executor_provider, s.executor_model, s.executor_external_id, s.executor_display_name,
          s.sponsor_id, s.objective, s.base_commit, s.branch_name, s.repository_access,
          s.allowed_read_paths, s.allowed_write_paths, s.prohibited_paths,
-         s.status, s.created_at, s.approved_at, s.approved_by, s.expires_at, s.closed_at, s.closed_reason
+         s.status, s.created_at, s.approved_at, s.approved_by, s.expires_at, s.closed_at, s.closed_reason,
+         s.external_context_namespace, s.external_context_payload, s.external_context_sha256
     FROM work_session s LEFT JOIN service_principal sp ON sp.id = s.requested_by_principal_id`;
 
 export function sessionView(r: any) {
@@ -199,6 +211,9 @@ export function sessionView(r: any) {
     branch_name: r.branch_name,
     access: r.repository_access
       ? { repository: r.repository_access, allowed_read_paths: r.allowed_read_paths, allowed_write_paths: r.allowed_write_paths, prohibited_paths: r.prohibited_paths }
+      : null,
+    external_context: r.external_context_namespace
+      ? { namespace: r.external_context_namespace, context: r.external_context_payload, sha256: r.external_context_sha256 }
       : null,
     created_at: iso(r.created_at),
     approved_at: iso(r.approved_at),
@@ -253,6 +268,23 @@ export async function requestSession(pool: pg.Pool, principal: AuthenticatedPrin
   if (req.sponsor_id !== principal.creatorId) throw new SessionError(403, 'The sponsor must be the owner of the project.');
   if (!(await projectAccessible(pool, principal, req.project_id))) throw new SessionError(404, 'No such project.');
 
+  // Everything the caller wrote goes into the project's permanent record, so it is checked for secrets first (the same
+  // scanner as the git gateway; no scanner means no recording).
+  const scan = await scanTextForSecrets(
+    JSON.stringify(
+      { objective: req.objective, executor: req.executor, paths: [req.allowed_read_paths, req.allowed_write_paths, req.prohibited_paths], external_context: req.external_context },
+      null,
+      2
+    )
+  );
+  if (scan.status === 'found') {
+    throw new SessionError(400, `The request appears to contain a secret (${scan.rules.join(', ') || 'unnamed rule'}). Nothing was recorded, because the project's record is permanent. Remove it and send the request again.`);
+  }
+  if (scan.status !== 'clean') throw new SessionError(503, 'The secret scanner is not available, so the request cannot be recorded. Try again later.');
+
+  const ctx = req.external_context;
+  const ctxHash = ctx ? externalContextSha256(ctx) : null;
+
   return inTransaction(pool, async (c) => {
     const repo = (await c.query('SELECT id FROM repository WHERE id = $1 AND project_id = $2', [req.repository_id, req.project_id])).rows[0];
     if (!repo) throw new SessionError(404, 'No such repository in this project.');
@@ -271,15 +303,17 @@ export async function requestSession(pool: pg.Pool, principal: AuthenticatedPrin
         `INSERT INTO work_session (id, project_id, repository_id, session_type, requested_by_principal_id,
                 executor_type, executor_provider, executor_model, executor_external_id, executor_display_name,
                 sponsor_id, objective, base_commit, branch_name, repository_access,
-                allowed_read_paths, allowed_write_paths, prohibited_paths, expires_at)
+                allowed_read_paths, allowed_write_paths, prohibited_paths, expires_at,
+                external_context_namespace, external_context_payload, external_context_sha256)
          VALUES ($1, $2, $3, 'automated_work_session', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-                 now() + make_interval(secs => $18))
+                 now() + make_interval(secs => $18), $19, $20::jsonb, $21)
          RETURNING id, status, expires_at`,
         [
           id, req.project_id, req.repository_id, principal.id,
           req.executor.type, req.executor.provider, req.executor.model, req.executor.external_id, req.executor.display_name,
           req.sponsor_id, req.objective, req.base_commit, branch, req.repository_access,
-          req.allowed_read_paths, req.allowed_write_paths, req.prohibited_paths, req.expires_in_seconds
+          req.allowed_read_paths, req.allowed_write_paths, req.prohibited_paths, req.expires_in_seconds,
+          ctx ? ctx.namespace : null, ctx ? JSON.stringify(ctx.context) : null, ctxHash
         ]
       )
     ).rows[0];
@@ -305,7 +339,8 @@ export async function requestSession(pool: pg.Pool, principal: AuthenticatedPrin
           allowed_read_paths: req.allowed_read_paths,
           allowed_write_paths: req.allowed_write_paths,
           prohibited_paths: req.prohibited_paths,
-          expires_at: new Date(row.expires_at).toISOString()
+          expires_at: new Date(row.expires_at).toISOString(),
+          ...(ctx ? { external_context: { namespace: ctx.namespace, context: ctx.context, sha256: ctxHash } } : {})
         }
       },
       c
@@ -350,7 +385,7 @@ export async function approveSession(pool: pg.Pool, creatorId: string, projectId
   return inTransaction(pool, async (c) => {
     const s = (
       await c.query(
-        `SELECT id, project_id, status, sponsor_id, expires_at, requested_by_principal_id FROM work_session
+        `SELECT id, project_id, status, sponsor_id, expires_at, requested_by_principal_id, external_context_namespace, external_context_sha256 FROM work_session
           WHERE id = $1 AND project_id = $2 AND session_type = 'automated_work_session' FOR UPDATE`,
         [sessionId, projectId]
       )
@@ -368,7 +403,12 @@ export async function approveSession(pool: pg.Pool, creatorId: string, projectId
         action: 'work_session.approved',
         subject_type: 'work_session',
         subject_id: s.id,
-        payload: { principal_id: s.requested_by_principal_id, approved_by: `creator:${creatorId}` }
+        payload: {
+          principal_id: s.requested_by_principal_id,
+          approved_by: `creator:${creatorId}`,
+          // what was approved includes the context, by its hash, so the two records can be matched
+          ...(s.external_context_namespace ? { external_context: { namespace: s.external_context_namespace, sha256: s.external_context_sha256 } } : {})
+        }
       },
       c
     );

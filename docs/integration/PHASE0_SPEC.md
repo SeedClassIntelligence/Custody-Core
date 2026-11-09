@@ -281,12 +281,12 @@ approval endpoints (Phase 3 and 8); nothing can approve or promote yet.
 
 ### 3.4 `server/roles.sql` changes (C4, C12)
 
-Default privileges give `custody_app` `SELECT, INSERT, UPDATE` on new tables. Migrations 010 to 013 therefore require explicit lines:
+Default privileges give `custody_app` `SELECT, INSERT, UPDATE` on new tables. Migrations 010 to 014 therefore require explicit lines:
 - `REVOKE UPDATE, DELETE, TRUNCATE` on `evidence_submission`, `contribution_attribution`, `attestation`, `webhook_delivery` (records the app may add but never change; `webhook_delivery` gets a narrow `SECURITY DEFINER` function for attempt updates, or is moved to an insert-per-attempt design).
 - `GRANT EXECUTE ON FUNCTION purge_expired_client_assertions() TO custody_app`.
 - Tests: extend `tests/data_api_exposure.test.ts` and `tests/schema_and_tenant.test.ts` to cover every new table.
 
-### 3.5 `013_attestation_promotion_and_webhooks.sql` (summary of changes from the first draft)
+### 3.5 `014_attestation_promotion_and_webhooks.sql` (summary of changes from the first draft)
 
 - `contribution_attribution`: as drafted, `sponsor_id UUID REFERENCES creator(id)`, immutable. `author_*` is whatever the principal declares, and is never allowed
   to name a creator unless the work session's sponsor is that creator and the commit arrived through a session credential.
@@ -340,6 +340,8 @@ Request and response shapes are as in the first draft, with these changes: `spon
 | TM-07 | Algorithm confusion | `alg` pinned to the registered key (4.1). |
 | TM-08 | Webhook SSRF and secret theft | `https` only, resolved address must be public (no private, loopback, link-local), no redirects followed, secret encrypted at rest (C6), signature over timestamp + body, receivers told to reject old timestamps. |
 | TM-09 | Evidence reuse | Evidence is bound to session, commit and specification hash, and expires by `max_age_seconds`; a pass on one commit never satisfies another. |
+| TM-11 | A secret pasted into a request (objective, executor name, context) is written into the permanent record, which cannot be edited | Every free-text field of a session request is scanned with the git gateway's scanner (gitleaks) **before** anything is recorded. A finding refuses the request and names only the rule, never the secret. No scanner, or a scanner that fails, also refuses (fail closed). |
+| TM-12 | A caller claims another platform's namespace (for example `com.seedclass.srt1`) to make its context look official | The namespace is documented as a label, not an identity. What identifies the sender is the principal the session was requested by, recorded in the request and in the ledger (`actor_id = principal:<id>`). Nothing in Custody Core trusts or branches on a namespace; the only special case is the reserved first label `custody`. |
 | TM-10 | New tables exposed through the database's public REST API | Prevented already by `lockdown.sql` in every migration; verified by test coverage extended to new tables. |
 
 ## 6. Compatibility with existing doors
@@ -362,7 +364,7 @@ Request and response shapes are as in the first draft, with these changes: `spon
 | CL-07 | Assertion auth, replay, alg pinning | Build new | `assertion_auth.test.ts` |
 | CL-08 | Scope enforcement | Build new | `scopes.test.ts` |
 | CL-09 | Work session lifecycle, human approval | Built (Phase 3) | `work_sessions.test.ts`. The spec's "gateway credential generation" is **not** part of it: see Phase 5. |
-| CL-10 | Namespaced context | Build new | `external_context.test.ts` |
+| CL-10 | Namespaced context | Built (Phase 4) | `external_context.test.ts` |
 | CL-11 | Materialization and path enforcement | Build new | `materialization.test.ts` |
 | CL-12 | Evidence | Build new | `evidence.test.ts` |
 | CL-13 | Attribution, non-impersonation | Build new | `attribution.test.ts` |
@@ -381,10 +383,10 @@ Precondition (met): the CI workflow is on `main`, so every phase's gate runs on 
 1. Principals, keys, assertion auth (010, `servicePrincipalAuth.ts`, `roles.sql`). Gate: CL-06, CL-07, CL-19.
 2. Scopes, revocation, tenant isolation. Gate: CL-08.
 3. Work sessions, backfill, human approval. Gate: CL-09, CL-20. (Built without issuing credentials, on purpose: a credential handed out before the allowed and prohibited paths can be enforced would grant more than the request asked for. Session credentials arrive in Phase 5, together with path enforcement.)
-4. Namespaced context in the ledger. Gate: CL-10.
+4. Namespaced context in the ledger. Gate: CL-10. (Built as migration 013; because the context is plain data that the platform must never act on, the same phase also puts **every free-text field of a session request through the secret scanner** before it is recorded: the record is permanent.)
 5. Repository provider interface, materialization, **path enforcement in pre-receive**, and **session credentials** (a `ccg_` credential bound to an approved session, accepted only for `session/<id>/` and its allowed paths). Gate: CL-11.
 6. Evidence. Gate: CL-12.
-7. Attribution and attestations (013, part). Gate: CL-13 (attestation gated by decision 3).
+7. Attribution and attestations (014, part). Gate: CL-13 (attestation gated by decision 3).
 8. Promotion. Gate: CL-14.
 9. Webhooks. Gate: CL-15.
 10. OpenAPI and SDK. Gate: CL-17.
@@ -396,11 +398,14 @@ Precondition (met): the CI workflow is on `main`, so every phase's gate runs on 
 - Phase 1 (principals, keys, assertion login): built. See `docs/SERVICE_PRINCIPALS.md`. Registered actor type for operator-run
   provisioning is `system` (the account-event function accepts only creator, developer, system, gateway), with the operator in the actor id.
 - Phase 2 (scopes, separation of duties, narrowing, project access): built. Migration 011; `requireScope`, `requireProjectAccess`, `narrowPrincipal`;
-  `npm run principal -- narrow`. Later migrations are renumbered: work sessions are 012, attribution/attestation/promotion/webhooks are 013.
+  `npm run principal -- narrow`. Later migrations are renumbered: work sessions are 012, external context is 013, attribution/attestation/promotion/webhooks are 014.
   Gate `tests/scopes.test.ts` (27 tests). The spec's "organization isolation" is tenant (creator) isolation, tested there.
 - Phase 3 (work sessions, doors mirrored, human approval): built. Migration 012, `server/workSessions.ts`, `docs/WORK_SESSIONS.md`. Gate `tests/work_sessions.test.ts` (33 tests)
   with the existing door tests unchanged. **Deviation from CL-09:** an approved session does not get a gateway credential yet; see the Phase 3 and 5 entries in section 8.
-- Phases 4 to 12: not started.
+- Phase 4 (namespaced external context): built. Migration 013, `server/externalContext.ts`, `server/textScan.ts`; gate `tests/external_context.test.ts` (27 tests).
+  Deviations from the original design: the context columns are nullable and all-or-nothing (the design had `payload NOT NULL DEFAULT '{}'`), a SHA-256 binds namespace and data, numbers in the
+  context must be whole numbers within 2^53 - 1 (anything else is sent as text, so the ledger can always re-derive the hash), and every free-text field of a request is scanned for secrets (TM-11).
+- Phases 5 to 12: not started.
 
 ## 9. Owner decisions
 

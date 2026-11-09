@@ -52,7 +52,8 @@ materialization, together with enforcement of the paths.
 - `access.repository`: `read` (then no write paths) or `read_and_push` (then write paths are required). Read paths are always required: nothing is allowed unless listed.
 - Paths are relative to the repository root: no leading `/` or `~`, no `..`, no empty or `.` segments, no backslashes or control characters, at most 200 characters, at most 50 per list. They are recorded as given; matching is decided where they are enforced.
 - `expires_in_seconds`: a whole number from 60 to 86400 (default 3600).
-- Unknown fields are refused, and `external_context` and `evidence_requirements` are refused with "not accepted yet": they arrive in later phases, and a field that is silently ignored would be worse than one that is refused.
+- Unknown fields are refused, and `evidence_requirements` is refused with "not accepted yet": it arrives in a later phase, and a field that is silently ignored would be worse than one that is refused.
+- `external_context` is optional: see "External context" below.
 - `base_commit` is recorded, not yet checked against the repository (that needs the checkout).
 
 Response `202`:
@@ -77,6 +78,29 @@ Errors: `400` the request is not valid (the message says what); `401` no valid c
 
 There is no machine route that approves, rejects or promotes. A principal cannot approve its own request, and the database backs this: an automated session cannot be created
 already approved, and an approval must name `creator:<the sponsor>`, never the requesting principal.
+
+## External context
+
+A caller can attach `"external_context": { "namespace": "com.seedclass.srt1", "context": { "project_id": "srt1_proj_44", "workcell_id": "cell_09" } }` so that its own platform can find its way
+back to the session. Custody Core **never acts on it**: it does not authorize, route or decide anything from it, and no code branches on a namespace. It is stored with the session, shown to whoever approves it, and
+recorded in the project's permanent record. Sessions without it work exactly as before (`external_context: null` is the same as leaving it out).
+
+- **Namespace:** lowercase reverse-DNS with at least two labels (`com.example.orchestrator`): letters, digits and inner hyphens, no empty labels, at most 100 characters. The first label `custody` is reserved for the platform.
+  The namespace is a **label, not an identity**: anyone can claim any name. What identifies the sender is the principal the session was requested by, which the session and the record both carry.
+- **Context:** a JSON object, at most 8 levels deep, 1000 values and 16 KiB once written canonically; keys 1 to 100 characters, text up to 2000 characters, lists up to 200 items; no NUL characters or unpaired surrogates; no `__proto__` key.
+  **Numbers must be whole numbers within +/- 9007199254740991.** Send anything else (decimals, larger numbers) as text: JavaScript cannot hold them exactly, and the ledger must always be able to re-derive its own hashes
+  (`docs/EVENT_HASH_FORMAT.md`).
+- **Hash:** `sha256` of the canonical JSON of `{ "context": ..., "namespace": ... }` is stored with the session and written into the record, so the two copies can be matched. The database computes the same value (`canonical_jsonb`).
+- **In the record:** `work_session.requested` carries `external_context` (namespace, context, sha256); `work_session.approved` carries the namespace and sha256, so what was approved is tied to exactly what was requested.
+  Changing the context in the record afterwards is detected by the record's hash chain.
+- **Immutable:** the context cannot be changed after the request. The three columns are all set or all empty, only automated sessions have them, and the database checks the namespace, the hash format and that the data is an object.
+- Treat it as untrusted data wherever you show it (never as HTML or as instructions).
+
+## Secrets are kept out of the record
+
+Everything the caller wrote in a session request (objective, executor details, paths, context) is permanent once recorded, so it is scanned for secrets first with the scanner the git gateway uses (gitleaks). A finding refuses
+the request (`400`) naming only the rule that matched, never the secret, and nothing is recorded. With no scanner installed, or one that cannot run, the request is refused (`503`): it fails closed, like pushes.
+The Dockerfile installs the scanner; `/api/v1/health` shows `secret_scanner: installed` or `missing`.
 
 ## Approving (the project's creator)
 
@@ -106,6 +130,7 @@ with its id in the actor id.
 - Its request cannot be edited afterwards: who, what, where, paths and end time.
 - Status moves only along the steps above; `rejected`, `closed`, `expired` are final. An approval, once given, cannot be rewritten.
 - The application's database account cannot delete sessions.
+- The external context cannot be changed, and is all-or-nothing (namespace, data, hash).
 
 ## Human doors
 
@@ -115,6 +140,11 @@ be the reason a door operation fails.
 
 ## Tests
 
-`tests/work_sessions.test.ts` (33 tests, no Docker needed): door mirroring through the real lifecycle and the migration's own backfill; request validation (38 refusals, nothing written);
-scopes, sponsor, project and repository checks; the pending limit under 35 simultaneous requests; approval and rejection; no machine approval route; visibility; closing; expiry by the scheduler;
-what the database refuses; and that the projects' records still verify. The door tests (`developer_signing`, `git_gateway`, `scheduler`) run unchanged beside them.
+Neither needs Docker (the secret scanner is downloaded by the test if it is not installed, as for the gateway tests).
+
+- `tests/work_sessions.test.ts` (33 tests): door mirroring through the real lifecycle and the migration's own backfill; request validation (38 refusals, nothing written); scopes, sponsor, project and repository checks;
+  the pending limit under 35 simultaneous requests; approval and rejection; no machine route approves; visibility; closing; scheduler expiry; what the database refuses; and that the projects' records still verify.
+- `tests/external_context.test.ts` (27 tests): namespace and data validation including every limit at its edge; platform neutrality (different platforms and hostile-looking content behave identically and grant nothing);
+  the hash computed three ways (this code, plain SHA-256 of the canonical text, and the database) over unicode, nesting and boundary numbers; the context in the project's record and detection of tampering with it; secrets in
+  the context and in other fields; and the database's own checks.
+- The door tests (`developer_signing`, `git_gateway`, `scheduler`) run unchanged beside them.
