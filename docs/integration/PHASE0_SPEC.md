@@ -405,7 +405,9 @@ Precondition (met): the CI workflow is on `main`, so every phase's gate runs on 
 - Phase 4 (namespaced external context): built. Migration 013, `server/externalContext.ts`, `server/textScan.ts`; gate `tests/external_context.test.ts` (27 tests).
   Deviations from the original design: the context columns are nullable and all-or-nothing (the design had `payload NOT NULL DEFAULT '{}'`), a SHA-256 binds namespace and data, numbers in the
   context must be whole numbers within 2^53 - 1 (anything else is sent as text, so the ledger can always re-derive the hash), and every free-text field of a request is scanned for secrets (TM-11).
-- Phases 5 to 12: not started.
+- Phase 5: **design note written, awaiting the owner's decisions**: `docs/integration/PHASE5_DESIGN.md`, with a reproducible prototype of the filtered-view and push-translation plumbing in
+  `docs/integration/phase5-spike/` (24 of 24 checks pass). No Phase 5 code yet. Its migration will be `014`; attribution, attestation, promotion and webhooks move to `015`.
+- Phases 6 to 12: not started.
 
 ## 9. Owner decisions
 
