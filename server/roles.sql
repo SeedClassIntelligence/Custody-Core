@@ -39,6 +39,10 @@ GRANT EXECUTE ON FUNCTION append_account_event(text, text, text, text, jsonb) TO
 -- by one narrow SECURITY DEFINER function.
 GRANT EXECUTE ON FUNCTION purge_expired_client_assertions() TO custody_app;
 
+-- Work sessions (migration 012): the trigger that mirrors a door into its session runs as the application account and
+-- calls this one function.
+GRANT EXECUTE ON FUNCTION work_session_status_for_door(text, text) TO custody_app;
+
 -- The app role must not be able to create objects (for example look-alike functions) in this schema.
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 

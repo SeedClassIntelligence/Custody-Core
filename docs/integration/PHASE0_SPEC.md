@@ -23,7 +23,7 @@ They are fixed below. A reviewer comparing the two should look at these:
 | C10 | RS256 supported | Dropped until a real integration needs it. EdDSA and ES256 only. The JWT `alg` header is pinned to the registered key's algorithm (blocks algorithm confusion, `alg: none`). |
 | C11 | Machine requests land under `apiRouter.use(authenticate)` implicitly | `/api/v2` gets its own principal authentication middleware. The `/api/v1` human middleware is not touched. |
 | C12 | "New tables need Data API lockdown" (my earlier message) | **Retracted.** `server/lockdown.sql` already runs inside every migration and closes the Supabase REST API to every table. What is actually needed is `server/roles.sql` changes (section 3.4) and test coverage. |
-| C13 | Doors map to sessions "automatically" | Existing doors need a **backfill** in migration 012, and door creation in v1 gains a non-breaking insert. Specified in section 6. |
+| C13 | Doors map to sessions "automatically" | Existing doors need a **backfill** in migration 012. Built as a trigger on `door` (no change to the v1 door code) plus the backfill; see 3.2. Specified in section 6. |
 
 The first draft's example `base_commit` (`d5db881372b22bb8fa8f5c1e2b904d6e80123456`) was a short hash padded with invented digits. Examples
 below use obviously fake values.
@@ -179,6 +179,24 @@ CREATE TABLE approval_policy (                                          -- C8
 
 ### 3.2 `012_universal_work_sessions.sql`
 
+**As built in Phase 3** (migration `012_universal_work_sessions.sql`, `server/workSessions.ts`). The SQL below is the original design; what was built
+differs in these ways, each deliberate:
+1. **Only `work_session`** is in this migration. The evidence tables (`evidence_requirement`, `evidence_submission`) ship with the evidence phase, in their own migration.
+2. **Human doors are mirrored by a database trigger**, not by new code in the door routes. An `AFTER INSERT/UPDATE` trigger on `door` keeps one `human_door` session per door in
+   step (status mapping: draft to requested, awaiting_signature to approved, opening to provisioning, open and closing to active, closed to closed or expired, failed to closed).
+   No `/api/v1` door code changed. The mirror follows the door whatever it does, so it can never be the reason a door operation fails. This replaces the earlier plan that door
+   creation "additionally inserts its session". Existing doors get sessions from a backfill statement in the migration itself, which writes no events.
+3. **A human door has no single repository** (a door can cover several, see `door_repository`), so `repository_id`, `base_commit`, `branch_name`, `repository_access` and,
+   for old doors, `expires_at` are nullable there; an automated session must have all of them (a `CHECK`).
+4. **`repository_access` (`read` or `read_and_push`) is a column**; the original design had no place to store the request's access mode.
+5. **Sponsors are creators only** (`sponsor_id` references `creator`); the `organization_member` option is gone with the organization model (decision 2).
+6. **The database enforces the approval step**: an automated session cannot be created already approved or closed; its request (who, what, where, paths, end time) cannot be edited;
+   status moves only along fixed steps with `rejected`, `closed` and `expired` final; and `approved_by` must be `creator:<sponsor id>` (or later `policy:<id>`), never the requesting principal or nobody.
+7. **A human door's session has `executor_type = human_developer`, and an automated session never does** (`CHECK`), so a machine cannot pose as a human developer.
+8. **Paths are default-deny and stored as given.** Matching and enforcement belong to controlled materialization (Phase 5); until then they are recorded and validated for shape only.
+
+Original design:
+
 ```sql
 CREATE TABLE work_session (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -300,6 +318,12 @@ Default privileges give `custody_app` `SELECT, INSERT, UPDATE` on new tables. Mi
 ### 4.2 Endpoints
 `POST /api/v2/work-sessions` (request), `POST /api/v2/work-sessions/:id/evidence`, `POST /api/v2/work-sessions/:id/promote`, plus `GET`
 reads, `POST .../close`, and human-facing approve/reject under `/api/v1` (requires a creator with a passed code step; this is what keeps approval human).
+
+**Built in Phase 3:** `POST /api/v2/work-sessions` (scope `work-sessions:request`), `GET /api/v2/work-sessions` and `GET /api/v2/work-sessions/:id` (`work-sessions:read`),
+`POST /api/v2/work-sessions/:id/close` (`work-sessions:close-own`), and for the creator `GET /api/v1/projects/:id/work-sessions`, `POST .../:sid/approve` and `POST .../:sid/reject`.
+The request is strict: unknown fields are refused, `external_context` and `evidence_requirements` are refused as "not accepted yet" (Phases 4 and 6), a human executor type is refused, and
+at most 25 requests may wait for approval per principal. A principal sees only the sessions it asked for; one that holds `work-sessions:approve` sees those of the projects it can reach.
+There is no machine route that approves, rejects or promotes. Details: `docs/WORK_SESSIONS.md`.
 Request and response shapes are as in the first draft, with these changes: `sponsor.id` is a creator id and must be the owner of the project (else 403);
 `signature.key_id` is a `service_principal_key.id`; examples use fake hashes; `event_hash` in the response is the hash of the `work_session.requested` event.
 
@@ -321,7 +345,7 @@ Request and response shapes are as in the first draft, with these changes: `spon
 ## 6. Compatibility with existing doors
 
 - No existing table is altered destructively. `work_session.door_id` links 1:1 to `door`.
-- Migration 012 **backfills** a `human_door` session for each existing door. Creating a door in `/api/v1` additionally inserts its session; this is the only change on the v1 path, it is additive, and `developer_signing.test.ts` plus `git_gateway.test.ts` must pass unchanged.
+- Migration 012 **backfills** a `human_door` session for each existing door, and a trigger on `door` keeps them in step. Nothing in the `/api/v1` door code changed (an earlier plan had door creation insert the session; the trigger replaces that). `developer_signing.test.ts`, `git_gateway.test.ts` and `scheduler.test.ts` pass unchanged next to the new tests.
 - Gateway: door credentials keep `refs/heads/door/<door id>/`; session credentials use `refs/heads/session/<session id>/`. Matching is by credential type, never by guessing.
 - The web app keeps calling `/api/v1/*`; no client change is needed.
 
@@ -337,7 +361,7 @@ Request and response shapes are as in the first draft, with these changes: `spon
 | CL-06 | Principal and key registry | Build new | `service_principal.test.ts` |
 | CL-07 | Assertion auth, replay, alg pinning | Build new | `assertion_auth.test.ts` |
 | CL-08 | Scope enforcement | Build new | `scopes.test.ts` |
-| CL-09 | Work session lifecycle, human approval | Build new | `work_sessions.test.ts` |
+| CL-09 | Work session lifecycle, human approval | Built (Phase 3) | `work_sessions.test.ts`. The spec's "gateway credential generation" is **not** part of it: see Phase 5. |
 | CL-10 | Namespaced context | Build new | `external_context.test.ts` |
 | CL-11 | Materialization and path enforcement | Build new | `materialization.test.ts` |
 | CL-12 | Evidence | Build new | `evidence.test.ts` |
@@ -356,9 +380,9 @@ Precondition (met): the CI workflow is on `main`, so every phase's gate runs on 
 
 1. Principals, keys, assertion auth (010, `servicePrincipalAuth.ts`, `roles.sql`). Gate: CL-06, CL-07, CL-19.
 2. Scopes, revocation, tenant isolation. Gate: CL-08.
-3. Work sessions, backfill, human approval. Gate: CL-09, CL-20.
+3. Work sessions, backfill, human approval. Gate: CL-09, CL-20. (Built without issuing credentials, on purpose: a credential handed out before the allowed and prohibited paths can be enforced would grant more than the request asked for. Session credentials arrive in Phase 5, together with path enforcement.)
 4. Namespaced context in the ledger. Gate: CL-10.
-5. Repository provider interface, materialization, **path enforcement in pre-receive**. Gate: CL-11.
+5. Repository provider interface, materialization, **path enforcement in pre-receive**, and **session credentials** (a `ccg_` credential bound to an approved session, accepted only for `session/<id>/` and its allowed paths). Gate: CL-11.
 6. Evidence. Gate: CL-12.
 7. Attribution and attestations (013, part). Gate: CL-13 (attestation gated by decision 3).
 8. Promotion. Gate: CL-14.
@@ -374,7 +398,9 @@ Precondition (met): the CI workflow is on `main`, so every phase's gate runs on 
 - Phase 2 (scopes, separation of duties, narrowing, project access): built. Migration 011; `requireScope`, `requireProjectAccess`, `narrowPrincipal`;
   `npm run principal -- narrow`. Later migrations are renumbered: work sessions are 012, attribution/attestation/promotion/webhooks are 013.
   Gate `tests/scopes.test.ts` (27 tests). The spec's "organization isolation" is tenant (creator) isolation, tested there.
-- Phases 3 to 12: not started.
+- Phase 3 (work sessions, doors mirrored, human approval): built. Migration 012, `server/workSessions.ts`, `docs/WORK_SESSIONS.md`. Gate `tests/work_sessions.test.ts` (33 tests)
+  with the existing door tests unchanged. **Deviation from CL-09:** an approved session does not get a gateway credential yet; see the Phase 3 and 5 entries in section 8.
+- Phases 4 to 12: not started.
 
 ## 9. Owner decisions
 
