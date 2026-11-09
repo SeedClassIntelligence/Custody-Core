@@ -1,7 +1,7 @@
 # Custody Core platform integration: Phase 0 specification (corrected)
 
 **Status: for review. Nothing in this document is built. No migration or code change happens until the owner approves it.**
-Audited against `main` at `20ce957` (after PR #9). Brief: "Custody Core Platform Integration Brief"; standard: CAS /
+Audited against `main` at `f0c2d66` ("Support Windows in embedded postgres initdb locale"), the same commit the first draft cited. Brief: "Custody Core Platform Integration Brief"; standard: CAS /
 Incremental Hardening Gate.
 
 ## 0. Corrections to the first draft
@@ -11,7 +11,7 @@ They are fixed below. A reviewer comparing the two should look at these:
 
 | # | First draft said | Reality / fix |
 |---|---|---|
-| C1 | Audited commit `f0c2d66` | That commit is not in this repository. Audited `20ce957`. |
+| C1 | (Retracted.) An earlier version of this table said commit `f0c2d66` does not exist. It does: it is the current tip of `main`. That claim came from a stale local clone. The first draft's audited commit was correct. | None needed. |
 | C2 | Event hash is SHA-256 of fields concatenated with `∥` | The hash is SHA-256 of one canonical JSON object, keys in alphabetical order, containing `action, actor_id, actor_type, payload, prev_hash, project_id, seq, subject_id, subject_type, timestamp`. `hash` and `seed_signature_id` are not part of it. `docs/EVENT_HASH_FORMAT.md` is authoritative. |
 | C3 | Event named `gateway.push_accepted` | The real events are `git.push`, `git.push_rejected`, `git.fetch`. |
 | C4 | `custody_app` has SELECT only, plus INSERT on `event` | It has `SELECT, INSERT, UPDATE` on ordinary tables, **no** `INSERT/UPDATE/DELETE/TRUNCATE` on `event`, and `EXECUTE` on `append_event()` (`server/roles.sql`). It has **no `DELETE`** on any table. |
@@ -57,8 +57,8 @@ below use obviously fake values.
 **Boundaries.** Creator: login + code step, isolated by `creator_id`. Developer: login + invite email + registered device key. Gateway: SHA-256 of the
 credential token, scoped to the door's branches and repositories. Database: `custody_app` role, record tables protected by triggers and revokes, REST API closed by `lockdown.sql`.
 
-**Tests:** 21 files in `tests/`, real hashes and real signatures, throwaway database, local Supabase Auth in Docker for login tests. A GitHub Actions workflow
-that runs them exists on branch `claude/gracious-lamport-ka7ga5` and is not on `main` until merged.
+**Tests:** 21 files in `tests/`, real hashes and real signatures, throwaway database, local Supabase Auth in Docker for login tests. A GitHub Actions
+workflow (`.github/workflows/test.yml`) that runs lint, build and the full suite on every pull request and push to `main` is on `main`.
 
 ## 2. Gap analysis
 
@@ -340,7 +340,7 @@ Request and response shapes are as in the first draft, with these changes: `spon
 
 ## 8. Sequenced plan
 
-Precondition: merge the CI workflow so every phase's gate runs on every PR. Each phase ends with its gate green **in CI** before the next starts.
+Precondition (met): the CI workflow is on `main`, so every phase's gate runs on every PR. Each phase ends with its gate green **in CI** before the next starts.
 
 1. Principals, keys, assertion auth (010, `servicePrincipalAuth.ts`, `roles.sql`). Gate: CL-06, CL-07, CL-19.
 2. Scopes, revocation, tenant isolation. Gate: CL-08.
