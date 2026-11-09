@@ -23,6 +23,7 @@ import { developerRouter } from './server/developerRoutes';
 import { schedulerStatus, startScheduler } from './server/scheduler';
 import { snapshotsRouter } from './server/snapshotRoutes';
 import { v2Router } from './server/servicePrincipalAuth';
+import { workSessionsCreatorRouter, workSessionsV2Router } from './server/workSessions';
 import { verifyAccountChain } from './shared/crypto';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -108,6 +109,7 @@ const apiRouter = express.Router();
   apiRouter.use('/projects/:id', projectExtrasRouter);
   apiRouter.use('/developer', developerRouter);
   apiRouter.use('/projects/:id/snapshots', snapshotsRouter);
+  apiRouter.use('/projects/:id/work-sessions', workSessionsCreatorRouter);
 
   apiRouter.get('/me', (_req, res) => {
     const creator = creatorOf(res);
@@ -318,6 +320,7 @@ const apiRouter = express.Router();
 
 app.use('/api/v1', apiRouter);
 // Machine callers (service principals) log in with a signed client assertion, not a person's login.
+v2Router.use('/work-sessions', workSessionsV2Router);
 app.use('/api/v2', v2Router);
 
 // Bad requests get a short JSON answer; nothing internal (stack traces, database messages) is sent back.

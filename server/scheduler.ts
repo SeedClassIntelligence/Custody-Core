@@ -4,6 +4,7 @@ import { githubConfig } from './github';
 import { afterDoorClosed, closeDoorInTransaction, onDoorClosed } from './doorLifecycle';
 import { applyLock } from './lockService';
 import { backupDirIsDefault, takeDoorSnapshot } from './snapshots';
+import { expireOverdueSessions } from './workSessions';
 
 /**
  * Work that happens on its own, inside the server process:
@@ -151,6 +152,7 @@ async function purgeUsedAssertions(pool: pg.Pool) {
 async function tick(pool: pg.Pool) {
   try {
     await closeOverdueDoors(pool);
+    await expireOverdueSessions(pool);
     await takeDueSnapshots(pool);
     await checkDueLocks(pool);
     // Housekeeping, last and on its own: a failure here must never hold up closing doors or checking locks.

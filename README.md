@@ -60,7 +60,8 @@ bundle) is taken when a door closes, and repository locks are re-checked every f
 ## Machine callers
 
 Automated callers (CI, agents, other platforms) log in to `/api/v2/*` with a signed assertion, as a service principal
-provisioned with `npm run principal`. `docs/SERVICE_PRINCIPALS.md`; the plan is `docs/integration/PHASE0_SPEC.md`.
+provisioned with `npm run principal`. `docs/SERVICE_PRINCIPALS.md`; the plan is `docs/integration/PHASE0_SPEC.md`. They request bounded work as work sessions that a person approves:
+`docs/WORK_SESSIONS.md`.
 
 ## Deploying
 
