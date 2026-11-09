@@ -140,11 +140,21 @@ export async function checkDueLocks(pool: pg.Pool, olderThanHours = lockCheckHou
 let timer: NodeJS.Timeout | null = null;
 let running: Promise<void> | null = null;
 
+// Used client assertions only need to be remembered until they would have expired anyway; clean up about every 10 minutes.
+let lastAssertionPurge = 0;
+async function purgeUsedAssertions(pool: pg.Pool) {
+  if (Date.now() - lastAssertionPurge < 10 * 60_000) return;
+  lastAssertionPurge = Date.now();
+  await pool.query('SELECT purge_expired_client_assertions()');
+}
+
 async function tick(pool: pg.Pool) {
   try {
     await closeOverdueDoors(pool);
     await takeDueSnapshots(pool);
     await checkDueLocks(pool);
+    // Housekeeping, last and on its own: a failure here must never hold up closing doors or checking locks.
+    await purgeUsedAssertions(pool).catch((err) => console.error('[scheduler] purging used assertions:', err?.message ?? err));
     status.last_error = null;
   } catch (err: any) {
     status.last_error = String(err?.message ?? err);

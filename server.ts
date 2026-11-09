@@ -22,6 +22,7 @@ import { projectExtrasRouter } from './server/doors';
 import { developerRouter } from './server/developerRoutes';
 import { schedulerStatus, startScheduler } from './server/scheduler';
 import { snapshotsRouter } from './server/snapshotRoutes';
+import { v2Router } from './server/servicePrincipalAuth';
 import { verifyAccountChain } from './shared/crypto';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -316,6 +317,8 @@ const apiRouter = express.Router();
   });
 
 app.use('/api/v1', apiRouter);
+// Machine callers (service principals) log in with a signed client assertion, not a person's login.
+app.use('/api/v2', v2Router);
 
 // Bad requests get a short JSON answer; nothing internal (stack traces, database messages) is sent back.
 app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {

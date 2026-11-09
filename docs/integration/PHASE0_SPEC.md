@@ -355,14 +355,20 @@ Precondition (met): the CI workflow is on `main`, so every phase's gate runs on 
 11. Vault. Gate: CL-16.
 12. End-to-end external flow: register principal, request session, push to `session/<id>/*` through the gateway, submit signed evidence, human approval, promote, close, then verify the chain independently with the documented hash format.
 
+## 8a. Progress
+
+- Phase 1 (principals, keys, assertion login): built. See `docs/SERVICE_PRINCIPALS.md`. Registered actor type for operator-run
+  provisioning is `system` (the account-event function accepts only creator, developer, system, gateway), with the operator in the actor id.
+- Phases 2 to 12: not started.
+
 ## 9. Owner decisions
 
 | # | Question | Recommendation | State |
 |---|---|---|---|
-| 1 | Assertion algorithms | EdDSA and ES256 only; add RS256 only for a named integration that requires it. | Needs approval |
-| 2 | Organization model | No organization UI. Tenant is `creator_id`. Principals provisioned by script in Phase 1. Revisit teams only if multi-person creators are needed. | Needs approval |
+| 1 | Assertion algorithms | EdDSA and ES256 only; add RS256 only for a named integration that requires it. | Approved |
+| 2 | Organization model | No organization UI. Tenant is `creator_id`. Principals provisioned by script in Phase 1. Revisit teams only if multi-person creators are needed. | Approved |
 | 3 | External signing authority transport (Seed Signature) | REST endpoint with a detached signature verified against a published public key (verifiable offline). | **Open: needs the Seed Signature owner. No protocol exists in this repo.** |
-| 4 | Per-request assertion vs token exchange (4.1) | Per-request for Phase 1 (simplest, stateless). | Needs approval |
-| 5 | Where principal-level events are recorded (3.5) | Account chain for registration and revocation; project chain for sessions, evidence and promotion. | Needs approval |
+| 4 | Per-request assertion vs token exchange (4.1) | Per-request for Phase 1 (simplest, stateless). | Approved |
+| 5 | Where principal-level events are recorded (3.5) | Account chain for registration and revocation; project chain for sessions, evidence and promotion. | Approved |
 
 This document changes nothing until approved.
