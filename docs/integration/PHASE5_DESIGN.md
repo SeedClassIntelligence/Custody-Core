@@ -1,6 +1,6 @@
 # Phase 5 design note: controlled materialization, path enforcement, session credentials
 
-**Status: a proposal for review. No Phase 5 code has been written.** It changes the part of the git gateway that stops pushes, so it
+**Status: decisions D1 to D9 accepted by the owner on the condition that the design is in alignment with the platform's purpose and the build plan (section 9 is that check). Building has started with 5a.** It changes the part of the git gateway that stops pushes, so it
 needs the owner's decisions (section 9) before anything is built. Companion to `docs/integration/PHASE0_SPEC.md` (Phase 5 and
 sections 5 and 6 there). A runnable prototype of the riskiest part is in `docs/integration/phase5-spike/`.
 
@@ -180,7 +180,7 @@ Real git throughout; a provider double over local bare repositories for most tes
 
 Three pull requests, each green on GitHub before the next starts:
 
-- **5a. Provider interface.** Behavior-preserving refactor; the existing suite is the gate.
+- **5a. Provider interface. Built.** `server/repositoryProvider.ts` (the interface, `RepositoryRef`, the two error kinds, the registry) and `server/githubProvider.ts` (GitHub behind it). The gateway, the backup snapshots, the lock service, the scheduler and the door routes now ask the provider. Behavior-preserving: **no existing test file was changed** and all of them pass; 15 new tests cover the seam (what it returns and throws, that the returned remote really lets git in and a wrong one does not, read-only credentials, unreachable and unconfigured GitHub, the lock, and a check that those modules no longer import GitHub's functions). The GitHub *connection* flow (listing what the App can see, OAuth) deliberately stays in the GitHub modules: it is not repository access.
 - **5b. Path engine and view builder.** Libraries with their tests; no endpoint, no migration beyond what they need; includes the determinism and leakage tests and a benchmark on a synthetic 20 000-file repository.
 - **5c. Credentials, provisioning, the session gateway, events, cleanup.** Migration 014, the endpoint, the hook, the route, the scheduler cleanup, and the end-to-end tests.
 
@@ -194,7 +194,35 @@ Three pull requests, each green on GitHub before the next starts:
 | GitHub-specific behavior not covered by the local prototype | Same push code path and lease semantics as doors, which are already tested against the GitHub stand-in; one end-to-end test through the stand-in |
 | A mistake exposes more than the request allowed | Failure refuses; the credential exists only after a successful build; a leak test asserts the view's object list, not just its file list |
 
-## 9. Decisions needed
+## 9. Alignment with the platform's purpose and the build plan
+
+Checked against the text of the plan (`PHASE0_SPEC.md`: gap rows 5 and 6, threat rows TM-03 and TM-04, section 8, the Phase 5 and Phase 12 steps) and the platform's stated purpose (`README.md`: creators "give outside developers access to their code without losing control of it";
+`metadata.json`: "creator-owned code custody, git gateway access control, and tamper-evident append-only event logging").
+
+| Plan or purpose | In this design | Result |
+|---|---|---|
+| Phase 5: provider interface, materialization, path enforcement in pre-receive, session credentials; gate CL-11 (temporary checkouts, base commit validation, path isolation) | 4.1 to 4.5; the test plan in section 6 is CL-11 | Aligned |
+| TM-03: refs limited to `session/<id>/`, every changed path checked **before objects leave quarantine** | The hook checks refs and paths before anything is translated or pushed (4.5, steps 1 to 3) | Aligned |
+| TM-04: author, committer (always the gateway) and sponsor separate; nobody can commit as the creator | Committer is always the gateway; author set from the declared executor (D3), stronger than the plan | Aligned, stronger |
+| Phase 12: push through the gateway to `session/<id>/*` with a secret scan; later promote | Same route shape, same scanner; the translated real branch is exactly what promotion needs | Aligned |
+| Creator control, nothing lost to outsiders; tamper-evident record | Work lands in the creator's own repository, committed by the gateway; every step is an event; the real history is never exposed to a session | Aligned |
+| Platform-neutral universal service | Provider seam, no platform-specific logic, context stays opaque | Aligned |
+
+**Three deliberate differences from the plan's wording, so none is a surprise:**
+
+1. **Session credentials use the prefix `ccs_` and their own table**, where the plan said `ccg_` (the door prefix). Same prefix would let one kind of token be mistaken for the other at lookup; separate tables keep the door path untouched (CL-20).
+2. **The local-filesystem provider is not in Phase 5.** The plan's gap table asks for an abstraction that supports GitHub, local filesystem and custody-managed storage; the Phase 5 step itself only names the interface. The interface supports them; the implementations other than GitHub arrive with the vault (Phase 11), because a filesystem provider needs its own path-safety rules. Tell me if you want it earlier.
+3. **Sessions get a filtered view with no history** (D1). Not a conflict with the plan, but it is a consequence a reader of the plan would not guess.
+
+**Two things the plan leaves open that this design surfaces** (neither blocks Phase 5):
+
+- **Evidence (Phase 6) needs the real commit.** Sessions push through the view and receive the real commit ids, but the plan gives evidence issuers (separate principals holding `evidence:submit`) no way to read the real tree.
+  Either issuers build from the creator's repository directly (outside Custody Core, as the Phase 12 example with an external builder implies) or a later phase gives them a read path. Decide this when Phase 6 is designed.
+- **Promotion (Phase 8) when the default branch has moved** since `base_commit`: merge, rebase, or refuse? The plan does not say. Phase 5 leaves the session's branch exactly on its base so any of the three remains possible.
+
+**Not in the plan, and not added:** path-level limits for **human doors**. The plan keeps doors as they are (section 6); they continue to give a developer the repository under `door/<id>/` as today.
+
+## 10. Decisions (accepted, subject to section 9)
 
 | # | Question | Recommendation |
 |---|---|---|

@@ -1,9 +1,11 @@
 import type pg from 'pg';
 import { insertEvent } from './db';
-import { LOCK_NAME, lockRepository } from './repositoryLock';
+import { LOCK_NAME } from './repositoryLock';
+import { providerFor, type RepositoryRef } from './repositoryProvider';
+import './githubProvider';
 
 /**
- * Locks (or re-checks) one repository on GitHub, stores the outcome and records it in the project's events:
+ * Locks (or re-checks) one repository through its provider (GitHub today), stores the outcome and records it in the project's events:
  *   repository.locked          first lock, or locked again after it was found removed or changed
  *   repository.lock_verified   a check found the lock exactly as set
  *   repository.lock_missing    a check found the lock removed or changed on GitHub (then it is put back)
@@ -13,11 +15,11 @@ export async function applyLock(
   pool: pg.Pool,
   projectId: string,
   actor: { type: 'creator' | 'system'; id: string },
-  installationId: number,
+  ref: RepositoryRef,
   repo: any,
   opts: { quietWhenUnchanged?: boolean } = {}
 ) {
-  const result = await lockRepository(installationId, repo.full_name);
+  const result = await providerFor(ref.provider).lock(ref);
   const wasLocked = !!repo.locked_at;
   const event = (action: string, payload: Record<string, unknown>) =>
     insertEvent({

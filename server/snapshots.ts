@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import type pg from 'pg';
 import { insertEvent } from './db';
-import { gitAuthHeader, installationToken, upstreamGitUrl } from './github';
+import { githubRef, providerFor } from './repositoryProvider';
+import './githubProvider';
 import { git } from './gateway/mirror';
 
 /**
@@ -54,8 +55,9 @@ interface RepoSnapshot {
 }
 
 async function snapshotRepository(doorId: string, installationId: number, repo: { id: string; full_name: string }, projectId: string): Promise<RepoSnapshot> {
-  const auth = ['-c', `http.extraHeader=${gitAuthHeader(await installationToken(installationId, repo.full_name.split('/')[1], { contents: 'read', metadata: 'read' }))}`, '-c', 'credential.helper='];
-  const url = upstreamGitUrl(repo.full_name);
+  const remote = await providerFor('github').remote(githubRef({ id: repo.id, full_name: repo.full_name, installation_id: installationId }), { readOnly: true });
+  const auth = ['-c', `http.extraHeader=${remote.authHeader}`, '-c', 'credential.helper='];
+  const url = remote.url;
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'custody-snapshot-'));
   try {
     const bare = path.join(work, 'repo.git');
