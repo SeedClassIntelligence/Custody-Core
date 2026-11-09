@@ -12,6 +12,7 @@ import { withTriggersBypassed } from './support/cleanup';
 import { startHarness, Harness } from './support/apiHarness';
 import { startApp, RunningApp } from './support/api';
 import { acceptSignAndGetCredential } from './support/developerFlow';
+import { installGitleaks } from '../scripts/install-gitleaks';
 import { assertion, newKey, TestKey } from './support/principalKeys';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -73,6 +74,7 @@ describe('Work sessions', () => {
   beforeAll(async () => {
     await assertPoolTargetsTestDb(admin);
     expect((await runMigrations()).success).toBe(true);
+    await installGitleaks(); // every request is scanned for secrets before it is recorded; with no scanner it is refused
     h = await startHarness();
     app = await startApp();
     creator = await h.newCreator('owner');
@@ -225,7 +227,6 @@ describe('Work sessions', () => {
       const bad: Array<[string, unknown, RegExp]> = [
         ['not an object', [1], /JSON object/],
         ['unknown field', { ...baseRequest(), priority: 1 }, /Unknown field/],
-        ['context not accepted yet', baseRequest({ external_context: { namespace: 'com.example', context: {} } }), /external_context is not accepted yet/],
         ['evidence not accepted yet', baseRequest({ evidence_requirements: [] }), /evidence_requirements is not accepted yet/],
         ['project id', baseRequest({ project_id: 'nope' }), /project_id/],
         ['repository id', baseRequest({ repository_id: 5 }), /repository_id/],
