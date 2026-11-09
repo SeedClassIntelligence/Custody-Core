@@ -6,6 +6,8 @@ import { creatorOf } from './auth';
 import { principalOf, projectAccessible, requireScope, type AuthenticatedPrincipal } from './servicePrincipalAuth';
 import { externalContextProblem, externalContextSha256, type ExternalContext } from './externalContext';
 import { scanTextForSecrets } from './textScan';
+import { discardSessionFiles, revokeSessionCredentials } from './sessionCredentials';
+import { PathRules, PatternError, patternProblem } from './pathRules';
 
 /**
  * Work sessions (docs/integration/PHASE0_SPEC.md, Phase 3).
@@ -83,6 +85,10 @@ export function pathProblem(p: unknown): string | null {
   const segments = p.split('/');
   if (segments.some((s) => s === '..')) return 'a path cannot contain ..';
   if (segments.some((s) => s === '' || s === '.')) return 'a path cannot contain empty or . segments';
+  // The rules that enforce a pattern (the filtered view and the push check) must accept it, so a request that is accepted here can
+  // always be provisioned: this adds invisible, bidirectional and line-separator characters to what is refused.
+  const enforceable = patternProblem(p);
+  if (enforceable) return enforceable;
   return null;
 }
 
@@ -147,6 +153,13 @@ export function parseSessionRequest(body: unknown): Parsed {
   if ('error' in prohibited) return { ok: false, error: prohibited.error };
   if (access.repository === 'read_and_push' && write.length === 0) return { ok: false, error: 'read_and_push needs access.allowed_write_paths.' };
   if (access.repository === 'read' && write.length > 0) return { ok: false, error: 'access.allowed_write_paths must be empty for read-only access.' };
+  // Every pattern must also compile for the rules that will enforce it.
+  try {
+    new PathRules({ allowedRead: read, allowedWrite: write, prohibited });
+  } catch (err) {
+    if (err instanceof PatternError) return { ok: false, error: err.message };
+    throw err;
+  }
 
   let ttl = SESSION_TTL_DEFAULT_SECONDS;
   if (body.expires_in_seconds !== undefined) {
@@ -351,6 +364,12 @@ export async function requestSession(pool: pg.Pool, principal: AuthenticatedPrin
 
 /** The principal closes a session it requested. Closing one that is already closed is not an error. */
 export async function closeOwnSession(pool: pg.Pool, principal: AuthenticatedPrincipal, sessionId: string) {
+  const out = await closeOwnSessionInTransaction(pool, principal, sessionId);
+  if (out.changed) discardSessionFiles(out.id); // after the commit: the credential is already revoked, so nothing can reach the files
+  return out;
+}
+
+async function closeOwnSessionInTransaction(pool: pg.Pool, principal: AuthenticatedPrincipal, sessionId: string) {
   return inTransaction(pool, async (c) => {
     const vis = visibleTo(principal);
     const s = (
@@ -364,6 +383,7 @@ export async function closeOwnSession(pool: pg.Pool, principal: AuthenticatedPri
     if (s.status === 'closed') return { id: s.id, status: 'closed' as const, changed: false };
     if (FINAL.includes(s.status)) throw new SessionError(409, `This session is already ${s.status}.`);
     await c.query(`UPDATE work_session SET status = 'closed', closed_at = now(), closed_reason = 'closed_by_requester' WHERE id = $1`, [s.id]);
+    await revokeSessionCredentials(c, s, { type: 'system', id: `principal:${principal.id}` }, 'session_closed');
     await insertEvent(
       {
         project_id: s.project_id,
@@ -461,6 +481,7 @@ export async function expireOverdueSessions(pool: pg.Pool): Promise<string[]> {
       ).rows[0];
       if (!s) return null;
       await c.query(`UPDATE work_session SET status = 'expired', closed_at = now(), closed_reason = 'expired' WHERE id = $1`, [s.id]);
+      await revokeSessionCredentials(c, s, { type: 'system', id: 'scheduler' }, 'session_expired');
       await insertEvent(
         {
           project_id: s.project_id,
@@ -476,6 +497,7 @@ export async function expireOverdueSessions(pool: pg.Pool): Promise<string[]> {
       return s.id as string;
     });
     if (!done) break;
+    discardSessionFiles(done);
     expired.push(done);
     if (expired.length >= 1000) break;
   }

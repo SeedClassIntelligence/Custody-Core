@@ -3,6 +3,7 @@ import http from 'node:http';
 import express from 'express';
 import { getDbPool } from '../../server/db';
 import { gatewayRouter } from '../../server/gateway/router';
+import { sessionGatewayRouter } from '../../server/gateway/sessionRouter';
 import { githubApiRouter, githubCallbackRouter } from '../../server/githubRoutes';
 import { projectExtrasRouter } from '../../server/doors';
 import { developerRouter } from '../../server/developerRoutes';
@@ -23,6 +24,7 @@ export interface Harness {
 export async function startHarness(): Promise<Harness> {
   const db = getDbPool()!;
   const app = express();
+  app.use('/git/sessions', sessionGatewayRouter);
   app.use('/git', gatewayRouter);
   app.use('/github', githubCallbackRouter);
   app.use(express.json());

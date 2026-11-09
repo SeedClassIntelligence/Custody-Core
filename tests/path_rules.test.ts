@@ -393,12 +393,14 @@ describe('what is a valid pattern', () => {
   it('accepts the whole dialect, including a pattern of exactly 200 characters', () => {
     for (const p of ['**', '*', '?', 'a/**/b', '.env*', 'dir with space/*.md', 'héllo/**', '😀*', 'a'.repeat(200)]) expect(patternProblem(p), p).toBeNull();
   });
-  it('the request check of Phase 3 and this one agree, except for invisible and separator characters (which the request check must start refusing)', () => {
+  it('the request check of Phase 3 and this one agree, including invisible and separator characters', () => {
     const corpus = ['src/**', '', '/a', '~a', 'a/../b', 'a//b', 'a\\b', 'a\u0000b', 'a/./b', 'x'.repeat(201), 'ok/**', '.env*', 'a b', 'é/**', '**/x'];
     for (const p of corpus) expect(patternProblem(p) === null, JSON.stringify(p)).toBe(requestPathProblem(p) === null);
-    // the one known difference, closed when the request check is wired to this module (Phase 5c)
-    expect(requestPathProblem('a​b')).toBeNull();
-    expect(patternProblem('a​b')).not.toBeNull();
+    // the one known difference of Phase 5b is closed: the request check now also refuses what the rules refuse (Phase 5c)
+    for (const p of ['a\u200bb', 'a\u202eb', 'a\u2028b', 'a\ufeffb']) {
+      expect(patternProblem(p), JSON.stringify(p)).not.toBeNull();
+      expect(requestPathProblem(p), JSON.stringify(p)).not.toBeNull();
+    }
   });
 });
 
