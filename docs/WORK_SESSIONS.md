@@ -140,6 +140,38 @@ Everything the caller wrote in a session request (objective, executor details, p
 the request (`400`) naming only the rule that matched, never the secret, and nothing is recorded. With no scanner installed, or one that cannot run, the request is refused (`503`): it fails closed, like pushes.
 The Dockerfile installs the scanner; `/api/v1/health` shows `secret_scanner: installed` or `missing`.
 
+## Evidence (Phase 6)
+
+A request can say what must be shown before its work is trusted, and **which registered principal** may show it:
+
+```json
+"evidence_requirements": [
+  { "type": "tests", "issuer_principal_id": "<a principal of the same owner holding evidence:submit>",
+    "required": true, "tied_to_commit": true, "specification_hash": "<optional sha256 the evidence must carry>", "max_age_seconds": 3600 }
+]
+```
+
+At most 10, one per type (lowercase letters, digits, `_` `.` `-`). `required` and `tied_to_commit` default to true. The issuer must be an active principal of the project's owner, hold `evidence:submit` and be allowed to act on the project, or the request is refused (`422`);
+it cannot be added or changed afterwards (the database enforces this). The owner sees the requirements, and whether the issuer is the same principal that asked for the work (`issuer_is_requester`), when approving.
+
+**Submitting** (`POST /api/v2/work-sessions/:id/evidence`, scope `evidence:submit`, only the named issuer; anyone else gets `404`), while the session is running:
+
+```json
+{ "evidence_type": "tests", "subject_commit": "<a real commit id from GET .../commits>", "status": "pass | fail | inconclusive",
+  "specification_hash": "<sha256>", "evidence_hash": "<sha256 of the report or artifact>", "issued_at": "2026-01-31T12:00:00Z",
+  "payload": { "optional": "plain JSON, whole numbers only" },
+  "signature": { "key_id": "<one of your keys>", "algorithm": "Ed25519 | ES256", "value": "<base64url>" } }
+```
+
+The signature is over the UTF-8 bytes of the canonical JSON (`docs/EVENT_HASH_FORMAT.md`) of `{ format: "custody-core.evidence.v1", work_session_id, evidence_type, subject_commit, status, specification_hash, evidence_hash, payload_sha256, issued_at }`
+where `payload_sha256` is the SHA-256 of the canonical JSON of `payload` (`{}` if none). Ed25519 signs the bytes directly; ES256 is the raw 64-byte `r || s` form. `issued_at` is UTC to the second. The commit must be one this session produced, and the statement cannot be dated before that commit existed or in the future.
+A pinned `specification_hash` must match. The payload is scanned for secrets (the record is permanent) and kept; the project's record carries only hashes (`evidence.submitted`). Sending the identical statement again changes nothing (`200`); a different result for the same `evidence_hash`
+is a conflict (`409`): a recorded statement is never replaced, issue a new one. Errors carry a `code`.
+
+**Evaluating** (`GET /api/v2/work-sessions/:id/evidence[?commit=<sha>]`, scope `work-sessions:read`; the owner has the same under `/api/v1/projects/:id/work-sessions/:sid/evidence`) says, per requirement, `satisfied`, `failed`, `inconclusive`, `missing`, `stale` (older than `max_age_seconds`)
+or `issuer_unavailable` (the principal is no longer active, or the key is revoked or expired: a revocation cannot say whether the key was already compromised, so what it signed stops counting). Rules: only the named issuer; only this commit (unless the requirement is not tied to a commit);
+the newest counting statement decides, so a later fail overrides a pass; `ready` means every required requirement is satisfied. The default commit is the session's newest. **Nothing acts on this yet**: promotion (a later phase) is what will require `ready`.
+
 ## Approving (the project's creator)
 
 Under the full person login (password and authenticator code), `/api/v1/projects/:id/work-sessions`:

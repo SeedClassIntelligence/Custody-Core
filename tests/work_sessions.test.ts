@@ -227,7 +227,7 @@ describe('Work sessions', () => {
       const bad: Array<[string, unknown, RegExp]> = [
         ['not an object', [1], /JSON object/],
         ['unknown field', { ...baseRequest(), priority: 1 }, /Unknown field/],
-        ['evidence not accepted yet', baseRequest({ evidence_requirements: [] }), /evidence_requirements is not accepted yet/],
+        ['evidence requirements not a list', baseRequest({ evidence_requirements: 'tests' }), /evidence_requirements must be a list/],
         ['project id', baseRequest({ project_id: 'nope' }), /project_id/],
         ['repository id', baseRequest({ repository_id: 5 }), /repository_id/],
         ['no executor', baseRequest({ executor: undefined }), /executor is required/],

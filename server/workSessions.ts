@@ -8,6 +8,7 @@ import { externalContextProblem, externalContextSha256, type ExternalContext } f
 import { scanTextForSecrets } from './textScan';
 import { discardSessionFiles, revokeSessionCredentials } from './sessionCredentials';
 import { PathRules, PatternError, patternProblem } from './pathRules';
+import { insertRequirements, issuerProblems, parseEvidenceRequirements, type EvidenceRequirementInput } from './evidence';
 
 /**
  * Work sessions (docs/integration/PHASE0_SPEC.md, Phase 3).
@@ -47,9 +48,9 @@ const MACHINE_EXECUTORS = ['ai_assistant', 'ide_runtime', 'ci_runtime', 'platfor
 const FINAL = ['rejected', 'closed', 'expired'];
 export const SESSION_STATUSES = ['requested', 'approved', 'provisioning', 'active', 'awaiting_evidence', 'completed', 'rejected', 'closed', 'expired'];
 
-const TOP_LEVEL_FIELDS = ['project_id', 'repository_id', 'executor', 'sponsor', 'objective', 'base_commit', 'access', 'expires_in_seconds', 'external_context'];
+const TOP_LEVEL_FIELDS = ['project_id', 'repository_id', 'executor', 'sponsor', 'objective', 'base_commit', 'access', 'expires_in_seconds', 'external_context', 'evidence_requirements'];
 /** Part of the planned request, not accepted yet. Said plainly instead of being silently ignored. */
-const LATER_FIELDS = ['evidence_requirements'];
+const LATER_FIELDS: string[] = [];
 
 export interface SessionRequest {
   project_id: string;
@@ -64,6 +65,7 @@ export interface SessionRequest {
   prohibited_paths: string[];
   expires_in_seconds: number;
   external_context: ExternalContext | null;
+  evidence_requirements: EvidenceRequirementInput[];
 }
 
 type Parsed = { ok: true; value: SessionRequest } | { ok: false; error: string };
@@ -177,6 +179,13 @@ export function parseSessionRequest(body: unknown): Parsed {
     externalContext = { namespace: (body.external_context as any).namespace, context: (body.external_context as any).context };
   }
 
+  let evidenceRequirements: EvidenceRequirementInput[] = [];
+  if (body.evidence_requirements !== undefined && body.evidence_requirements !== null) {
+    const er = parseEvidenceRequirements(body.evidence_requirements);
+    if (!er.ok) return { ok: false, error: er.error };
+    evidenceRequirements = er.value;
+  }
+
   return {
     ok: true,
     value: {
@@ -191,7 +200,8 @@ export function parseSessionRequest(body: unknown): Parsed {
       allowed_write_paths: write,
       prohibited_paths: prohibited,
       expires_in_seconds: ttl,
-      external_context: externalContext
+      external_context: externalContext,
+      evidence_requirements: evidenceRequirements
     }
   };
 }
@@ -204,7 +214,11 @@ const SELECT_SESSION = `
          s.sponsor_id, s.objective, s.base_commit, s.branch_name, s.repository_access,
          s.allowed_read_paths, s.allowed_write_paths, s.prohibited_paths,
          s.status, s.created_at, s.approved_at, s.approved_by, s.expires_at, s.closed_at, s.closed_reason,
-         s.external_context_namespace, s.external_context_payload, s.external_context_sha256
+         s.external_context_namespace, s.external_context_payload, s.external_context_sha256,
+         (SELECT COALESCE(jsonb_agg(jsonb_build_object('type', er.evidence_type, 'issuer_principal_id', er.issuer_principal_id, 'required', er.is_required,
+                 'tied_to_commit', er.tied_to_commit, 'specification_hash', er.specification_hash, 'max_age_seconds', er.max_age_seconds,
+                 'issuer_is_requester', er.issuer_principal_id = s.requested_by_principal_id) ORDER BY er.evidence_type), '[]'::jsonb)
+            FROM evidence_requirement er WHERE er.work_session_id = s.id) AS evidence_requirements
     FROM work_session s LEFT JOIN service_principal sp ON sp.id = s.requested_by_principal_id`;
 
 export function sessionView(r: any) {
@@ -228,6 +242,7 @@ export function sessionView(r: any) {
     external_context: r.external_context_namespace
       ? { namespace: r.external_context_namespace, context: r.external_context_payload, sha256: r.external_context_sha256 }
       : null,
+    evidence_requirements: r.evidence_requirements ?? [],
     created_at: iso(r.created_at),
     approved_at: iso(r.approved_at),
     approved_by: r.approved_by,
@@ -285,7 +300,7 @@ export async function requestSession(pool: pg.Pool, principal: AuthenticatedPrin
   // scanner as the git gateway; no scanner means no recording).
   const scan = await scanTextForSecrets(
     JSON.stringify(
-      { objective: req.objective, executor: req.executor, paths: [req.allowed_read_paths, req.allowed_write_paths, req.prohibited_paths], external_context: req.external_context },
+      { objective: req.objective, executor: req.executor, paths: [req.allowed_read_paths, req.allowed_write_paths, req.prohibited_paths], external_context: req.external_context, evidence_requirements: req.evidence_requirements },
       null,
       2
     )
@@ -301,6 +316,8 @@ export async function requestSession(pool: pg.Pool, principal: AuthenticatedPrin
   return inTransaction(pool, async (c) => {
     const repo = (await c.query('SELECT id FROM repository WHERE id = $1 AND project_id = $2', [req.repository_id, req.project_id])).rows[0];
     if (!repo) throw new SessionError(404, 'No such repository in this project.');
+    const issuerProblem = await issuerProblems(c, principal.creatorId, req.project_id, req.evidence_requirements);
+    if (issuerProblem) throw new SessionError(422, issuerProblem);
 
     // One request at a time per principal while counting, so the limit holds under concurrent requests.
     await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`work_session_pending:${principal.id}`]);
@@ -331,6 +348,8 @@ export async function requestSession(pool: pg.Pool, principal: AuthenticatedPrin
       )
     ).rows[0];
 
+    await insertRequirements(c, id, req.evidence_requirements);
+
     const event = await insertEvent(
       {
         project_id: req.project_id,
@@ -353,6 +372,7 @@ export async function requestSession(pool: pg.Pool, principal: AuthenticatedPrin
           allowed_write_paths: req.allowed_write_paths,
           prohibited_paths: req.prohibited_paths,
           expires_at: new Date(row.expires_at).toISOString(),
+          ...(req.evidence_requirements.length ? { evidence_requirements: req.evidence_requirements } : {}),
           ...(ctx ? { external_context: { namespace: ctx.namespace, context: ctx.context, sha256: ctxHash } } : {})
         }
       },
