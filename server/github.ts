@@ -202,6 +202,12 @@ export function upstreamGitUrl(fullName: string): string {
   return `${requireConfig().gitUrl}/${fullName}.git`;
 }
 
+/** A GET of the App's own endpoints (/app, /app/installations), authenticated as the App itself with its signed JWT. */
+export async function githubAppApi(apiPath: string): Promise<any> {
+  const config = requireConfig();
+  return call(`${config.apiUrl}${apiPath}`, { bearer: appJwt(config) });
+}
+
 /** The HTTP header git sends to GitHub with an installation token (kept out of URLs and config files). */
 export function gitAuthHeader(token: string): string {
   return `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;

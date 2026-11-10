@@ -48,6 +48,19 @@ The server also needs **git** and the secret scanner **gitleaks**. The Dockerfil
 `.tools/`. If gitleaks is missing, the gateway still serves clones and fetches but **refuses every push**:
 it never lets code through unscanned. `/api/v1/health` shows `"secret_scanner": "installed"` or `"missing"`.
 
+## Checking that the App is still in place
+
+`npm run github-app:check` asks GitHub, as the App itself, and prints a line per finding (`PASS`, `WARN`, `FAIL`; exit status 1 only if something fails). Run it wherever the server's `GITHUB_APP_*` settings are (your computer with a `.env`, or the host's shell). It never prints a secret.
+It checks that:
+
+- all five settings are present and the private key can sign;
+- GitHub knows the App and accepts that key (a key deleted on the App's settings page, another App's key or a wrong App ID is reported as exactly that);
+- the App still asks for the permissions Custody Core needs (contents: read and write, metadata: read, administration: read and write);
+- every organization that installed it: is the installation active (not suspended), has it accepted the permissions (an organization has to accept one added later), and can a working token be made and the repositories listed.
+
+It cannot see three things, because GitHub does not show them to the App; the last line of its output reminds you to look at them on the App's settings page: the **Callback URL** (your address plus `/github/callback`), **Request user authorization (OAuth) during installation** (on), and whether the **client secret** is the current one.
+`/api/v1/health` only says whether the settings are *present* (`github_app_configured`); this command is the one that proves the App still works.
+
 ## 3. A creator connects their organization (in Custody Core)
 
 1. Top bar > **Connect GitHub** (or Code Home > Connect your GitHub organization).

@@ -31,6 +31,9 @@ export interface StandIn {
   repoState(fullName: string): RepoState;
   /** Permissions the installation has granted (default: contents write, metadata read, administration write). */
   setInstallationPermissions(id: number, permissions: Record<string, 'read' | 'write'>): void;
+  /** What the App itself is configured to ask for (GET /app). */
+  setAppPermissions(permissions: Record<string, 'read' | 'write'>): void;
+  suspendInstallation(id: number, suspended?: boolean): void;
   stop(): Promise<void>;
 }
 
@@ -60,7 +63,8 @@ export async function startGitHubStandIn(): Promise<StandIn> {
   const clientSecret = crypto.randomBytes(20).toString('hex');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'custody-github-standin-'));
 
-  const installations = new Map<number, { login: string; repos: Set<string>; permissions: Record<string, string> }>();
+  const installations = new Map<number, { login: string; repos: Set<string>; permissions: Record<string, string>; suspended?: boolean }>();
+  let appPermissions: Record<string, string> = { contents: 'write', metadata: 'read', administration: 'write' };
   const tokens = new Map<string, { installation: number; repos: Set<string> | null; expires: number; permissions: Record<string, string> }>();
   const repoStates = new Map<string, RepoState>();
   let nextRulesetId = 7000;
@@ -85,10 +89,23 @@ export async function startGitHubStandIn(): Promise<StandIn> {
     return true;
   };
 
+  app.get('/app', (req, res) => {
+    if (!appAuth(req, res)) return;
+    res.json({ id: Number(appId), slug: 'custody-core-test', name: 'Custody Core (test)', owner: { login: 'octo-org' }, permissions: appPermissions, events: [] });
+  });
+
+  app.get('/app/installations', (req, res) => {
+    if (!appAuth(req, res)) return;
+    res.json([...installations.entries()].map(([id, i]) => ({
+      id, account: { login: i.login, type: 'Organization' }, repository_selection: 'selected', permissions: i.permissions, suspended_at: i.suspended ? new Date().toISOString() : null
+    })));
+  });
+
   app.post('/app/installations/:id/access_tokens', (req, res) => {
     if (!appAuth(req, res)) return;
     const inst = installations.get(Number(req.params.id));
     if (!inst) return res.status(404).json({ message: 'Not Found' });
+    if (inst.suspended) return res.status(403).json({ message: 'This installation has been suspended' });
     let repos: Set<string> | null = null;
     if (Array.isArray(req.body?.repositories)) {
       repos = new Set();
@@ -303,6 +320,12 @@ export async function startGitHubStandIn(): Promise<StandIn> {
     },
     setInstallationPermissions(id, permissions) {
       installations.get(id)!.permissions = permissions;
+    },
+    setAppPermissions(permissions) {
+      appPermissions = permissions;
+    },
+    suspendInstallation(id, suspended = true) {
+      installations.get(id)!.suspended = suspended;
     },
     repoState: stateOf,
     createRepo(fullName) {

@@ -252,6 +252,9 @@ describe('Scheduler: doors close at their end date, snapshots on close, locks re
 
   it('re-checks locks on schedule: puts back a removed lock (recorded), stays quiet when nothing changed', async () => {
     const before = (await events()).length;
+    // checkDueLocks looks at every repository in the database. Other test files leave their own repositories behind, and depending on the order the files run
+    // in, they are due too; this test is about its own repository, so the others are marked as just checked.
+    await admin.query(`UPDATE repository SET lock_checked_at = now() WHERE id <> $1 AND (lock_checked_at IS NULL OR lock_checked_at < now() - interval '6 hours')`, [repoId]);
     await admin.query(`UPDATE repository SET lock_checked_at = now() - interval '7 hours' WHERE id = $1`, [repoId]);
     expect(await checkDueLocks(db)).toBe(1);
     expect((await events()).length).toBe(before); // intact: only lock_checked_at moved
