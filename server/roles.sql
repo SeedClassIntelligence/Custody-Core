@@ -43,6 +43,11 @@ GRANT EXECUTE ON FUNCTION purge_expired_client_assertions() TO custody_app;
 -- calls this one function.
 GRANT EXECUTE ON FUNCTION work_session_status_for_door(text, text) TO custody_app;
 
+-- Session materialization (migration 014): what was provisioned and which real commit each pushed commit became are records.
+-- The application may add them and read them, never change or delete them (a trigger refuses it too).
+REVOKE UPDATE, DELETE, TRUNCATE ON TABLE session_view FROM custody_app;
+REVOKE UPDATE, DELETE, TRUNCATE ON TABLE session_commit FROM custody_app;
+
 -- The app role must not be able to create objects (for example look-alike functions) in this schema.
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 

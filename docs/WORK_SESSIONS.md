@@ -19,12 +19,50 @@ requested --(creator approves)--> approved --> provisioning --> active --> await
     +--(creator rejects)--> rejected   +-------------+------------+--(closed by requester, or the end time passes)--> closed / expired
 ```
 
-`rejected`, `closed` and `expired` are final. In Phase 3 only `requested`, `approved`, `rejected`, `closed` and `expired` are reachable;
-the middle steps exist for what comes next (sessions that get a checkout and a credential, evidence, promotion).
+`rejected`, `closed` and `expired` are final. `requested`, `approved`, `provisioning`, `active`, `rejected`, `closed` and `expired` are reachable today;
+`awaiting_evidence` and `completed` exist for what comes next (evidence, promotion).
 
-**An approved session does not get a git credential or a checkout yet.** That is deliberate: the request names which paths may be read and
-written, and nothing can enforce that yet. Handing out a credential first would grant more than was asked for. Credentials arrive with controlled
-materialization, together with enforcement of the paths.
+An approved session gets a credential and a working copy only when its requester asks for them (next section). Until then nothing can touch the repository.
+
+## Working in a session (machine caller)
+
+`POST /api/v2/work-sessions/:id/credential`, scope `repositories:push-session`, **only the principal that requested the session**:
+
+- **First call** (session `approved`): the gateway fetches the real repository, checks that `base_commit` is part of the default branch, builds a **filtered view** and issues one credential.
+  The view is a separate repository with **one commit, no history, and only the files the session may read** (regular files; no symlinks or submodules). Everything else (including files that exist only in old history)
+  is not in it, and a clone cannot ask for it. Limits: 20 000 files and 500 MiB in the view. The response (`201`) holds the git address, the credential (`ccs_...`, shown **once**, stored only as a hash),
+  its expiry (the session's), the branch prefix and the view's commit. Any failure returns the session to `approved` with nothing issued, so the call can simply be repeated.
+- **Later calls** (session `active`): a replacement credential (`200`); the old one stops working at once. At most 10 per session.
+- Errors: `403` no scope; `404` not this principal's session; `409` not approved yet, being prepared, finished, or expired; `422` the base commit is missing or not on the default branch, or the rules leave nothing to read, or too much;
+  `502`/`503` the repository host cannot be reached or is not configured.
+
+```
+git clone http://x:<credential>@<app>/git/sessions/<session id>/<owner>/<repo>.git     # any user name; the credential as the password
+git push origin HEAD:session/<session id>/<name>
+```
+
+**What a push does.** The gateway checks it, then replays it onto the real history, where the creator can see it on the branch `session/<session id>/<name>`:
+
+1. **Branches**: only `session/<session id>/...`. No tags, no deletes, no history rewriting (fast-forward only; to start over, use a new branch name), no other branch, never the default branch.
+2. **Shape**: a straight line from the commit the session was given (no merges, no new roots). At most 200 commits, 5 000 changed paths per commit, 25 MiB per file, 100 MiB per push (configurable: `SESSION_PUSH_MAX_COMMITS`, `_MAX_PATHS`, `_MAX_FILE_BYTES`, `_MAX_BYTES`).
+3. **Paths**: every changed path (a rename counts as a delete plus an add) must be writable by the request's rules (`docs/integration/PHASE5_DESIGN.md`, 4.2): inside an allowed write path, readable, not prohibited in any spelling (case, Unicode forms,
+   trailing dots), never `.git` or `.gitmodules`, and a CI or pipeline file (`.github/`, `.gitlab-ci.yml`, ...) only if a write pattern names it. Only regular files; the executable bit may change.
+   A new file may not take the place of something in the real tree the session cannot see (a symlink, say), and a changed or deleted file must be what the real tree holds.
+4. **Secrets**: the new commits are scanned with gitleaks; no scanner, no push. The secret is never shown or recorded.
+5. **Replay**: each commit becomes a real commit. **The author is the session's declared executor** (the name and address come from the request, never from the push); the pushed author is kept only in a `Custody-Declared-Author` trailer,
+   so a session cannot commit as the creator or anyone else. **The committer is the gateway** (`Custody Core <gateway@custody.invalid>`), and every commit carries `Custody-Work-Session: <id>`. Dates come from the pushed commit.
+   The result is a pure function of the push: pushing the same commits again gives the same real commits.
+6. **Push to the real repository** atomically; if someone changed the branch there in the meantime the push is refused (`upstream_changed`). Only then does the executor's push succeed.
+
+The push output lists each `view -> real` commit pair; `GET /api/v2/work-sessions/:id/commits` (scope `work-sessions:read`) lists them later. Events: `work_session.provisioned` (counts only: never the names or sizes of what was left out),
+`session_credential.issued` / `.revoked`, `git.fetch`, `git.push` (with the pairs) and `git.push_rejected` (the reason and, for paths and secrets, which ones, never the secret), all in the project's tamper-evident record.
+
+**Ending.** Closing, expiring (the scheduler also does this) or rejecting a session revokes its credential in the same step and deletes the gateway's copy; the next git request is refused. The branches already pushed stay in the creator's repository.
+A session left half-prepared by a crash is put back to `approved` by the scheduler after 15 minutes.
+
+**What this does not do, plainly.** A session can copy out anything it is allowed to read: the read rules limit what it sees, not what it does with it. A stolen credential *is* the session until it ends (so: short lifetimes, revoked on close, shown once).
+File names and sizes inside the allowed set are visible. The secret scan checks what is pushed (file contents), not commit messages, and not what the session was allowed to read. Whether the work is *good* is evidence (a later phase), and promoting a session branch
+to the default branch is a later phase too. If the gateway's disk copy of a session is lost, the session cannot continue (close it and request a new one); the work already replayed is in the repository.
 
 ## Requesting (machine caller)
 

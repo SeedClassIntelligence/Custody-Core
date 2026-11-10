@@ -15,6 +15,8 @@ import {
 import { authenticate, creatorOf } from './server/auth';
 import { mfaRouter } from './server/mfa';
 import { gatewayRouter } from './server/gateway/router';
+import { sessionGatewayRouter } from './server/gateway/sessionRouter';
+import { sessionProvisioningRouter } from './server/sessionProvisioning';
 import { findScanner } from './server/gateway/scanner';
 import { githubApiRouter, githubCallbackRouter } from './server/githubRoutes';
 import { githubConfig } from './server/github';
@@ -40,6 +42,8 @@ function serverError(res: express.Response, err: any, what: string) {
 
 export const app = express();
 // The git gateway streams git's own request bodies, so it comes before any body parsing.
+// Automated sessions have their own address (/git/sessions/<id>/...) and their own credential; it is matched first.
+app.use('/git/sessions', sessionGatewayRouter);
 app.use('/git', gatewayRouter);
 // Where GitHub sends the browser back after the App is installed.
 app.use('/github', githubCallbackRouter);
@@ -321,6 +325,7 @@ const apiRouter = express.Router();
 app.use('/api/v1', apiRouter);
 // Machine callers (service principals) log in with a signed client assertion, not a person's login.
 v2Router.use('/work-sessions', workSessionsV2Router);
+v2Router.use('/work-sessions', sessionProvisioningRouter);
 app.use('/api/v2', v2Router);
 
 // Bad requests get a short JSON answer; nothing internal (stack traces, database messages) is sent back.

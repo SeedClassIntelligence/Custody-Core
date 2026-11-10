@@ -6,6 +6,7 @@ import { afterDoorClosed, closeDoorInTransaction, onDoorClosed } from './doorLif
 import { applyLock } from './lockService';
 import { backupDirIsDefault, takeDoorSnapshot } from './snapshots';
 import { expireOverdueSessions } from './workSessions';
+import { recoverStuckProvisioning } from './sessionProvisioning';
 
 /**
  * Work that happens on its own, inside the server process:
@@ -154,6 +155,7 @@ async function tick(pool: pg.Pool) {
   try {
     await closeOverdueDoors(pool);
     await expireOverdueSessions(pool);
+    await recoverStuckProvisioning(pool);
     await takeDueSnapshots(pool);
     await checkDueLocks(pool);
     // Housekeeping, last and on its own: a failure here must never hold up closing doors or checking locks.
