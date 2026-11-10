@@ -114,7 +114,7 @@ Errors: `400` the request is not valid (the message says what); `401` no valid c
 - `POST /api/v2/work-sessions/:id/close`, scope `work-sessions:close-own`: the requester closes its own session. Closing a closed session is harmless and records nothing more;
   a rejected or expired one answers `409`.
 
-There is no machine route that approves, rejects or promotes. A principal cannot approve its own request, and the database backs this: an automated session cannot be created
+There is no machine route that approves or rejects; a principal can only ask for a promotion, and only with repositories:promote. A principal cannot approve its own request, and the database backs this: an automated session cannot be created
 already approved, and an approval must name `creator:<the sponsor>`, never the requesting principal.
 
 ## External context
@@ -198,6 +198,16 @@ The signature is over the canonical JSON (`docs/EVENT_HASH_FORMAT.md`) of `{ for
 (`payload_sha256` is the SHA-256 of the canonical JSON of `payload`, `{}` if none). It is **verified against the registered key before it is stored**, and never changed afterwards; anyone can check it again offline from the stored fields and the public key.
 The commit must be one the session produced and the time cannot be before it existed or in the future. A revoked authority is refused, and what it signed earlier is listed with `authority.active: false`. `GET .../attestations[?commit=<sha>]` lists them (owner; and machine callers with `work-sessions:read` at `/api/v2/work-sessions/:id/attestations`).
 This defines no particular signing service: one (Seed Signature, say) would be an authority. A valid attestation proves the key made the statement, not that the statement is true.
+
+## Promotion (Phase 8)
+
+Moving the repository's default branch to a session's commit is a separate, gated step. **Asking**: `POST /api/v2/work-sessions/:id/promote` (scope `repositories:promote`; a principal that holds it cannot hold work scopes) with `{ "commit": "<a commit id>" }` (default: the newest), or the owner under
+`POST /api/v1/projects/:id/work-sessions/:sid/promotions`. It is refused (`422 evidence_not_ready`, with the per-requirement evaluation) unless the evidence is ready for that exact commit. A request starts `pending`; it changes nothing.
+
+**Deciding**: only the owner, under the full login: `POST /api/v1/projects/:id/promotions/:pid/approve` or `/reject` (`{ "reason" }`). There is no machine route for either. Approving re-checks the evidence and then the gateway carries it out immediately, as a **fast-forward only**:
+the default branch must still be where the session started, and everything that lands must be a commit the gateway made for the session. If the branch has moved on, the request fails (`default_branch_moved`) and nothing changes; start a new session from the current code.
+On success the request is `completed`, the session is `completed` (its credential is revoked and the gateway's copy deleted), and the record has `promotion.requested`, `.approved` and `.completed` (or `.rejected`, `.failed`). `GET .../promotions` lists requests (machine callers with `repositories:promote` or `work-sessions:read`; the owner under both routes).
+Approving a request that was approved but not carried out (a crash) resumes it. If the repository host has its own protections on the default branch, it may refuse the update (`push_refused`).
 
 ## Approving (the project's creator)
 
