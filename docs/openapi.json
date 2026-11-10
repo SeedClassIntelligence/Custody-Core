@@ -1,0 +1,4231 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Custody Core integration API",
+    "version": "1.0.0",
+    "summary": "Let an outside platform request, work on, evidence and promote code under the creator's control.",
+    "description": "Machine callers sign in with a **client assertion**: a short-lived JWT signed with a key registered for their principal (EdDSA or ES256), sent as `Authorization: Bearer <jwt>` on every request. Claims: `iss` = `sub` = the principal id, `aud` = `custody-core`, `iat`, `exp` (at most 300 seconds after `iat`), a unique `jti`; header: `alg`, `kid` (the key id). What a caller may do comes from its principal's recorded scopes, never from the token.\n\nOwners use the `/api/v1` routes listed here with their signed-in session (a login with the authenticator code step). Approval and promotion decisions are only ever made there, by a person.\n\nErrors are `{ \"error\": \"<words>\", \"code\": \"<stable reason, where there is one>\" }`. Nothing in an error contains a secret.\n\nGuides: `docs/INTEGRATION.md` (the whole flow), `docs/WORK_SESSIONS.md`, `docs/WEBHOOKS.md`, `docs/EVENT_HASH_FORMAT.md`."
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "This server (the app's public address)."
+    }
+  ],
+  "tags": [
+    {
+      "name": "Meta"
+    },
+    {
+      "name": "Work sessions"
+    },
+    {
+      "name": "Evidence"
+    },
+    {
+      "name": "Attribution"
+    },
+    {
+      "name": "Promotion"
+    },
+    {
+      "name": "Owner",
+      "description": "For the project owner, signed in as a person."
+    },
+    {
+      "name": "Webhooks",
+      "description": "For the project owner."
+    }
+  ],
+  "paths": {
+    "/api/v2/openapi.json": {
+      "get": {
+        "operationId": "getOpenApiDocument",
+        "summary": "This document.",
+        "tags": [
+          "Meta"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/whoami": {
+      "get": {
+        "operationId": "whoami",
+        "summary": "Who the server says you are (from its own records, never from the token).",
+        "tags": [
+          "Meta"
+        ],
+        "security": [
+          {
+            "principalAssertion": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The calling principal.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Principal"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v2/work-sessions": {
+      "post": {
+        "operationId": "requestWorkSession",
+        "summary": "Ask for a work session. It starts `requested`; a person must approve it.",
+        "tags": [
+          "Work sessions"
+        ],
+        "security": [
+          {
+            "principalAssertion": []
+          }
+        ],
+        "description": "Scope `work-sessions:request`. Every text field is scanned for secrets before it is recorded (the record is permanent). At most 25 requests may wait for approval per principal.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Requested. Nothing can happen until the owner approves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionRequested"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooMany"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listWorkSessions",
+        "summary": "The sessions this principal requested (or, with `work-sessions:approve`, those of the projects it can reach).",
+        "tags": [
+          "Work sessions"
+        ],
+        "security": [
+          {
+            "principalAssertion": []
+          }
+        ],
+        "description": "Scope `work-sessions:read`. At most 100, newest first.",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/SessionStatus"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The sessions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "work_sessions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/WorkSession"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v2/work-sessions/{id}": {
+      "get": {
+        "operationId": "getWorkSession",
+        "summary": "One session.",
+        "tags": [
+          "Work sessions"
+        ],
+        "security": [
+          {
+            "principalAssertion": []
+          }
+        ],
+        "description": "Scope `work-sessions:read`.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The session.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "work_session": {
+                      "$ref": "#/components/schemas/WorkSession"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/work-sessions/{id}/close": {
+      "post": {
+        "operationId": "closeWorkSession",
+        "summary": "Close a session this principal requested (idempotent).",
+        "tags": [
+          "Work sessions"
+        ],
+        "security": [
+          {
+            "principalAssertion": []
+          }
+        ],
+        "description": "Scope `work-sessions:close-own`. Revokes the session's credential and deletes the gateway's copy. Branches already pushed stay in the repository.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Closed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "session_id": {
+                      "$ref": "#/components/schemas/Uuid"
+                    },
+                    "status": {
+                      "$ref": "#/components/schemas/SessionStatus"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v2/work-sessions/{id}/credential": {
+      "post": {
+        "operationId": "issueSessionCredential",
+        "summary": "Prepare an approved session and get its git credential (or a replacement).",
+        "tags": [
+          "Work sessions"
+        ],
+        "security": [
+          {
+            "principalAssertion": []
+          }
+        ],
+        "description": "Scope `repositories:push-session`; only the principal that requested the session. First call (session `approved`): the gateway builds a filtered one-commit view of the repository and issues a credential (201). Later calls (session `active`): a replacement; the old credential stops working at once (200). Failures return the session to `approved` with nothing issued.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A replacement credential.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionCredential"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Prepared; the credential is shown once.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionCredential"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooMany"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v2/work-sessions/{id}/commits": {
+      "get": {
+        "operationId": "listSessionCommits",
+        "summary": "Which real commit each pushed commit became.",
+        "tags": [
+          "Work sessions"
+        ],
+        "security": [
+          {
+            "principalAssertion": []
+          }
+        ],
+        "description": "Scope `work-sessions:read`.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The pairs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionCommits"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/work-sessions/{id}/evidence": {
+      "post": {
+        "operationId": "submitEvidence",
+        "summary": "Submit a signed statement about one commit of the session.",
+        "tags": [
+          "Evidence"
+        ],
+        "security": [
+          {
+            "principalAssertion": []
+          }
+        ],
+        "description": "Scope `evidence:submit`; only the issuer the request named (anyone else gets 404). Only while the session is running. Sending the identical statement again is harmless (200); a different result for the same `evidence_hash` is a 409.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvidenceSubmission"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Already recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvidenceRecorded"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvidenceRecorded"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooMany"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      },
+      "get": {
+        "operationId": "getEvidence",
+        "summary": "The session's evidence and whether each requirement is met for a commit.",
+        "tags": [
+          "Evidence"
+        ],
+        "security": [
+          {
+            "principalAssertion": []
+          }
+        ],
+        "description": "Scope `work-sessions:read`.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "commit",
+            "in": "query",
+            "required": false,
+            "description": "A real commit id the session produced. Default: the newest.",
+            "schema": {
+              "$ref": "#/components/schemas/Sha1"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The report.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvidenceReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          }
+        }
+      }
+    },
+    "/api/v2/work-sessions/{id}/attribution": {
+      "get": {
+        "operationId": "getAttribution",
+        "summary": "Who authored, committed and answers for each commit the session pushed.",
+        "tags": [
+          "Attribution"
+        ],
+        "security": [
+          {
+            "principalAssertion": []
+          }
+        ],
+        "description": "Scope `work-sessions:read`.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The contributions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Attribution"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/work-sessions/{id}/attestations": {
+      "get": {
+        "operationId": "listAttestations",
+        "summary": "Attestations by signing authorities about the session's commits.",
+        "tags": [
+          "Attribution"
+        ],
+        "security": [
+          {
+            "principalAssertion": []
+          }
+        ],
+        "description": "Scope `work-sessions:read`.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "commit",
+            "in": "query",
+            "required": false,
+            "description": "A real commit id the session produced. Default: the newest.",
+            "schema": {
+              "$ref": "#/components/schemas/Sha1"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The attestations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Attestations"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v2/work-sessions/{id}/promote": {
+      "post": {
+        "operationId": "requestPromotion",
+        "summary": "Ask for the repository's default branch to be moved to a commit of the session.",
+        "tags": [
+          "Promotion"
+        ],
+        "security": [
+          {
+            "principalAssertion": []
+          }
+        ],
+        "description": "Scope `repositories:promote` (cannot be held with work scopes). Refused (422 `evidence_not_ready`, with the evaluation) unless the evidence is ready for that commit. The request is `pending`; only the owner can approve it.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromotionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Pending approval.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromotionRequested"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          }
+        }
+      }
+    },
+    "/api/v2/work-sessions/{id}/promotions": {
+      "get": {
+        "operationId": "listPromotions",
+        "summary": "The session's promotion requests.",
+        "tags": [
+          "Promotion"
+        ],
+        "security": [
+          {
+            "principalAssertion": []
+          }
+        ],
+        "description": "Scope `work-sessions:read` or `repositories:promote`.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The requests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Promotions"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/work-sessions": {
+      "get": {
+        "operationId": "ownerListWorkSessions",
+        "summary": "The project's sessions (doors included).",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The project.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The sessions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "work_sessions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/WorkSession"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/work-sessions/{sid}/approve": {
+      "post": {
+        "operationId": "ownerApproveWorkSession",
+        "summary": "Approve a requested session (only its sponsor).",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The project.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Approved.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "$ref": "#/components/schemas/Uuid"
+                    },
+                    "status": {
+                      "$ref": "#/components/schemas/SessionStatus"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/work-sessions/{sid}/reject": {
+      "post": {
+        "operationId": "ownerRejectWorkSession",
+        "summary": "Reject a requested session.",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The project.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 500
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "$ref": "#/components/schemas/Uuid"
+                    },
+                    "status": {
+                      "$ref": "#/components/schemas/SessionStatus"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/work-sessions/{sid}/evidence": {
+      "get": {
+        "operationId": "ownerGetEvidence",
+        "summary": "The session's evidence and its evaluation.",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The project.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "commit",
+            "in": "query",
+            "required": false,
+            "description": "A real commit id the session produced. Default: the newest.",
+            "schema": {
+              "$ref": "#/components/schemas/Sha1"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The report.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvidenceReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/work-sessions/{sid}/attribution": {
+      "get": {
+        "operationId": "ownerGetAttribution",
+        "summary": "Attribution for the session's commits.",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The project.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The contributions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Attribution"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/work-sessions/{sid}/attestations": {
+      "get": {
+        "operationId": "ownerListAttestations",
+        "summary": "Attestations about the session's commits.",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The project.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "commit",
+            "in": "query",
+            "required": false,
+            "description": "A real commit id the session produced. Default: the newest.",
+            "schema": {
+              "$ref": "#/components/schemas/Sha1"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The attestations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Attestations"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "post": {
+        "operationId": "ownerRecordAttestation",
+        "summary": "Deliver a signature by one of your signing authorities about a commit. Verified before it is stored.",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The project.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttestationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Already recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttestationRecorded"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttestationRecorded"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooMany"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/work-sessions/{sid}/promotions": {
+      "get": {
+        "operationId": "ownerListPromotions",
+        "summary": "The session's promotion requests.",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The project.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The requests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Promotions"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "post": {
+        "operationId": "ownerRequestPromotion",
+        "summary": "Ask for a promotion yourself (then decide on it).",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The project.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromotionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Pending.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "promotion": {
+                      "$ref": "#/components/schemas/Promotion"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/promotions": {
+      "get": {
+        "operationId": "ownerListProjectPromotions",
+        "summary": "All promotion requests of the project.",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The project.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The requests.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "promotions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Promotion"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/promotions/{pid}/approve": {
+      "post": {
+        "operationId": "ownerApprovePromotion",
+        "summary": "Approve a promotion; the gateway carries it out at once (a fast-forward only).",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "description": "Only the session's sponsor, as a person. Evidence is checked again. Approving an approved-but-unfinished request resumes it.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The project.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "pid",
+            "in": "path",
+            "required": true,
+            "description": "The promotion request.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Completed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "promotion": {
+                      "$ref": "#/components/schemas/Promotion"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{id}/promotions/{pid}/reject": {
+      "post": {
+        "operationId": "ownerRejectPromotion",
+        "summary": "Reject a pending promotion.",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The project.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "pid",
+            "in": "path",
+            "required": true,
+            "description": "The promotion request.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 500
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "promotion": {
+                      "$ref": "#/components/schemas/Promotion"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/attestation-authorities": {
+      "get": {
+        "operationId": "listAttestationAuthorities",
+        "summary": "Your registered signing authorities.",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The authorities.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "authorities": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AttestationAuthority"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      },
+      "post": {
+        "operationId": "registerAttestationAuthority",
+        "summary": "Register the public key of a signer you trust.",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "public_key": {
+                    "type": "object",
+                    "description": "An Ed25519 (OKP) or P-256 (EC) public JWK. A private key is refused."
+                  }
+                },
+                "required": [
+                  "name",
+                  "public_key"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "authority": {
+                      "$ref": "#/components/schemas/AttestationAuthority"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/attestation-authorities/{id}/revoke": {
+      "post": {
+        "operationId": "revokeAttestationAuthority",
+        "summary": "Revoke an authority (final).",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The authority.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "authority": {
+                      "$ref": "#/components/schemas/AttestationAuthority"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/webhook-endpoints": {
+      "get": {
+        "operationId": "listWebhookEndpoints",
+        "summary": "Your webhook endpoints, with delivery counts.",
+        "tags": [
+          "Webhooks"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The endpoints.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "endpoints": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/WebhookEndpointSummary"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createWebhookEndpoint",
+        "summary": "Register an https address to receive events. The signing secret is shown once.",
+        "tags": [
+          "Webhooks"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "description": "The address must be https with a host name, and every address it resolves to must be public (checked now and before every delivery). See `docs/WEBHOOKS.md` for how to verify what you receive.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEndpointRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookEndpointWithSecret"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooMany"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/webhook-endpoints/{id}/rotate-secret": {
+      "post": {
+        "operationId": "rotateWebhookSecret",
+        "summary": "Make a new signing secret (the old one stops being used at once).",
+        "tags": [
+          "Webhooks"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The endpoint.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rotated; the secret is shown once.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookEndpointWithSecret"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/webhook-endpoints/{id}/disable": {
+      "post": {
+        "operationId": "disableWebhookEndpoint",
+        "summary": "Stop sending to an endpoint.",
+        "tags": [
+          "Webhooks"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The endpoint.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Disabled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "endpoint": {
+                      "$ref": "#/components/schemas/WebhookEndpoint"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/webhook-endpoints/{id}/enable": {
+      "post": {
+        "operationId": "enableWebhookEndpoint",
+        "summary": "Resume sending (its address is checked again).",
+        "tags": [
+          "Webhooks"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The endpoint.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Enabled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "endpoint": {
+                      "$ref": "#/components/schemas/WebhookEndpoint"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          }
+        }
+      }
+    },
+    "/api/v1/webhook-endpoints/{id}/deliveries": {
+      "get": {
+        "operationId": "listWebhookDeliveries",
+        "summary": "The last 100 deliveries of an endpoint, and what went wrong.",
+        "tags": [
+          "Webhooks"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The endpoint.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The deliveries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "deliveries": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/WebhookDelivery"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {
+    "custody-event": {
+      "post": {
+        "operationId": "receiveCustodyEvent",
+        "summary": "What your webhook endpoint receives for each event it subscribed to.",
+        "description": "Signed with `Custody-Signature: t=<unix>,v1=<hex HMAC-SHA256 of \"<t>.<raw body>\" with your endpoint secret>`. Answer 2xx quickly; anything else (a redirect included) is retried after 1 minute, 5 minutes, 30 minutes, 2 hours and 6 hours, then given up. At least once and unordered: de-duplicate on `Custody-Event-Id`, order by `record.seq`. Reject a `t` more than five minutes old.",
+        "parameters": [
+          {
+            "name": "Custody-Signature",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Custody-Event-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "Custody-Event-Type",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Custody-Delivery-Id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          },
+          {
+            "name": "Custody-Delivery-Attempt",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 6
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEvent"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Received (any 2xx)."
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "principalAssertion": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "A client assertion signed with a key registered for the principal (EdDSA or ES256). Claims: iss = sub = principal id, aud = \"custody-core\", iat, exp (at most 300 s after iat), jti (never reused). Header: alg, kid."
+      },
+      "ownerSession": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "The owner's signed-in session (an access token that has passed the authenticator code step)."
+      }
+    },
+    "schemas": {
+      "Uuid": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "Sha1": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{40}$",
+        "description": "A full 40-character lowercase commit id."
+      },
+      "Sha256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "Timestamp": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "IssuedAt": {
+        "type": "string",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$",
+        "description": "UTC, whole seconds."
+      },
+      "SessionStatus": {
+        "type": "string",
+        "enum": [
+          "requested",
+          "approved",
+          "provisioning",
+          "active",
+          "awaiting_evidence",
+          "completed",
+          "rejected",
+          "closed",
+          "expired"
+        ]
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "In words. Never contains a secret."
+          },
+          "code": {
+            "type": "string",
+            "description": "A stable machine-readable reason, where the route has them."
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": true
+      },
+      "ExternalContext": {
+        "type": "object",
+        "properties": {
+          "namespace": {
+            "type": "string",
+            "description": "Lowercase reverse-DNS, two or more labels. A label, not an identity."
+          },
+          "context": {
+            "type": "object",
+            "description": "Plain JSON, at most 16 KiB, whole numbers only. Never acted on."
+          }
+        },
+        "required": [
+          "namespace",
+          "context"
+        ],
+        "additionalProperties": false
+      },
+      "SessionRequest": {
+        "type": "object",
+        "properties": {
+          "project_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "repository_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "executor": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "ai_assistant",
+                  "ide_runtime",
+                  "ci_runtime",
+                  "platform_service"
+                ]
+              },
+              "provider": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "model": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "external_id": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "display_name": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "additionalProperties": false
+          },
+          "sponsor": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "creator"
+              },
+              "id": {
+                "$ref": "#/components/schemas/Uuid",
+                "description": "The project owner's id. Must be the owner of the project."
+              }
+            },
+            "required": [
+              "type",
+              "id"
+            ],
+            "additionalProperties": false
+          },
+          "objective": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "base_commit": {
+            "$ref": "#/components/schemas/Sha1",
+            "description": "The commit the session starts from. It must be part of the repository's default branch (checked when the credential is issued)."
+          },
+          "access": {
+            "type": "object",
+            "properties": {
+              "repository": {
+                "type": "string",
+                "enum": [
+                  "read",
+                  "read_and_push"
+                ]
+              },
+              "allowed_read_paths": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "minItems": 1,
+                "maxItems": 50,
+                "description": "Path patterns the session may read. Nothing is readable unless listed."
+              },
+              "allowed_write_paths": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "maxItems": 50,
+                "description": "Empty for read-only access; required for read_and_push."
+              },
+              "prohibited_paths": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "maxItems": 50,
+                "description": "Always wins over the allowed lists. A pattern with no \"/\" matches that name at any depth."
+              }
+            },
+            "required": [
+              "repository",
+              "allowed_read_paths"
+            ],
+            "additionalProperties": false
+          },
+          "expires_in_seconds": {
+            "type": "integer",
+            "minimum": 60,
+            "maximum": 86400,
+            "default": 3600
+          },
+          "external_context": {
+            "$ref": "#/components/schemas/ExternalContext"
+          },
+          "evidence_requirements": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+                  "description": "The kind of evidence, such as \"tests\" or \"review.security\"."
+                },
+                "issuer_principal_id": {
+                  "$ref": "#/components/schemas/Uuid",
+                  "description": "The registered principal (same owner, active, holding evidence:submit) that may issue it."
+                },
+                "required": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "tied_to_commit": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "If false, evidence about any commit of the session satisfies it."
+                },
+                "specification_hash": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/Sha256"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "max_age_seconds": {
+                  "oneOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 60,
+                      "maximum": 31536000
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "issuer_principal_id"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 10
+          }
+        },
+        "required": [
+          "project_id",
+          "repository_id",
+          "executor",
+          "sponsor",
+          "objective",
+          "base_commit",
+          "access"
+        ],
+        "additionalProperties": false
+      },
+      "SessionRequested": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SessionStatus"
+          },
+          "requires_approval": {
+            "const": true
+          },
+          "sponsor_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "branch_prefix": {
+            "type": "string"
+          },
+          "expires_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "event_hash": {
+            "$ref": "#/components/schemas/Sha256"
+          }
+        },
+        "required": [
+          "session_id",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "WorkSession": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "project_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "repository_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_type": {
+            "type": "string",
+            "enum": [
+              "automated_work_session",
+              "human_door"
+            ]
+          },
+          "door_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/SessionStatus"
+          },
+          "requested_by": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "principal_id": {
+                    "$ref": "#/components/schemas/Uuid"
+                  },
+                  "name": {
+                    "oneOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "principal_id"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "executor": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "provider": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "model": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "external_id": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "display_name": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          "sponsor_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "objective": {
+            "type": "string"
+          },
+          "base_commit": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Sha1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "branch_name": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "access": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "repository": {
+                    "type": "string"
+                  },
+                  "allowed_read_paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "allowed_write_paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "prohibited_paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "external_context": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "namespace": {
+                    "type": "string"
+                  },
+                  "context": {
+                    "type": "object"
+                  },
+                  "sha256": {
+                    "$ref": "#/components/schemas/Sha256"
+                  }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence_requirements": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "issuer_principal_id": {
+                  "$ref": "#/components/schemas/Uuid"
+                },
+                "required": {
+                  "type": "boolean"
+                },
+                "tied_to_commit": {
+                  "type": "boolean"
+                },
+                "specification_hash": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/Sha256"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "max_age_seconds": {
+                  "oneOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "issuer_is_requester": {
+                  "type": "boolean",
+                  "description": "True when the principal that asked for the work is also the one that may vouch for it."
+                }
+              },
+              "required": [
+                "type",
+                "issuer_principal_id",
+                "required",
+                "tied_to_commit"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "approved_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "approved_by": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expires_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "closed_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "closed_reason": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "SessionCredential": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "repository": {
+            "type": "string"
+          },
+          "read_only": {
+            "type": "boolean"
+          },
+          "git_url": {
+            "type": "string",
+            "description": "Clone and push here, with any user name and the credential as the password."
+          },
+          "credential": {
+            "type": "object",
+            "properties": {
+              "token": {
+                "type": "string",
+                "pattern": "^ccs_",
+                "description": "Shown once; only its hash is kept."
+              },
+              "expires_at": {
+                "$ref": "#/components/schemas/Timestamp"
+              }
+            },
+            "required": [
+              "token",
+              "expires_at"
+            ],
+            "additionalProperties": false
+          },
+          "branch_prefix": {
+            "type": "string"
+          },
+          "view": {
+            "type": "object",
+            "properties": {
+              "commit": {
+                "$ref": "#/components/schemas/Sha1"
+              },
+              "tree": {
+                "$ref": "#/components/schemas/Sha1"
+              },
+              "file_count": {
+                "type": "integer"
+              },
+              "base_commit": {
+                "$ref": "#/components/schemas/Sha1"
+              }
+            },
+            "additionalProperties": false
+          },
+          "replaced": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "session_id",
+          "git_url",
+          "credential"
+        ],
+        "additionalProperties": false
+      },
+      "SessionCommits": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "commits": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "view_sha": {
+                  "$ref": "#/components/schemas/Sha1"
+                },
+                "real_sha": {
+                  "$ref": "#/components/schemas/Sha1"
+                },
+                "parent_view_sha": {
+                  "$ref": "#/components/schemas/Sha1"
+                },
+                "declared_author": {
+                  "type": "string"
+                },
+                "created_at": {
+                  "$ref": "#/components/schemas/Timestamp"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "EvidenceSubmission": {
+        "type": "object",
+        "properties": {
+          "evidence_type": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+          },
+          "subject_commit": {
+            "$ref": "#/components/schemas/Sha1"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "fail",
+              "inconclusive"
+            ]
+          },
+          "specification_hash": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "evidence_hash": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "issued_at": {
+            "$ref": "#/components/schemas/IssuedAt"
+          },
+          "payload": {
+            "type": "object",
+            "description": "Optional plain JSON (whole numbers only), kept with the statement; scanned for secrets. Covered by the signature through its hash."
+          },
+          "signature": {
+            "type": "object",
+            "properties": {
+              "key_id": {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              "algorithm": {
+                "type": "string",
+                "enum": [
+                  "Ed25519",
+                  "ES256"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{86}$",
+                "description": "The 64-byte signature, base64url without padding."
+              }
+            },
+            "required": [
+              "key_id",
+              "algorithm",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "evidence_type",
+          "subject_commit",
+          "status",
+          "specification_hash",
+          "evidence_hash",
+          "issued_at",
+          "signature"
+        ],
+        "additionalProperties": false,
+        "description": "The signature is over the canonical JSON of { format: \"custody-core.evidence.v1\", work_session_id, evidence_type, subject_commit, status, specification_hash, evidence_hash, payload_sha256, issued_at }."
+      },
+      "EvidenceRecorded": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "evidence_type": {
+            "type": "string"
+          },
+          "issuer_principal_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "signature_key_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "subject_commit": {
+            "$ref": "#/components/schemas/Sha1"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "fail",
+              "inconclusive"
+            ]
+          },
+          "specification_hash": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "evidence_hash": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "payload_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "issued_at": {
+            "$ref": "#/components/schemas/IssuedAt"
+          },
+          "signature": {
+            "type": "object",
+            "properties": {
+              "algorithm": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "payload": {
+            "type": "object"
+          },
+          "recorded": {
+            "type": "boolean",
+            "description": "False when this exact statement was already recorded."
+          }
+        },
+        "required": [
+          "id",
+          "evidence_type",
+          "subject_commit",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceSubmissionView": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "evidence_type": {
+            "type": "string"
+          },
+          "issuer_principal_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "signature_key_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "subject_commit": {
+            "$ref": "#/components/schemas/Sha1"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "fail",
+              "inconclusive"
+            ]
+          },
+          "specification_hash": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "evidence_hash": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "payload_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "issued_at": {
+            "$ref": "#/components/schemas/IssuedAt"
+          },
+          "signature": {
+            "type": "object",
+            "properties": {
+              "algorithm": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "payload": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "evidence_type",
+          "subject_commit",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceEvaluation": {
+        "type": "object",
+        "properties": {
+          "commit": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Sha1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ready": {
+            "type": "boolean",
+            "description": "Every required requirement is satisfied for this commit."
+          },
+          "requirements": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "evidence_type": {
+                  "type": "string"
+                },
+                "issuer_principal_id": {
+                  "$ref": "#/components/schemas/Uuid"
+                },
+                "required": {
+                  "type": "boolean"
+                },
+                "tied_to_commit": {
+                  "type": "boolean"
+                },
+                "specification_hash": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/Sha256"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "max_age_seconds": {
+                  "oneOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "satisfied",
+                    "failed",
+                    "inconclusive",
+                    "missing",
+                    "stale",
+                    "issuer_unavailable"
+                  ]
+                },
+                "submission_id": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/Uuid"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "issued_at": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/IssuedAt"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "commit",
+          "ready",
+          "requirements"
+        ],
+        "additionalProperties": false
+      },
+      "EvidenceReport": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "evaluation": {
+            "$ref": "#/components/schemas/EvidenceEvaluation"
+          },
+          "submissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvidenceSubmissionView"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "Attribution": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "contributions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "commit": {
+                  "$ref": "#/components/schemas/Sha1"
+                },
+                "pushed_as": {
+                  "$ref": "#/components/schemas/Sha1"
+                },
+                "author": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "executor"
+                    },
+                    "principal_id": {
+                      "$ref": "#/components/schemas/Uuid"
+                    },
+                    "executor": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string"
+                        },
+                        "provider": {
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "model": {
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "external_id": {
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "display_name": {
+                          "oneOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "additionalProperties": false
+                    },
+                    "as_written_in_git": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "email": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "committer": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "gateway"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "sponsor": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "creator"
+                    },
+                    "id": {
+                      "$ref": "#/components/schemas/Uuid"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "declared_author": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    },
+                    "trusted": {
+                      "const": false
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "recorded_at": {
+                  "$ref": "#/components/schemas/Timestamp"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "Attestations": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "attestations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Attestation"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "Attestation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "authority": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "active": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
+          "claim": {
+            "type": "string"
+          },
+          "subject_commit": {
+            "$ref": "#/components/schemas/Sha1"
+          },
+          "payload_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "payload": {
+            "type": "object"
+          },
+          "issued_at": {
+            "$ref": "#/components/schemas/IssuedAt"
+          },
+          "signature": {
+            "type": "object",
+            "properties": {
+              "algorithm": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "recorded_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "claim",
+          "subject_commit"
+        ],
+        "additionalProperties": false
+      },
+      "AttestationRecorded": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "authority": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "active": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
+          "claim": {
+            "type": "string"
+          },
+          "subject_commit": {
+            "$ref": "#/components/schemas/Sha1"
+          },
+          "payload_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "payload": {
+            "type": "object"
+          },
+          "issued_at": {
+            "$ref": "#/components/schemas/IssuedAt"
+          },
+          "signature": {
+            "type": "object",
+            "properties": {
+              "algorithm": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "recorded_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "recorded": {
+            "type": "boolean",
+            "description": "False when this exact statement was already recorded."
+          }
+        },
+        "required": [
+          "id",
+          "claim",
+          "subject_commit"
+        ],
+        "additionalProperties": false
+      },
+      "AttestationRequest": {
+        "type": "object",
+        "properties": {
+          "authority_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "claim": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$"
+          },
+          "subject_commit": {
+            "$ref": "#/components/schemas/Sha1"
+          },
+          "issued_at": {
+            "$ref": "#/components/schemas/IssuedAt"
+          },
+          "payload": {
+            "type": "object"
+          },
+          "signature": {
+            "type": "object",
+            "properties": {
+              "algorithm": {
+                "type": "string",
+                "enum": [
+                  "Ed25519",
+                  "ES256"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{86}$"
+              }
+            },
+            "required": [
+              "algorithm",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "authority_id",
+          "claim",
+          "subject_commit",
+          "issued_at",
+          "signature"
+        ],
+        "additionalProperties": false,
+        "description": "The signature is by the authority's registered key over the canonical JSON of { format: \"custody-core.attestation.v1\", authority_id, work_session_id, claim, subject_commit, payload_sha256, issued_at }."
+      },
+      "AttestationAuthority": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "algorithm": {
+            "type": "string",
+            "enum": [
+              "Ed25519",
+              "ES256"
+            ]
+          },
+          "public_key": {
+            "type": "object"
+          },
+          "fingerprint": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "revoked_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "PromotionRequest": {
+        "type": "object",
+        "properties": {
+          "commit": {
+            "$ref": "#/components/schemas/Sha1"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Promotion": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "work_session_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "repository_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "target_branch": {
+            "type": "string"
+          },
+          "commit": {
+            "$ref": "#/components/schemas/Sha1"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "approved",
+              "completed",
+              "rejected",
+              "failed"
+            ]
+          },
+          "requested_by": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "principal",
+                  "creator"
+                ]
+              },
+              "id": {
+                "$ref": "#/components/schemas/Uuid"
+              }
+            },
+            "additionalProperties": false
+          },
+          "requested_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "evidence_at_request": {
+            "$ref": "#/components/schemas/EvidenceEvaluation"
+          },
+          "attestations_at_request": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "$ref": "#/components/schemas/Uuid"
+                },
+                "claim": {
+                  "type": "string"
+                },
+                "authority_id": {
+                  "$ref": "#/components/schemas/Uuid"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "approved_by": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "approved_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rejected_reason": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "previous_tip": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Sha1"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "completed_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "failure_code": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "work_session_id",
+          "commit",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "PromotionRequested": {
+        "type": "object",
+        "properties": {
+          "promotion": {
+            "$ref": "#/components/schemas/Promotion"
+          },
+          "requires_approval": {
+            "const": true
+          }
+        },
+        "required": [
+          "promotion"
+        ],
+        "additionalProperties": false
+      },
+      "Promotions": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "promotions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Promotion"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "Principal": {
+        "type": "object",
+        "properties": {
+          "principal": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "platform_type": {
+                "type": "string"
+              },
+              "environment": {
+                "type": "string"
+              },
+              "scopes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "allowed_project_ids": {
+                "oneOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/Uuid"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "expires_at": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Timestamp"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebhookEndpoint": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "project_ids": {
+            "oneOf": [
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Uuid"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "disabled"
+            ]
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "secret_rotated_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "disabled_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "url",
+          "events",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "WebhookEndpointSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "project_ids": {
+            "oneOf": [
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Uuid"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "disabled"
+            ]
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "secret_rotated_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "disabled_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "deliveries": {
+            "type": "object",
+            "properties": {
+              "pending": {
+                "type": "integer"
+              },
+              "delivered": {
+                "type": "integer"
+              },
+              "dead": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "url",
+          "events",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "WebhookEndpointRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "url": {
+            "type": "string",
+            "description": "https, a host name (no IP address), resolving only to public addresses."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 20,
+            "description": "\"*\", a family such as \"promotion.*\", or an exact event name."
+          },
+          "project_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Uuid"
+            },
+            "minItems": 1
+          }
+        },
+        "required": [
+          "name",
+          "url",
+          "events"
+        ],
+        "additionalProperties": false
+      },
+      "WebhookEndpointWithSecret": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "$ref": "#/components/schemas/WebhookEndpoint"
+          },
+          "secret": {
+            "type": "string",
+            "pattern": "^whsec_",
+            "description": "Shown once."
+          }
+        },
+        "required": [
+          "endpoint",
+          "secret"
+        ],
+        "additionalProperties": false
+      },
+      "WebhookDelivery": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "event_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "project_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "delivered",
+              "dead"
+            ]
+          },
+          "attempts": {
+            "type": "integer"
+          },
+          "next_attempt_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_status": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_error": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "delivered_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "WebhookEvent": {
+        "type": "object",
+        "properties": {
+          "format": {
+            "const": "custody-core.webhook.v1"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "type": {
+            "type": "string"
+          },
+          "project_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "occurred_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "actor": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "subject": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "data": {
+            "type": "object",
+            "description": "The event's payload."
+          },
+          "record": {
+            "type": "object",
+            "properties": {
+              "seq": {
+                "type": "integer"
+              },
+              "prev_hash": {
+                "$ref": "#/components/schemas/Sha256"
+              },
+              "hash": {
+                "$ref": "#/components/schemas/Sha256"
+              },
+              "hash_version": {
+                "type": "integer"
+              },
+              "hashed_timestamp": {
+                "type": "string"
+              },
+              "canonical_payload": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false,
+            "description": "What the project's tamper-evident chain holds for this event (docs/EVENT_HASH_FORMAT.md)."
+          }
+        },
+        "required": [
+          "format",
+          "id",
+          "type",
+          "project_id",
+          "data",
+          "record"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "The request is not valid; the message says what.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "No valid credentials.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "The credentials lack the scope this needs (or the person is not the one allowed to decide).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "No such thing, or not one you may see (the two look the same on purpose).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "The thing is in a state that does not allow this, or already exists.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unprocessable": {
+        "description": "Understood, but refused for a stated reason (see `code`).",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "TooMany": {
+        "description": "A limit was reached.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unavailable": {
+        "description": "A needed service (database, secret scanner, repository host) is not available. Nothing was recorded.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    }
+  }
+}

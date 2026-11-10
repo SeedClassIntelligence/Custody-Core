@@ -98,7 +98,7 @@ describe('Attestation by a signing authority', () => {
       expect(r.body.authority.fingerprint).toMatch(/^[0-9a-f]{64}$/);
       expect((await h.api(creator, 'GET', '/attestation-authorities')).body.authorities.map((a: any) => a.name)).toContain('Notary');
       expect((await h.api(other, 'GET', '/attestation-authorities')).body.authorities).toEqual([]);
-      const ev = (await admin.query(`SELECT action, payload FROM account_event WHERE action = 'attestation_authority.registered' ORDER BY seq DESC LIMIT 1`)).rows[0];
+      const ev = (await admin.query(`SELECT action, payload FROM account_event WHERE action = 'attestation_authority.registered' AND payload->>'authority_id' = $1`, [r.body.authority.id])).rows[0];
       expect(ev.payload).toMatchObject({ authority_id: r.body.authority.id, name: 'Notary', algorithm: 'ES256' });
     });
 

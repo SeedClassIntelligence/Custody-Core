@@ -7,14 +7,15 @@ import { insertEvent } from './db';
 import { githubRef, providerFor } from './repositoryProvider';
 import './githubProvider';
 import { git } from './gateway/mirror';
+import { VaultError, decryptStream, encryptFile, plaintextDigest, readHeader, rewrapFile, vaultKeys } from './vault';
 
 /**
  * Backup snapshots of a closed door's work.
  *
  * For each repository of the door: fetch the default branch and the door's own branches (door/<door id>/...) from
- * GitHub into a temporary repository, write a git bundle, check it with `git bundle verify`, store it in BACKUP_DIR,
- * and record it (mirror_snapshot, plus a mirror.written event with its SHA-256 and the exact refs). A bundle restores
- * with plain git: `git clone <file>.bundle`.
+ * GitHub into a temporary repository, write a git bundle, check it with `git bundle verify`, ENCRYPT it into the vault (server/vault.ts,
+ * docs/VAULT.md), store it in BACKUP_DIR, and record it (mirror_snapshot, plus a mirror.written event with the SHA-256 of the bundle
+ * and the exact refs). The download is the plain bundle, decrypted on the way out: it restores with plain git (`git clone <file>.bundle`).
  *
  * Storage is a directory on the server (BACKUP_DIR). Storage the creator owns (their own S3 bucket or Drive) is not
  * connected yet. Mount BACKUP_DIR on a persistent volume: the default (the system temp directory) does not survive
@@ -94,10 +95,19 @@ async function snapshotRepository(doorId: string, installationId: number, repo: 
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const relative = path.join(projectId, doorId, `${repo.full_name.replace('/', '__')}-${stamp}.bundle`);
     const target = path.join(backupDir(), relative);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.copyFileSync(bundle, `${target}.partial`);
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    fs.rmSync(`${target}.partial`, { force: true });
+    // Locked before it is stored: what lands in BACKUP_DIR is never the readable bundle. No vault key, no snapshot (it is retried, and said so).
+    try {
+      await encryptFile(bundle, `${target}.partial`);
+    } catch (err) {
+      fs.rmSync(`${target}.partial`, { force: true });
+      throw err instanceof VaultError ? new Error(err.message) : err;
+    }
     fs.renameSync(`${target}.partial`, target);
-    if ((await sha256File(target)) !== sha256) throw new Error('the stored bundle does not match what was written');
+    // What was stored must open and be exactly the bundle that was verified.
+    const stored = await plaintextDigest(target);
+    if (stored.sha256 !== sha256 || stored.bytes !== size) throw new Error('the stored bundle does not match what was written');
     return { repository_id: repo.id, full_name: repo.full_name, refs, sha256, size_bytes: size, storage_uri: `backup-dir:${relative.split(path.sep).join('/')}` };
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
@@ -166,6 +176,7 @@ export async function takeDoorSnapshot(pool: pg.Pool, doorId: string): Promise<'
         payload: {
           trigger: 'door_closed',
           storage: 'server backup directory',
+          encryption: 'vault-v1',
           snapshots: results.map((r) => ({ repository: r.full_name, refs: r.refs, sha256: r.sha256, size_bytes: r.size_bytes, storage_uri: r.storage_uri }))
         }
       }, client);
@@ -201,3 +212,100 @@ export async function takeDoorSnapshot(pool: pg.Pool, doorId: string): Promise<'
   }
 }
 
+
+// --- the vault side of snapshots -------------------------------------------------------------------------------------
+
+export interface SnapshotRow {
+  id: string;
+  storage_uri: string;
+  sha256: string;
+  size_bytes: string | number;
+}
+
+/**
+ * Checks one stored snapshot end to end: the file is there, opens (decrypting and authenticating every part, if it is locked) and is exactly the bundle
+ * that was recorded. 'missing', 'unreadable' (damaged, or the key is not available) and 'mismatch' are failures; the reason never names a key.
+ */
+export async function checkSnapshot(row: SnapshotRow): Promise<{ ok: true; encrypted: boolean; bytes: number } | { ok: false; problem: 'missing' | 'unreadable' | 'mismatch'; detail: string }> {
+  const file = snapshotFile(row.storage_uri);
+  if (!file) return { ok: false, problem: 'missing', detail: 'The snapshot file is no longer in the backup directory.' };
+  try {
+    const d = await plaintextDigest(file);
+    if (d.sha256 !== row.sha256 || d.bytes !== Number(row.size_bytes)) return { ok: false, problem: 'mismatch', detail: 'The stored snapshot is not the bundle that was recorded.' };
+    return { ok: true, encrypted: d.encrypted, bytes: d.bytes };
+  } catch (err: any) {
+    return { ok: false, problem: 'unreadable', detail: err instanceof VaultError ? err.message : 'The snapshot file could not be read.' };
+  }
+}
+
+/** The plaintext bundle of a stored snapshot as a stream (decrypted if it is locked). Throws VaultError at once if the file cannot be opened at all. */
+export async function openSnapshotStream(file: string): Promise<{ stream: AsyncIterable<Buffer>; encrypted: boolean }> {
+  const h = await readHeader(file);
+  if (!h) return { stream: fs.createReadStream(file) as AsyncIterable<Buffer>, encrypted: false };
+  const keys = vaultKeys();
+  const iterator = decryptStream(file, keys);
+  // Open the first part now, so a missing key or a damaged header is an error the caller can still answer, not a download that breaks half way.
+  const first = await iterator.next();
+  async function* again() {
+    if (!first.done) yield first.value;
+    yield* iterator;
+  }
+  return { stream: again(), encrypted: true };
+}
+
+/**
+ * Locks every stored snapshot that is still a plain bundle (backups made before the vault), in place: the file keeps its name, so the record, which never
+ * changes, still points at it, and its SHA-256 is still the bundle's. Each file is checked after it is locked. Returns what it did.
+ */
+export async function encryptPlainSnapshots(pool: pg.Pool): Promise<{ encrypted: number; already: number; missing: number; failed: number }> {
+  const out = { encrypted: 0, already: 0, missing: 0, failed: 0 };
+  const rows = (await pool.query(`SELECT s.id, s.storage_uri, s.sha256, s.size_bytes, p.id AS project_id FROM mirror_snapshot s JOIN repository r ON r.id = s.repository_id JOIN project p ON p.id = r.project_id ORDER BY s.created_at`)).rows;
+  for (const row of rows) {
+    const file = snapshotFile(row.storage_uri);
+    if (!file) {
+      out.missing++;
+      continue;
+    }
+    if (await readHeader(file).catch(() => null)) {
+      out.already++;
+      continue;
+    }
+    const tmp = `${file}.locking`;
+    try {
+      const before = await plaintextDigest(file);
+      if (before.sha256 !== row.sha256) throw new Error('the plain file is not the recorded bundle');
+      fs.rmSync(tmp, { force: true });
+      await encryptFile(file, tmp);
+      const after = await plaintextDigest(tmp);
+      if (after.sha256 !== row.sha256) throw new Error('the locked file did not match');
+      fs.renameSync(tmp, file);
+      out.encrypted++;
+      await insertEvent({ project_id: row.project_id, actor_type: 'system', actor_id: 'vault', action: 'mirror.encrypted', subject_type: 'snapshot', subject_id: row.id, payload: { snapshot_id: row.id, sha256: row.sha256, encryption: 'vault-v1' } });
+    } catch (err: any) {
+      fs.rmSync(tmp, { force: true });
+      out.failed++;
+      console.error(`[vault] could not lock snapshot ${row.id}:`, err?.message ?? err);
+    }
+  }
+  return out;
+}
+
+/** After a change of vault key: locks every snapshot's data key with the current key (quick: the content is not touched). */
+export async function rewrapSnapshots(pool: pg.Pool): Promise<{ rewrapped: number; current: number; plain: number; missing: number; failed: number }> {
+  const out = { rewrapped: 0, current: 0, plain: 0, missing: 0, failed: 0 };
+  const keys = vaultKeys();
+  for (const row of (await pool.query(`SELECT storage_uri FROM mirror_snapshot ORDER BY created_at`)).rows) {
+    const file = snapshotFile(row.storage_uri);
+    if (!file) {
+      out.missing++;
+      continue;
+    }
+    try {
+      out[await rewrapFile(file, keys)]++;
+    } catch (err: any) {
+      out.failed++;
+      console.error('[vault] could not re-lock a snapshot:', err?.message ?? err);
+    }
+  }
+  return out;
+}

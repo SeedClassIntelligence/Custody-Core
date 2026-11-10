@@ -9,6 +9,7 @@ import { getAdminPool, getDbPool, runMigrations, insertEvent, verifyServerProjec
 import { forgetInstallationTokens } from '../server/github';
 import { closeOverdueDoors, takeDueSnapshots, checkDueLocks } from '../server/scheduler';
 import { takeDoorSnapshot, MAX_SNAPSHOT_ATTEMPTS } from '../server/snapshots';
+import { decryptFile } from '../server/vault';
 import { assertPoolTargetsTestDb } from './support/safety';
 import { startGitHubStandIn, StandIn } from './support/githubStandIn';
 import { startHarness, Harness } from './support/apiHarness';
@@ -190,9 +191,14 @@ describe('Scheduler: doors close at their end date, snapshots on close, locks re
     expect(s.refs[`refs/heads/door/${d.id}/feature`]).toBe(workSha);
     expect(Object.keys(s.refs)).toContain('refs/heads/main');
     const file = path.join(work, 'backups', ...s.storage_uri.replace('backup-dir:', '').split('/'));
-    expect(crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')).toBe(s.sha256);
+    // What is stored is locked (the vault): not a readable bundle. Opened with the server's key it is exactly the bundle that was recorded.
+    expect(fs.readFileSync(file).subarray(0, 8).toString('ascii')).toBe('CCVAULT1');
+    expect(fs.readFileSync(file).includes('# v2 git bundle')).toBe(false);
+    const opened = path.join(work, 'opened.bundle');
+    expect((await decryptFile(file, opened)).sha256).toBe(s.sha256);
+    expect(crypto.createHash('sha256').update(fs.readFileSync(opened)).digest('hex')).toBe(s.sha256);
     const restored = path.join(work, 'restored');
-    expect(gitLocal(['clone', '--quiet', file, restored]).code).toBe(0);
+    expect(gitLocal(['clone', '--quiet', opened, restored]).code).toBe(0);
     expect(gitLocal(['checkout', '--quiet', `door/${d.id}/feature`], restored).code).toBe(0);
     expect(fs.readFileSync(path.join(restored, 'feature.txt'), 'utf8')).toBe('door work\n');
     const written = (await events(d.id)).find((e) => e.action === 'mirror.written');

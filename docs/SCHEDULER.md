@@ -21,12 +21,12 @@ taken with `SELECT ... FOR UPDATE SKIP LOCKED`, so nothing happens twice).
   for it.
 - For each of the door's repositories, the server fetches the default branch and the door's own branches
   (`door/<door id>/...`) from GitHub, writes a git bundle, checks it with `git bundle verify`, stores it in
-  `BACKUP_DIR`, and records its SHA-256 and the exact branches and commits (`mirror.written`). The record cannot
+  `BACKUP_DIR` **encrypted** (the vault, `docs/VAULT.md`), and records the SHA-256 of the bundle and the exact branches and commits (`mirror.written`). The record cannot
   be changed afterwards (the database refuses).
 - If GitHub or the storage is unavailable, it is retried after 1, 2, 4, 8 ... minutes (at most 6 hours apart), up to 8
   attempts. The first failure is recorded (`mirror.delayed`), and so is giving up (`mirror.failed`).
 - The creator downloads each bundle from the door's page. It restores with plain git: `git clone <file>.bundle`.
-  Check the download: `sha256sum <file>.bundle` must match the SHA-256 shown and recorded.
+  Check the download: `sha256sum <file>.bundle` must match the SHA-256 shown and recorded. The download is the plain bundle (decrypted as it is sent); the file on the server is locked.
 
 **Where snapshots are stored:** a directory on the server, `BACKUP_DIR`. Put it on persistent storage (the Dockerfile
 uses `/data/backups`; mount a volume on `/data`). If it is not set, snapshots go to the system temp directory and the
