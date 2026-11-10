@@ -22,6 +22,7 @@ import { attributionCreatorRouter, attributionV2Router } from './server/attribut
 import { attestationCreatorRouter, attestationV2Router, authoritiesRouter } from './server/attestation';
 import { promotionCreatorRouter, promotionDecisionRouter, promotionV2Router } from './server/promotion';
 import { webhookEndpointsRouter } from './server/webhooks';
+import { openApiDocument } from './server/openapi';
 import { findScanner } from './server/gateway/scanner';
 import { githubApiRouter, githubCallbackRouter } from './server/githubRoutes';
 import { githubConfig } from './server/github';
@@ -342,6 +343,11 @@ v2Router.use('/work-sessions', evidenceV2Router);
 v2Router.use('/work-sessions', attributionV2Router);
 v2Router.use('/work-sessions', attestationV2Router);
 v2Router.use('/work-sessions', promotionV2Router);
+// The description of this API needs no credentials (it contains no secrets): it is how an integrator learns how to sign in.
+app.get('/api/v2/openapi.json', (_req, res) => {
+  res.setHeader('Cache-Control', 'public, max-age=300');
+  res.json(openApiDocument);
+});
 app.use('/api/v2', v2Router);
 
 // Bad requests get a short JSON answer; nothing internal (stack traces, database messages) is sent back.

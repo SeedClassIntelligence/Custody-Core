@@ -151,7 +151,7 @@ describe('Webhooks', () => {
       expect(list.body.endpoints.find((e: any) => e.id === row.id)).toMatchObject({ name: 'Main', deliveries: { pending: 0, delivered: 0, dead: 0 } });
       expect(JSON.stringify(list.body)).not.toContain(r.body.secret);
       expect((await h.api(other, 'GET', '/webhook-endpoints')).body.endpoints).toEqual([]);
-      const ev = (await admin.query(`SELECT payload FROM account_event WHERE action = 'webhook_endpoint.registered' ORDER BY seq DESC LIMIT 1`)).rows[0];
+      const ev = (await admin.query(`SELECT payload FROM account_event WHERE action = 'webhook_endpoint.registered' AND payload->>'endpoint_id' = $1`, [row.id])).rows[0];
       expect(ev.payload).toMatchObject({ endpoint_id: row.id, name: 'Main' });
       expect(JSON.stringify(ev.payload)).not.toContain(r.body.secret);
     });

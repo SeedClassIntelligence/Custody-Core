@@ -22,7 +22,8 @@
     "auth-stack:stop": "tsx scripts/auth-stack.ts stop",
     "auth-stack:status": "tsx scripts/auth-stack.ts status",
     "build:deploy-sql": "tsx scripts/build-deploy-sql.ts",
-    "tools:gitleaks": "tsx scripts/install-gitleaks.ts"
+    "tools:gitleaks": "tsx scripts/install-gitleaks.ts",
+    "build:openapi": "tsx scripts/build-openapi.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.2",
