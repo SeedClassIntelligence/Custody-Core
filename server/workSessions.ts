@@ -500,7 +500,9 @@ export async function expireOverdueSessions(pool: pg.Pool): Promise<string[]> {
         )
       ).rows[0];
       if (!s) return null;
-      await c.query(`UPDATE work_session SET status = 'expired', closed_at = now(), closed_reason = 'expired' WHERE id = $1`, [s.id]);
+      // A session that completed (its work was promoted) is closed when its time ends; it never "expires" (nothing was left undone).
+      const ending = s.status === 'completed' ? 'closed' : 'expired';
+      await c.query(`UPDATE work_session SET status = $2, closed_at = now(), closed_reason = $3 WHERE id = $1`, [s.id, ending, s.status === 'completed' ? 'completed_and_ended' : 'expired']);
       await revokeSessionCredentials(c, s, { type: 'system', id: 'scheduler' }, 'session_expired');
       await insertEvent(
         {
@@ -510,7 +512,7 @@ export async function expireOverdueSessions(pool: pg.Pool): Promise<string[]> {
           action: 'work_session.closed',
           subject_type: 'work_session',
           subject_id: s.id,
-          payload: { reason: 'expired', previous_status: s.status, end_time: new Date(s.expires_at).toISOString(), closed_seconds_after_end_time: Number(s.overdue_seconds) }
+          payload: { reason: s.status === 'completed' ? 'completed_and_ended' : 'expired', previous_status: s.status, end_time: new Date(s.expires_at).toISOString(), closed_seconds_after_end_time: Number(s.overdue_seconds) }
         },
         c
       );

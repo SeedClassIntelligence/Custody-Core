@@ -351,10 +351,12 @@ describe('Work sessions', () => {
     it('no machine route approves: not for the requester, and not even for a principal that holds work-sessions:approve', async () => {
       const id = await request();
       for (const c of [requester, approver]) {
-        for (const verb of ['approve', 'reject', 'promote']) {
+        for (const verb of ['approve', 'reject']) {
           const r = await v2(c, 'POST', `/work-sessions/${id}/${verb}`, {});
           expect([404, 405], `${verb}`).toContain(r.status);
         }
+        // Promotion (Phase 8) has a machine route to ASK for it, but only with repositories:promote, which neither of these holds.
+        expect((await v2(c, 'POST', `/work-sessions/${id}/promote`, {})).status).toBe(403);
       }
       expect((await sessionRow(id)).status).toBe('requested');
     });
