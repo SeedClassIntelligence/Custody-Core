@@ -172,6 +172,18 @@ is a conflict (`409`): a recorded statement is never replaced, issue a new one. 
 or `issuer_unavailable` (the principal is no longer active, or the key is revoked or expired: a revocation cannot say whether the key was already compromised, so what it signed stops counting). Rules: only the named issuer; only this commit (unless the requirement is not tied to a commit);
 the newest counting statement decides, so a later fail overrides a pass; `ready` means every required requirement is satisfied. The default commit is the session's newest. **Nothing acts on this yet**: promotion (a later phase) is what will require `ready`.
 
+## Attribution (Phase 7)
+
+`GET /api/v2/work-sessions/:id/attribution` (scope `work-sessions:read`, same visibility as the session; the owner has it under `/api/v1/projects/:id/work-sessions/:sid/attribution`) lists, for every commit the session pushed:
+
+- **author**: always the executor the session declared and the principal that requested it (`kind: "executor"`), plus the exact name and address written into the real commit (`as_written_in_git`);
+- **committer**: always the gateway;
+- **sponsor**: the creator who approved the session and answers for it;
+- **declared_author**: what the pushed commit *claimed*, kept as evidence with `trusted: false`. A commit that names the creator (or anyone) as its author is still attributed to the executor.
+
+The records are **derived by the database** from the session when the commit is recorded (a trigger), so no code path can write a different author, and they cannot be changed or deleted. The project's record gets an `attribution.recorded` event for each push that adds commits.
+The creator appears only as sponsor. This says who did the work and who answers for it; it does not say the work is good (evidence) or that anyone attests to it (Phase 7b).
+
 ## Approving (the project's creator)
 
 Under the full person login (password and authenticator code), `/api/v1/projects/:id/work-sessions`:

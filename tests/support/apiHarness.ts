@@ -10,6 +10,7 @@ import { developerRouter } from '../../server/developerRoutes';
 import { snapshotsRouter } from '../../server/snapshotRoutes';
 import { workSessionsCreatorRouter } from '../../server/workSessions';
 import { evidenceCreatorRouter } from '../../server/evidence';
+import { attributionCreatorRouter } from '../../server/attribution';
 
 /**
  * The real API routers behind a test login step that sets the creator, as the real login does after its checks
@@ -43,6 +44,7 @@ export async function startHarness(): Promise<Harness> {
   api.use('/projects/:id/snapshots', snapshotsRouter);
   api.use('/projects/:id/work-sessions', workSessionsCreatorRouter);
   api.use('/projects/:id/work-sessions', evidenceCreatorRouter);
+  api.use('/projects/:id/work-sessions', attributionCreatorRouter);
   app.use('/api/v1', api);
   const server = http.createServer(app);
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));

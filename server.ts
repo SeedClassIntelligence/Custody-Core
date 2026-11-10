@@ -18,6 +18,7 @@ import { gatewayRouter } from './server/gateway/router';
 import { sessionGatewayRouter } from './server/gateway/sessionRouter';
 import { sessionProvisioningRouter } from './server/sessionProvisioning';
 import { evidenceCreatorRouter, evidenceV2Router } from './server/evidence';
+import { attributionCreatorRouter, attributionV2Router } from './server/attribution';
 import { findScanner } from './server/gateway/scanner';
 import { githubApiRouter, githubCallbackRouter } from './server/githubRoutes';
 import { githubConfig } from './server/github';
@@ -116,6 +117,7 @@ const apiRouter = express.Router();
   apiRouter.use('/projects/:id/snapshots', snapshotsRouter);
   apiRouter.use('/projects/:id/work-sessions', workSessionsCreatorRouter);
   apiRouter.use('/projects/:id/work-sessions', evidenceCreatorRouter);
+  apiRouter.use('/projects/:id/work-sessions', attributionCreatorRouter);
 
   apiRouter.get('/me', (_req, res) => {
     const creator = creatorOf(res);
@@ -329,6 +331,7 @@ app.use('/api/v1', apiRouter);
 v2Router.use('/work-sessions', workSessionsV2Router);
 v2Router.use('/work-sessions', sessionProvisioningRouter);
 v2Router.use('/work-sessions', evidenceV2Router);
+v2Router.use('/work-sessions', attributionV2Router);
 app.use('/api/v2', v2Router);
 
 // Bad requests get a short JSON answer; nothing internal (stack traces, database messages) is sent back.

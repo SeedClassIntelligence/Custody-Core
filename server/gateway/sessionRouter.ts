@@ -98,6 +98,8 @@ interface SessionAccess {
   baseCommit: string;
   rules: { allowedRead: string[]; allowedWrite: string[]; prohibited: string[] };
   author: { name: string; email: string };
+  principalId: string | null;
+  sponsorId: string;
 }
 
 type Lookup = { ok: true; access: SessionAccess } | { ok: false; status: number; message: string };
@@ -117,6 +119,7 @@ async function lookup(token: string, sessionId: string, fullName: string): Promi
     `SELECT sc.id AS credential_id, sc.last_used_at, s.id AS session_id, s.project_id, s.status, s.expires_at, s.repository_id, s.repository_access,
             s.base_commit, s.allowed_read_paths, s.allowed_write_paths, s.prohibited_paths,
             s.executor_type, s.executor_provider, s.executor_model, s.executor_external_id, s.executor_display_name,
+            s.requested_by_principal_id, s.sponsor_id,
             r.full_name, r.provider, gi.installation_id, now() AS now
        FROM session_credential sc
        JOIN work_session s ON s.id = sc.work_session_id
@@ -148,7 +151,9 @@ async function lookup(token: string, sessionId: string, fullName: string): Promi
       readOnly: row.repository_access !== 'read_and_push',
       baseCommit: row.base_commit,
       rules: { allowedRead: row.allowed_read_paths, allowedWrite: row.allowed_write_paths, prohibited: row.prohibited_paths },
-      author: authorFor({ id: sessionId, ...row })
+      author: authorFor({ id: sessionId, ...row }),
+      principalId: row.requested_by_principal_id,
+      sponsorId: row.sponsor_id
     }
   };
 }
@@ -342,6 +347,10 @@ sessionGatewayRouter.use(async (req, res) => {
            VALUES ($1, $2, $3, $4, $5) ON CONFLICT (work_session_id, view_sha) DO NOTHING`,
           [sessionId, c.view_sha, c.real_sha, c.parent_view_sha, c.declared_author.slice(0, 200)]
         );
+      }
+      if (commits.length > 0) {
+        // Who the author is comes from the session, never from the push (the database derived the attribution rows when the commits were recorded).
+        await record(a, 'attribution.recorded', { author_principal_id: a.principalId, sponsor_id: a.sponsorId, committer: 'gateway', commits: commits.map((c: any) => c.real_sha) });
       }
       await record(a, 'git.push', { updates: refs, commits: commits.map((c: any) => ({ view: c.view_sha, real: c.real_sha })), scanner: outcome.scanner });
     } else {

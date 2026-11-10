@@ -520,6 +520,19 @@ describe('Controlled materialization: credentials, filtered view, session gatewa
       const push = (await events()).filter((e) => e.action === 'git.push' && e.payload.work_session_id === s.id).at(-1);
       expect(push).toMatchObject({ actor_type: 'gateway', actor_id: `session:${s.id}` });
       expect(push.payload.commits).toEqual([{ view: viewTip, real: tip.sha }]);
+      // who wrote it, as recorded: derived from the session, with the pushed claim (the creator's name) kept only as untrusted evidence
+      const attr = await v2(requester, 'GET', `/work-sessions/${s.id}/attribution`);
+      expect(attr.body.contributions).toHaveLength(1);
+      expect(attr.body.contributions[0]).toMatchObject({
+        commit: tip.sha,
+        author: { principal_id: requester.id, as_written_in_git: { name: tip.an, email: tip.ae } },
+        committer: { kind: 'gateway' },
+        sponsor: { id: creator.id },
+        declared_author: { value: 'Alice Creator <creator@example.com>', trusted: false }
+      });
+      const attrEvent = (await events()).filter((e) => e.action === 'attribution.recorded' && e.payload.work_session_id === s.id).at(-1);
+      expect(attrEvent).toMatchObject({ actor_type: 'gateway', actor_id: `session:${s.id}` });
+      expect(attrEvent.payload).toMatchObject({ author_principal_id: requester.id, sponsor_id: creator.id, committer: 'gateway', commits: [tip.sha] });
       const listed = await v2(requester, 'GET', `/work-sessions/${s.id}/commits`);
       expect(listed.body.commits).toEqual([expect.objectContaining({ view_sha: viewTip, real_sha: tip.sha, parent_view_sha: s.viewCommit })]);
       expect((await v2(intruder, 'GET', `/work-sessions/${s.id}/commits`)).status).toBe(404);
