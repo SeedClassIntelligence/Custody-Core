@@ -7,6 +7,7 @@ import { applyLock } from './lockService';
 import { backupDirIsDefault, takeDoorSnapshot } from './snapshots';
 import { expireOverdueSessions } from './workSessions';
 import { recoverStuckProvisioning } from './sessionProvisioning';
+import { deliverDueWebhooks } from './webhooks';
 
 /**
  * Work that happens on its own, inside the server process:
@@ -151,6 +152,17 @@ async function purgeUsedAssertions(pool: pg.Pool) {
   await pool.query('SELECT purge_expired_client_assertions()');
 }
 
+let webhooksRunning = false;
+function startWebhookDeliveries(pool: pg.Pool) {
+  if (webhooksRunning) return;
+  webhooksRunning = true;
+  deliverDueWebhooks(pool)
+    .catch((err) => console.error('[scheduler] delivering webhooks:', err?.message ?? err))
+    .finally(() => {
+      webhooksRunning = false;
+    });
+}
+
 async function tick(pool: pg.Pool) {
   try {
     await closeOverdueDoors(pool);
@@ -159,6 +171,7 @@ async function tick(pool: pg.Pool) {
     await takeDueSnapshots(pool);
     await checkDueLocks(pool);
     // Housekeeping, last and on its own: a failure here must never hold up closing doors or checking locks.
+    startWebhookDeliveries(pool); // not awaited: a slow receiver must never hold up closing doors or checking locks
     await purgeUsedAssertions(pool).catch((err) => console.error('[scheduler] purging used assertions:', err?.message ?? err));
     status.last_error = null;
   } catch (err: any) {

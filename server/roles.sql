@@ -53,6 +53,12 @@ REVOKE UPDATE, DELETE, TRUNCATE ON TABLE contribution_attribution FROM custody_a
 REVOKE UPDATE, DELETE, TRUNCATE ON TABLE attestation FROM custody_app;
 REVOKE DELETE, TRUNCATE ON TABLE attestation_authority FROM custody_app;
 REVOKE DELETE, TRUNCATE ON TABLE promotion_request FROM custody_app;
+REVOKE DELETE, TRUNCATE ON TABLE webhook_endpoint FROM custody_app;
+REVOKE DELETE, TRUNCATE ON TABLE webhook_delivery FROM custody_app;
+REVOKE UPDATE, DELETE, TRUNCATE ON TABLE webhook_attempt FROM custody_app;
+-- Used by a CHECK constraint on webhook_endpoint, which is evaluated as the application's account.
+GRANT EXECUTE ON FUNCTION webhook_events_valid(text[]) TO custody_app;
+GRANT EXECUTE ON FUNCTION webhook_event_matches(text[], text) TO custody_app;
 
 -- The app role must not be able to create objects (for example look-alike functions) in this schema.
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;

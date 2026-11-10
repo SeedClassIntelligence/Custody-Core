@@ -21,6 +21,7 @@ import { evidenceCreatorRouter, evidenceV2Router } from './server/evidence';
 import { attributionCreatorRouter, attributionV2Router } from './server/attribution';
 import { attestationCreatorRouter, attestationV2Router, authoritiesRouter } from './server/attestation';
 import { promotionCreatorRouter, promotionDecisionRouter, promotionV2Router } from './server/promotion';
+import { webhookEndpointsRouter } from './server/webhooks';
 import { findScanner } from './server/gateway/scanner';
 import { githubApiRouter, githubCallbackRouter } from './server/githubRoutes';
 import { githubConfig } from './server/github';
@@ -124,6 +125,7 @@ const apiRouter = express.Router();
   apiRouter.use('/attestation-authorities', authoritiesRouter);
   apiRouter.use('/projects/:id/work-sessions', promotionCreatorRouter);
   apiRouter.use('/projects/:id/promotions', promotionDecisionRouter);
+  apiRouter.use('/webhook-endpoints', webhookEndpointsRouter);
 
   apiRouter.get('/me', (_req, res) => {
     const creator = creatorOf(res);

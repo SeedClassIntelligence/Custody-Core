@@ -13,6 +13,7 @@ import { evidenceCreatorRouter } from '../../server/evidence';
 import { attributionCreatorRouter } from '../../server/attribution';
 import { attestationCreatorRouter, authoritiesRouter } from '../../server/attestation';
 import { promotionCreatorRouter, promotionDecisionRouter } from '../../server/promotion';
+import { webhookEndpointsRouter } from '../../server/webhooks';
 
 /**
  * The real API routers behind a test login step that sets the creator, as the real login does after its checks
@@ -51,6 +52,7 @@ export async function startHarness(): Promise<Harness> {
   api.use('/attestation-authorities', authoritiesRouter);
   api.use('/projects/:id/work-sessions', promotionCreatorRouter);
   api.use('/projects/:id/promotions', promotionDecisionRouter);
+  api.use('/webhook-endpoints', webhookEndpointsRouter);
   app.use('/api/v1', api);
   const server = http.createServer(app);
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
