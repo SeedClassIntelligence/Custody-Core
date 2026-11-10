@@ -29,3 +29,7 @@ services:
         generateValue: true
       - key: MFA_ENCRYPTION_KEY
         generateValue: true
+      # Backups are encrypted with this (docs/VAULT.md). Keep a copy somewhere else: without it a backup cannot be opened by anyone.
+      # If you remove this line, backups use a key derived from MFA_ENCRYPTION_KEY instead.
+      - key: VAULT_ENCRYPTION_KEY
+        generateValue: true
