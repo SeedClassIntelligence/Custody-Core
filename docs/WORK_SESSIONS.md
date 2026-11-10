@@ -172,6 +172,33 @@ is a conflict (`409`): a recorded statement is never replaced, issue a new one. 
 or `issuer_unavailable` (the principal is no longer active, or the key is revoked or expired: a revocation cannot say whether the key was already compromised, so what it signed stops counting). Rules: only the named issuer; only this commit (unless the requirement is not tied to a commit);
 the newest counting statement decides, so a later fail overrides a pass; `ready` means every required requirement is satisfied. The default commit is the session's newest. **Nothing acts on this yet**: promotion (a later phase) is what will require `ready`.
 
+## Attribution (Phase 7)
+
+`GET /api/v2/work-sessions/:id/attribution` (scope `work-sessions:read`, same visibility as the session; the owner has it under `/api/v1/projects/:id/work-sessions/:sid/attribution`) lists, for every commit the session pushed:
+
+- **author**: always the executor the session declared and the principal that requested it (`kind: "executor"`), plus the exact name and address written into the real commit (`as_written_in_git`);
+- **committer**: always the gateway;
+- **sponsor**: the creator who approved the session and answers for it;
+- **declared_author**: what the pushed commit *claimed*, kept as evidence with `trusted: false`. A commit that names the creator (or anyone) as its author is still attributed to the executor.
+
+The records are **derived by the database** from the session when the commit is recorded (a trigger), so no code path can write a different author, and they cannot be changed or deleted. The project's record gets an `attribution.recorded` event for each push that adds commits.
+The creator appears only as sponsor. This says who did the work and who answers for it; it does not say the work is good (evidence) or that anyone attests to it (Phase 7b).
+
+## Attestation by a signing authority (Phase 7b)
+
+The owner can register the **public key** of a signer they trust (`POST /api/v1/attestation-authorities` with `{ "name", "public_key": <Ed25519 or P-256 JWK> }`; `GET` lists; `POST /:id/revoke` is final). That signer can sign a statement about one commit of a session; the owner delivers it:
+
+```json
+POST /api/v1/projects/:id/work-sessions/:sid/attestations
+{ "authority_id": "...", "claim": "owner.reviewed", "subject_commit": "<a real commit id>", "issued_at": "2026-01-31T12:00:00Z",
+  "payload": { "optional": "plain JSON" }, "signature": { "algorithm": "Ed25519", "value": "<base64url>" } }
+```
+
+The signature is over the canonical JSON (`docs/EVENT_HASH_FORMAT.md`) of `{ format: "custody-core.attestation.v1", authority_id, work_session_id, claim, subject_commit, payload_sha256, issued_at }`
+(`payload_sha256` is the SHA-256 of the canonical JSON of `payload`, `{}` if none). It is **verified against the registered key before it is stored**, and never changed afterwards; anyone can check it again offline from the stored fields and the public key.
+The commit must be one the session produced and the time cannot be before it existed or in the future. A revoked authority is refused, and what it signed earlier is listed with `authority.active: false`. `GET .../attestations[?commit=<sha>]` lists them (owner; and machine callers with `work-sessions:read` at `/api/v2/work-sessions/:id/attestations`).
+This defines no particular signing service: one (Seed Signature, say) would be an authority. A valid attestation proves the key made the statement, not that the statement is true.
+
 ## Approving (the project's creator)
 
 Under the full person login (password and authenticator code), `/api/v1/projects/:id/work-sessions`:

@@ -49,6 +49,9 @@ REVOKE UPDATE, DELETE, TRUNCATE ON TABLE session_view FROM custody_app;
 REVOKE UPDATE, DELETE, TRUNCATE ON TABLE session_commit FROM custody_app;
 REVOKE UPDATE, DELETE, TRUNCATE ON TABLE evidence_requirement FROM custody_app;
 REVOKE UPDATE, DELETE, TRUNCATE ON TABLE evidence_submission FROM custody_app;
+REVOKE UPDATE, DELETE, TRUNCATE ON TABLE contribution_attribution FROM custody_app;
+REVOKE UPDATE, DELETE, TRUNCATE ON TABLE attestation FROM custody_app;
+REVOKE DELETE, TRUNCATE ON TABLE attestation_authority FROM custody_app;
 
 -- The app role must not be able to create objects (for example look-alike functions) in this schema.
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
