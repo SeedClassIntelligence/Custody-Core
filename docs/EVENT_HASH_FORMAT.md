@@ -71,6 +71,21 @@ Written by application code. The hash covers the same fields, serialised with `c
 by UTF-16 code unit, numbers as JavaScript prints them) over an object that includes the parsed
 `payload`. These events are never changed, and `verifyHashChain` still checks them this way.
 
+## Checking a record without Custody Core
+
+`scripts/verify-chain.mjs` verifies a project's record using nothing but Node's `crypto` and the format on this page (it imports no code from this project: a test checks that).
+
+```
+node scripts/verify-chain.mjs events.json --project <project id> --head <hash>
+node scripts/verify-chain.mjs --delivery webhook-body.json --chain events.json
+```
+
+`events.json` is the answer of `GET /api/v1/projects/:id/events`. It checks that every event is in the same project, that `seq` counts up from 1 with nothing missing, repeated or reordered, that each `prev_hash` is the previous event's `hash`, that each hash is what its stored fields hash to, and (version 2) that the stored payload is the one that was hashed.
+Exit status 0 means verified; 1 means not (it says where); 2 means the input could not be read.
+
+Because hash links only point backwards, **cutting off the newest events leaves a valid chain** (see below). `--head <hash>` closes that gap with something recorded elsewhere: the `record.hash` of the newest webhook delivery you received is one. `--delivery` checks one webhook body on its own (the event's hash recomputed from what was delivered) and, with `--chain`, that the record holds that event at that position.
+`tests/end_to_end.test.ts` runs the whole integration and then tries eleven ways of tampering with the exported record (a changed value, a changed actor, a removed, inserted, swapped or moved event, a forged hash or time) and forged deliveries: every one is caught.
+
 ## What the hash does not cover, and what verification cannot detect
 
 Verification recomputes every hash and checks each link. It proves that the stored fields of an event, and

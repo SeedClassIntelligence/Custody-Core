@@ -165,8 +165,8 @@ export interface ClientOptions {
   principalId: string;
   /** The id of the registered key (`key_id`), not the key itself. */
   keyId: string;
-  /** The private key: a Node KeyObject, or a PEM string. */
-  privateKey: crypto.KeyObject | string;
+  /** The private key: a Node KeyObject, a PEM string, or a private JWK (the file `npm run principal -- keygen` writes). */
+  privateKey: crypto.KeyObject | string | Record<string, unknown>;
   algorithm: KeyAlgorithm;
   /** Seconds each assertion is valid for (default 60, at most 300). */
   assertionLifetimeSeconds?: number;
@@ -182,7 +182,8 @@ const q = (params: Record<string, string | undefined>) => {
 export class CustodyCoreClient {
   private readonly key: crypto.KeyObject;
   constructor(private readonly o: ClientOptions) {
-    this.key = typeof o.privateKey === 'string' ? crypto.createPrivateKey(o.privateKey) : o.privateKey;
+    const k = o.privateKey;
+    this.key = typeof k === 'string' ? crypto.createPrivateKey(k) : 'kty' in (k as object) && !(k instanceof crypto.KeyObject) ? crypto.createPrivateKey({ key: k as crypto.JsonWebKey, format: 'jwk' }) : (k as crypto.KeyObject);
     if (!/^https?:\/\/[^/\s]+$/.test(o.baseUrl.replace(/\/+$/, ''))) throw new Error('baseUrl must be like https://custody.example.com');
   }
 

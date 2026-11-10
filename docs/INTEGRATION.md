@@ -61,6 +61,10 @@ With `repositories:promote`: `POST /api/v2/work-sessions/{id}/promote`. Refused 
 
 The owner registers a webhook endpoint (`docs/WEBHOOKS.md`); you receive signed events (`session approved`, `promotion completed`, ...) and verify them with the endpoint secret.
 
+## 8. Check the record yourself
+
+Everything above is written to the project's tamper-evident record. You do not have to trust our word that it is intact: export the events and run `node scripts/verify-chain.mjs events.json --head <the hash of the newest webhook you received>`. It uses nothing from this project (`docs/EVENT_HASH_FORMAT.md`).
+
 ## The client library
 
 ```ts
