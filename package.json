@@ -24,7 +24,8 @@
     "build:deploy-sql": "tsx scripts/build-deploy-sql.ts",
     "tools:gitleaks": "tsx scripts/install-gitleaks.ts",
     "build:openapi": "tsx scripts/build-openapi.ts",
-    "vault": "tsx scripts/vault.ts"
+    "vault": "tsx scripts/vault.ts",
+    "github-app:check": "tsx scripts/check-github-app.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.117.2",

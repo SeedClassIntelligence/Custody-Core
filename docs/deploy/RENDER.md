@@ -42,8 +42,9 @@ Multi-Factor > TOTP: disabled** (`docs/LOGIN_SETUP.md` explains why).
 - Open `https://<your address>/api/v1/health`: `"database": {"status": "connected"}` and `"scheduler": {..., "ok": true}`.
 - Open the address, sign up, confirm the email, set up the authenticator, claim a project.
 
-GitHub (Connect GitHub, doors, the gateway) needs the GitHub App: `docs/GITHUB_APP_SETUP.md`. Add its
-`GITHUB_APP_*` values in the service's **Environment** tab later; the rest works without them.
+GitHub (Connect GitHub, doors, the gateway, sessions, promotion) needs the GitHub App: `docs/GITHUB_APP_SETUP.md`. Add its
+`GITHUB_APP_*` values in the service's **Environment** tab later; the rest works without them. Once they are set, run
+`npm run github-app:check` (on your computer with a `.env`, or in the service's shell) to confirm the App is still in place.
 
 ## What the free plan means
 
