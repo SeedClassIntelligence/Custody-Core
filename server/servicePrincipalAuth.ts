@@ -59,7 +59,7 @@ function parseSegment(segment: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function verifySignature(algorithm: KeyAlgorithm, jwk: PublicJwk, signingInput: string, signature: Buffer): boolean {
+export function verifySignature(algorithm: KeyAlgorithm, jwk: PublicJwk, signingInput: string, signature: Buffer): boolean {
   const key = crypto.createPublicKey({ key: jwk as any, format: 'jwk' });
   if (algorithm === 'Ed25519') {
     if (signature.length !== 64) return false;

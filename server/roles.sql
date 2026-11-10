@@ -47,6 +47,8 @@ GRANT EXECUTE ON FUNCTION work_session_status_for_door(text, text) TO custody_ap
 -- The application may add them and read them, never change or delete them (a trigger refuses it too).
 REVOKE UPDATE, DELETE, TRUNCATE ON TABLE session_view FROM custody_app;
 REVOKE UPDATE, DELETE, TRUNCATE ON TABLE session_commit FROM custody_app;
+REVOKE UPDATE, DELETE, TRUNCATE ON TABLE evidence_requirement FROM custody_app;
+REVOKE UPDATE, DELETE, TRUNCATE ON TABLE evidence_submission FROM custody_app;
 
 -- The app role must not be able to create objects (for example look-alike functions) in this schema.
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
