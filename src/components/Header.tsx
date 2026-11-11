@@ -10,7 +10,9 @@ import {
   CheckCircle2,
   AlertTriangle,
   Sparkles,
-  Database
+  Database,
+  GitPullRequest,
+  Plug
 } from 'lucide-react';
 import { RoleMode, Connection } from '../types/custody';
 import type { GitHubStatus } from '../utils/api';
@@ -26,6 +28,8 @@ interface HeaderProps {
   onOpenSetup: () => void;
   userEmail: string;
   onSignOut: () => void;
+  /** Automated sessions waiting for the owner's approval. */
+  waitingSessions?: number;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -38,7 +42,8 @@ export const Header: React.FC<HeaderProps> = ({
   onConnectGitHub,
   onOpenSetup,
   userEmail,
-  onSignOut
+  onSignOut,
+  waitingSessions = 0
 }) => {
   const [dbStatus, setDbStatus] = useState<'checking' | 'connected' | 'not_connected'>('checking');
 
@@ -150,6 +155,33 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <Terminal className="w-3.5 h-3.5" />
               My Doors (developer)
+            </button>
+            <button
+              onClick={() => onSelectTab('sessions')}
+              className={`px-3 py-1.5 rounded-md font-medium transition-all flex items-center gap-1.5 ${
+                currentTab === 'sessions'
+                  ? 'bg-zinc-800 text-white shadow-sm'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              <GitPullRequest className="w-3.5 h-3.5 text-indigo-400" />
+              Work Sessions
+              {waitingSessions > 0 && (
+                <span className="bg-amber-500 text-zinc-950 text-[10px] font-bold rounded-full px-1.5" aria-label={`${waitingSessions} waiting for approval`}>
+                  {waitingSessions}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={() => onSelectTab('integrations')}
+              className={`px-3 py-1.5 rounded-md font-medium transition-all flex items-center gap-1.5 ${
+                currentTab === 'integrations'
+                  ? 'bg-zinc-800 text-white shadow-sm'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              <Plug className="w-3.5 h-3.5 text-indigo-400" />
+              Integrations
             </button>
             <button
               onClick={() => onSelectTab('activity')}
