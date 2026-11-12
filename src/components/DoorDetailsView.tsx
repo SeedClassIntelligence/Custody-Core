@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { DoorClosed, AlertCircle } from 'lucide-react';
 import { Project } from '../types/custody';
+import { verifySnapshot, SnapshotCheck } from '../utils/integrationApi';
 import { ServerDoor, fetchDoorAgreement, inviteDeveloper, fetchSnapshots, downloadSnapshot, Snapshot } from '../utils/api';
 
 interface DoorDetailsViewProps {
@@ -13,9 +14,19 @@ interface DoorDetailsViewProps {
 }
 
 /** The backup snapshot taken when the door closed: its status, and each repository's bundle to download. */
-function SnapshotSection({ door, projectId }: { door: ServerDoor; projectId: string }) {
+export function SnapshotSection({ door, projectId }: { door: ServerDoor; projectId: string }) {
   const [snaps, setSnaps] = useState<Snapshot[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [checks, setChecks] = useState<Record<string, SnapshotCheck | 'checking'>>({});
+  const check = (id: string) => {
+    setChecks((c) => ({ ...c, [id]: 'checking' }));
+    verifySnapshot(projectId, id)
+      .then((r) => setChecks((c) => ({ ...c, [id]: r })))
+      .catch((e) => {
+        setChecks((c) => { const { [id]: _x, ...rest } = c; return rest; });
+        setError(e.message);
+      });
+  };
   useEffect(() => {
     if (door.snapshot_status !== 'done') return;
     fetchSnapshots(projectId)
@@ -40,6 +51,19 @@ function SnapshotSection({ door, projectId }: { door: ServerDoor; projectId: str
           <button className="text-indigo-400 hover:text-indigo-300" onClick={() => downloadSnapshot(projectId, s).catch((e) => setError(e.message))}>
             Download (git clone works on it)
           </button>
+          <button className="text-indigo-400 hover:text-indigo-300" onClick={() => downloadSnapshot(projectId, s, { locked: true }).catch((e) => setError(e.message))}>
+            Download locked file
+          </button>
+          <button className="text-indigo-400 hover:text-indigo-300 disabled:opacity-50" disabled={checks[s.id] === 'checking'} onClick={() => check(s.id)}>
+            {checks[s.id] === 'checking' ? 'Checking...' : 'Check this backup'}
+          </button>
+          {checks[s.id] && checks[s.id] !== 'checking' && (
+            <span className={`w-full text-[11px] ${(checks[s.id] as SnapshotCheck).ok ? 'text-emerald-300' : 'text-rose-300'}`} role="status">
+              {(checks[s.id] as SnapshotCheck).ok
+                ? `Backup is intact: opened and matched its record (${(checks[s.id] as SnapshotCheck).bytes ?? '?'} bytes, ${(checks[s.id] as SnapshotCheck).encrypted ? 'locked with your server key' : 'not locked'}).`
+                : `Backup is damaged or unreadable: ${(checks[s.id] as SnapshotCheck).error ?? (checks[s.id] as SnapshotCheck).problem}`}
+            </span>
+          )}
           <span className="w-full font-mono text-[10px] text-zinc-500 break-all">SHA-256 {s.sha256}</span>
         </div>
       ))}

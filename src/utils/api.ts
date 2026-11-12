@@ -267,14 +267,14 @@ export async function fetchSnapshots(projectId: string): Promise<Snapshot[]> {
 }
 
 /** Downloads a snapshot bundle (with the login token) and hands it to the browser as a file. */
-export async function downloadSnapshot(projectId: string, s: Snapshot): Promise<void> {
-  const res = await authFetch(`/api/v1/projects/${projectId}/snapshots/${s.id}/bundle`);
+export async function downloadSnapshot(projectId: string, s: Snapshot, opts: { locked?: boolean } = {}): Promise<void> {
+  const res = await authFetch(`/api/v1/projects/${projectId}/snapshots/${s.id}/bundle${opts.locked ? '?encrypted=1' : ''}`);
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Download failed (${res.status}).`);
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${s.full_name.replace('/', '__')}-${s.created_at.slice(0, 10)}.bundle`;
+  a.download = `${s.full_name.replace('/', '__')}-${s.created_at.slice(0, 10)}.bundle${opts.locked ? '.locked' : ''}`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }

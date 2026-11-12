@@ -21,6 +21,9 @@ import { DoorDetailsView } from './components/DoorDetailsView';
 import { DeveloperDoorsView } from './components/DeveloperDoorsView';
 import { ActivityLogView } from './components/ActivityLogView';
 import { MirrorBackupView } from './components/MirrorBackupView';
+import { SessionsView } from './components/SessionsView';
+import { IntegrationsView } from './components/IntegrationsView';
+import { fetchWorkSessions } from './utils/integrationApi';
 import { AcceptanceSuiteView } from './components/AcceptanceSuiteView';
 
 // Modals
@@ -81,6 +84,7 @@ function Workspace({ auth }: { auth: AuthInfo }) {
 
   // Navigation & UI state
   const [currentTab, setCurrentTab] = useState<string>('dashboard');
+  const [waitingSessions, setWaitingSessions] = useState(0);
   const [roleMode, setRoleMode] = useState<RoleMode>('creator');
   const [selectedDoorId, setSelectedDoorId] = useState<string>('');
   const [github, setGithub] = useState<GitHubStatus | null>(null);
@@ -155,6 +159,22 @@ function Workspace({ auth }: { auth: AuthInfo }) {
   };
 
   const activeProjectId = state?.activeProjectId;
+  // How many automated sessions wait for approval, for the badge on the navigation. Checked now and every minute; failures leave the old number.
+  useEffect(() => {
+    if (!activeProjectId) return;
+    let stop = false;
+    const check = () =>
+      fetchWorkSessions(activeProjectId)
+        .then((all) => !stop && setWaitingSessions(all.filter((x) => x.session_type !== 'human_door' && x.status === 'requested').length))
+        .catch(() => {});
+    void check();
+    const timer = setInterval(check, 60_000);
+    return () => {
+      stop = true;
+      clearInterval(timer);
+    };
+  }, [activeProjectId]);
+
   useEffect(() => {
     if (!activeProjectId) return;
     setDoorsError(null);
@@ -258,6 +278,7 @@ function Workspace({ auth }: { auth: AuthInfo }) {
       <Header
         currentTab={currentTab}
         onSelectTab={setCurrentTab}
+        waitingSessions={waitingSessions}
         roleMode={roleMode}
         onSelectRoleMode={setRoleMode}
         connections={state.connections}
@@ -348,6 +369,18 @@ function Workspace({ auth }: { auth: AuthInfo }) {
             }}
           />
         )}
+
+        {currentTab === 'sessions' &&
+          (activeProject ? (
+            <SessionsView key={activeProject.id} projectId={activeProject.id} onCountChange={setWaitingSessions} />
+          ) : (
+            <div className="p-12 text-center text-zinc-400 bg-zinc-950 border border-zinc-800 rounded-2xl space-y-3">
+              <h3 className="font-semibold text-zinc-200 text-sm">No Project Claimed Yet</h3>
+              <p className="text-xs text-zinc-500 max-w-md mx-auto">Claim a project first to see work sessions.</p>
+            </div>
+          ))}
+
+        {currentTab === 'integrations' && <IntegrationsView />}
 
         {currentTab === 'activity' && <ActivityLogView events={state.events} projectId={activeProject?.id} />}
 
