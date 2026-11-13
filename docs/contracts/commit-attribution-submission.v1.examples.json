@@ -1,0 +1,121 @@
+{
+  "request": {
+    "authority_id": "63ad14f4-1cbe-4431-a7b1-b338d640abb0",
+    "claim": "commit.attribution",
+    "subject_commit": "b1753911697b098da650339fa447c4e311fc8a5d",
+    "issued_at": "2026-11-13T16:55:38Z",
+    "payload": {
+      "author_kind": "ai_assistant",
+      "model": "m1"
+    },
+    "signature": {
+      "algorithm": "Ed25519",
+      "value": "5X-tBqKOrdbA65lMd8cQWQWNDaLkDxfu6qLq5hu6TNlOrnL3OAo01Jcy8k0hG9hLFkDT1MR-2rNF97X1joqGBQ"
+    }
+  },
+  "responses": [
+    {
+      "label": "recorded",
+      "status": 201,
+      "body": {
+        "id": "3268e102-b107-48d4-b2cd-2a2a8af8d2f0",
+        "authority": {
+          "id": "63ad14f4-1cbe-4431-a7b1-b338d640abb0",
+          "name": "Signer-82dc60",
+          "active": true
+        },
+        "claim": "commit.attribution",
+        "subject_commit": "b1753911697b098da650339fa447c4e311fc8a5d",
+        "payload_sha256": "ae56778bfb1db872e5fa76e17f820902220b46a52c94437486e600a8b014075d",
+        "payload": {
+          "model": "m1",
+          "author_kind": "ai_assistant"
+        },
+        "issued_at": "2026-11-13T16:55:38Z",
+        "signature": {
+          "algorithm": "Ed25519",
+          "value": "5X-tBqKOrdbA65lMd8cQWQWNDaLkDxfu6qLq5hu6TNlOrnL3OAo01Jcy8k0hG9hLFkDT1MR-2rNF97X1joqGBQ"
+        },
+        "recorded_at": "2026-11-13T16:55:38.738Z",
+        "recorded": true,
+        "receipt": {
+          "contract": "commit-attribution-submission/1",
+          "attestation_id": "3268e102-b107-48d4-b2cd-2a2a8af8d2f0",
+          "work_session_id": "3e25e5a9-9d94-4d9c-a37c-489680734321",
+          "authority_id": "63ad14f4-1cbe-4431-a7b1-b338d640abb0",
+          "claim": "commit.attribution",
+          "subject_commit": "b1753911697b098da650339fa447c4e311fc8a5d",
+          "statement_sha256": "8fe6c7aaa6bbb5e006cb343c31cfe3357bf175a6c46c9c054ee607aa58fdc3a5",
+          "recorded_at": "2026-11-13T16:55:38.738Z"
+        }
+      }
+    },
+    {
+      "label": "identical retry",
+      "status": 200,
+      "body": {
+        "id": "3268e102-b107-48d4-b2cd-2a2a8af8d2f0",
+        "authority": {
+          "id": "63ad14f4-1cbe-4431-a7b1-b338d640abb0",
+          "name": "Signer-82dc60",
+          "active": true
+        },
+        "claim": "commit.attribution",
+        "subject_commit": "b1753911697b098da650339fa447c4e311fc8a5d",
+        "payload_sha256": "ae56778bfb1db872e5fa76e17f820902220b46a52c94437486e600a8b014075d",
+        "payload": {
+          "model": "m1",
+          "author_kind": "ai_assistant"
+        },
+        "issued_at": "2026-11-13T16:55:38Z",
+        "signature": {
+          "algorithm": "Ed25519",
+          "value": "5X-tBqKOrdbA65lMd8cQWQWNDaLkDxfu6qLq5hu6TNlOrnL3OAo01Jcy8k0hG9hLFkDT1MR-2rNF97X1joqGBQ"
+        },
+        "recorded_at": "2026-11-13T16:55:38.738Z",
+        "recorded": false,
+        "receipt": {
+          "contract": "commit-attribution-submission/1",
+          "attestation_id": "3268e102-b107-48d4-b2cd-2a2a8af8d2f0",
+          "work_session_id": "3e25e5a9-9d94-4d9c-a37c-489680734321",
+          "authority_id": "63ad14f4-1cbe-4431-a7b1-b338d640abb0",
+          "claim": "commit.attribution",
+          "subject_commit": "b1753911697b098da650339fa447c4e311fc8a5d",
+          "statement_sha256": "8fe6c7aaa6bbb5e006cb343c31cfe3357bf175a6c46c9c054ee607aa58fdc3a5",
+          "recorded_at": "2026-11-13T16:55:38.738Z"
+        }
+      }
+    },
+    {
+      "label": "no grant for this authority and project",
+      "status": 403,
+      "body": {
+        "error": "The owner has not granted this credential the right to deliver statements by that authority for this project.",
+        "code": "not_granted"
+      }
+    },
+    {
+      "label": "commit the session did not produce",
+      "status": 422,
+      "body": {
+        "error": "That is not a commit this session produced.",
+        "code": "unknown_commit"
+      }
+    },
+    {
+      "label": "claim other than commit.attribution",
+      "status": 422,
+      "body": {
+        "error": "A machine submission may only carry the \"commit.attribution\" claim.",
+        "code": "claim_not_allowed"
+      }
+    },
+    {
+      "label": "not your session",
+      "status": 404,
+      "body": {
+        "error": "No such work session."
+      }
+    }
+  ]
+}

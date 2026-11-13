@@ -63,6 +63,8 @@ The owner registers a webhook endpoint (`docs/WEBHOOKS.md`); you receive signed 
 
 ## 8. Check the record yourself
 
+Unattended publication of signed commit attributions (a signing service delivering to Custody Core without the owner's login) has its own contract: `docs/contracts/commit-attribution-submission.v1.md` (scope `attestations:submit`, an owner's grant, a stable receipt; detectable from `info.x-custody-contracts` in the API description).
+
 Everything above is written to the project's tamper-evident record. You do not have to trust our word that it is intact: export the events and run `node scripts/verify-chain.mjs events.json --head <the hash of the newest webhook you received>`. It uses nothing from this project (`docs/EVENT_HASH_FORMAT.md`).
 
 ## The client library

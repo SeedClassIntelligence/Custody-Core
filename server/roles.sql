@@ -52,6 +52,7 @@ REVOKE UPDATE, DELETE, TRUNCATE ON TABLE evidence_submission FROM custody_app;
 REVOKE UPDATE, DELETE, TRUNCATE ON TABLE contribution_attribution FROM custody_app;
 REVOKE UPDATE, DELETE, TRUNCATE ON TABLE attestation FROM custody_app;
 REVOKE DELETE, TRUNCATE ON TABLE attestation_authority FROM custody_app;
+REVOKE DELETE, TRUNCATE ON TABLE attestation_submission_grant FROM custody_app;
 REVOKE DELETE, TRUNCATE ON TABLE promotion_request FROM custody_app;
 REVOKE DELETE, TRUNCATE ON TABLE webhook_endpoint FROM custody_app;
 REVOKE DELETE, TRUNCATE ON TABLE webhook_delivery FROM custody_app;
