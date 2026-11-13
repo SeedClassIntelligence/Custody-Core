@@ -4,6 +4,15 @@
     "title": "Custody Core integration API",
     "version": "1.0.0",
     "summary": "Let an outside platform request, work on, evidence and promote code under the creator's control.",
+    "x-custody-contracts": {
+      "commit-attribution-submission": {
+        "version": "1",
+        "scope": "attestations:submit",
+        "route": "POST /api/v2/work-sessions/{id}/attestations",
+        "claim": "commit.attribution",
+        "document": "docs/contracts/commit-attribution-submission.v1.md"
+      }
+    },
     "description": "Machine callers sign in with a **client assertion**: a short-lived JWT signed with a key registered for their principal (EdDSA or ES256), sent as `Authorization: Bearer <jwt>` on every request. Claims: `iss` = `sub` = the principal id, `aud` = `custody-core`, `iat`, `exp` (at most 300 seconds after `iat`), a unique `jti`; header: `alg`, `kid` (the key id). What a caller may do comes from its principal's recorded scopes, never from the token.\n\nOwners use the `/api/v1` routes listed here with their signed-in session (a login with the authenticator code step). Approval and promotion decisions are only ever made there, by a person.\n\nErrors are `{ \"error\": \"<words>\", \"code\": \"<stable reason, where there is one>\" }`. Nothing in an error contains a secret.\n\nGuides: `docs/INTEGRATION.md` (the whole flow), `docs/WORK_SESSIONS.md`, `docs/WEBHOOKS.md`, `docs/EVENT_HASH_FORMAT.md`."
   },
   "servers": [
@@ -678,6 +687,83 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "post": {
+        "operationId": "submitAttestation",
+        "summary": "Deliver a detached signed commit-attribution statement for a commit of your own session (contract commit-attribution-submission/1).",
+        "tags": [
+          "Attribution"
+        ],
+        "security": [
+          {
+            "principalAssertion": []
+          }
+        ],
+        "description": "Scope `attestations:submit`, and an owner's grant naming this principal, the authority and the project (`/api/v1/attestation-submission-grants`). The scope alone permits nothing.\n\nOnly the claim `commit.attribution` is accepted here, and only for a session this principal requested. The owner, sponsor, requester, repository and project are taken from our records: the body cannot name them.\n\nThe signature is verified (before anything is stored) with the authority's registered key over the canonical statement described on `AttestationRequest`. Sending the identical statement again (after a lost response) answers 200 with the same receipt and `recorded: false`; a different statement for the same commit is a new attestation, never a replacement.\n\nErrors, all `{ error, code }`: 403 `not_granted`; 404 (not your session); 422 `claim_not_allowed`, `authority_revoked`, `bad_signature` (a changed claim, commit or payload fails here), `unknown_commit`, `issued_before_commit`, `issued_in_future`; 400 `secret_found`; 429 `too_many`; 503 `scanner_unavailable`.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The work session.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttestationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Already recorded: the same receipt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttestationSubmitted"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttestationSubmitted"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooMany"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
           }
         }
       }
@@ -1733,6 +1819,149 @@
                   "properties": {
                     "authority": {
                       "$ref": "#/components/schemas/AttestationAuthority"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/attestation-submission-grants": {
+      "get": {
+        "operationId": "listSubmissionGrants",
+        "summary": "Your submission grants.",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The grants.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "grants": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SubmissionGrant"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createSubmissionGrant",
+        "summary": "Let one service principal deliver statements by one of your authorities for one of your projects.",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "description": "The principal must already hold `attestations:submit` (a scope can never be added to an existing principal). Revoking the grant, the authority or the principal ends it at once.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmissionGrantRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Granted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "grant": {
+                      "$ref": "#/components/schemas/SubmissionGrant"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Unprocessable"
+          }
+        }
+      }
+    },
+    "/api/v1/attestation-submission-grants/{id}/revoke": {
+      "post": {
+        "operationId": "revokeSubmissionGrant",
+        "summary": "Revoke a grant (final).",
+        "tags": [
+          "Owner"
+        ],
+        "security": [
+          {
+            "ownerSession": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The grant.",
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "grant": {
+                      "$ref": "#/components/schemas/SubmissionGrant"
                     }
                   },
                   "additionalProperties": false
@@ -3445,6 +3674,173 @@
           "id",
           "claim",
           "subject_commit"
+        ],
+        "additionalProperties": false
+      },
+      "AttestationReceipt": {
+        "type": "object",
+        "properties": {
+          "contract": {
+            "type": "string",
+            "description": "The contract and version this server implements: \"commit-attribution-submission/1\"."
+          },
+          "attestation_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "work_session_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "authority_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "claim": {
+            "type": "string"
+          },
+          "subject_commit": {
+            "$ref": "#/components/schemas/Sha1"
+          },
+          "statement_sha256": {
+            "$ref": "#/components/schemas/Sha256",
+            "description": "SHA-256 of the exact signed statement. Identical on every retry; compute it yourself to check."
+          },
+          "recorded_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          }
+        },
+        "required": [
+          "contract",
+          "attestation_id",
+          "work_session_id",
+          "authority_id",
+          "claim",
+          "subject_commit",
+          "statement_sha256",
+          "recorded_at"
+        ],
+        "additionalProperties": false
+      },
+      "AttestationSubmitted": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "authority": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "active": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
+          "claim": {
+            "type": "string"
+          },
+          "subject_commit": {
+            "$ref": "#/components/schemas/Sha1"
+          },
+          "payload_sha256": {
+            "$ref": "#/components/schemas/Sha256"
+          },
+          "payload": {
+            "type": "object"
+          },
+          "issued_at": {
+            "$ref": "#/components/schemas/IssuedAt"
+          },
+          "signature": {
+            "type": "object",
+            "properties": {
+              "algorithm": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          },
+          "recorded_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "recorded": {
+            "type": "boolean",
+            "description": "False when this exact statement was already recorded (a retry)."
+          },
+          "receipt": {
+            "$ref": "#/components/schemas/AttestationReceipt"
+          }
+        },
+        "required": [
+          "id",
+          "claim",
+          "subject_commit",
+          "recorded",
+          "receipt"
+        ],
+        "additionalProperties": false
+      },
+      "SubmissionGrant": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "principal_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "authority_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "project_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "revoked_at": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "principal_id",
+          "authority_id",
+          "project_id"
+        ],
+        "additionalProperties": false
+      },
+      "SubmissionGrantRequest": {
+        "type": "object",
+        "properties": {
+          "principal_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "authority_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "project_id": {
+            "$ref": "#/components/schemas/Uuid"
+          }
+        },
+        "required": [
+          "principal_id",
+          "authority_id",
+          "project_id"
         ],
         "additionalProperties": false
       },

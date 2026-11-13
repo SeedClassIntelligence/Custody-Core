@@ -16,7 +16,9 @@ export const EXECUTION_SCOPES = [
   'work-sessions:read',
   'work-sessions:close-own',
   'evidence:submit',
-  'repositories:push-session'
+  'repositories:push-session',
+  /** Deliver a signed commit-attribution statement. Permits nothing without an owner's grant naming project and authority (docs/contracts/). */
+  'attestations:submit'
 ] as const;
 
 /**
@@ -33,7 +35,7 @@ export const ALL_SCOPES: readonly string[] = [...EXECUTION_SCOPES, ...HIGH_CONSE
  * scope (separation of duties; also a database CHECK in migration 011). Reading and closing one's own sessions are
  * not in this list: an approver may read what it is asked to approve.
  */
-export const WORK_PRODUCING_SCOPES = ['work-sessions:request', 'evidence:submit', 'repositories:push-session'] as const;
+export const WORK_PRODUCING_SCOPES = ['work-sessions:request', 'evidence:submit', 'repositories:push-session', 'attestations:submit'] as const;
 
 /** Why a set of scopes cannot be given to one principal, or null if it can. */
 export function scopeSetProblem(scopes: readonly string[]): string | null {

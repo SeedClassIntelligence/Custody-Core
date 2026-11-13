@@ -1,0 +1,109 @@
+{
+  "contract": "commit-attribution-submission",
+  "version": "1",
+  "result": "passed",
+  "tests_passed": 23,
+  "tests": [
+    {
+      "name": "the owner's grant is explicit, bounded to one principal, one authority and one project, and recorded",
+      "status": "passed"
+    },
+    {
+      "name": "the owner's grant cannot be made for a principal without the scope, another owner's things, an inactive principal, or a project off its list",
+      "status": "passed"
+    },
+    {
+      "name": "the owner's grant can be revoked, once and for good, and only by its owner",
+      "status": "passed"
+    },
+    {
+      "name": "submitting records the statement, answers with a receipt, and the receipt is readable through the existing read path",
+      "status": "passed"
+    },
+    {
+      "name": "submitting answers an identical retry with the same receipt and records nothing twice",
+      "status": "passed"
+    },
+    {
+      "name": "submitting handles concurrent identical submissions: one record, one event, one receipt",
+      "status": "passed"
+    },
+    {
+      "name": "submitting takes nothing about the owner, sponsor, requester, repository or project from the request",
+      "status": "passed"
+    },
+    {
+      "name": "what is refused a principal without the scope, with the scope but no grant, or with only read access",
+      "status": "passed"
+    },
+    {
+      "name": "what is refused an authority that was not granted, even a real one of the same owner; an authority of another owner reads the same",
+      "status": "passed"
+    },
+    {
+      "name": "what is refused a revoked authority, even though the grant still stands",
+      "status": "passed"
+    },
+    {
+      "name": "what is refused another project, another session, and another owner's session",
+      "status": "passed"
+    },
+    {
+      "name": "what is refused a principal whose project list excludes the session's project",
+      "status": "passed"
+    },
+    {
+      "name": "what is refused a commit the session did not produce",
+      "status": "passed"
+    },
+    {
+      "name": "what is refused any claim but commit.attribution",
+      "status": "passed"
+    },
+    {
+      "name": "what is refused a statement changed after it was signed: the claim, the commit, the payload, the time or the signature",
+      "status": "passed"
+    },
+    {
+      "name": "what is refused a secret in the payload, a statement from the future, and one older than its commit",
+      "status": "passed"
+    },
+    {
+      "name": "what is refused a suspended principal is refused before anything else",
+      "status": "passed"
+    },
+    {
+      "name": "the database holds the line too refuses a machine submission without a live grant, for another claim, or by a principal that did not request the session",
+      "status": "passed"
+    },
+    {
+      "name": "the database holds the line too refuses a grant whose principal lacks the scope, and the scope on a principal that approves",
+      "status": "passed"
+    },
+    {
+      "name": "existing behaviour is unchanged the owner's route still takes any claim, records the owner as the actor, and has no principal",
+      "status": "passed"
+    },
+    {
+      "name": "existing behaviour is unchanged existing scopes confer nothing: the read, request and push scopes cannot submit",
+      "status": "passed"
+    },
+    {
+      "name": "the published contract is advertised in the API description, so a client can tell whether this server supports it",
+      "status": "passed"
+    },
+    {
+      "name": "the published contract request, receipt and every error example conform to the description",
+      "status": "passed"
+    }
+  ],
+  "ran_at": "2026-11-13T16:55:41.017Z",
+  "base_commit": "c27f3d34013d4782d54e544ced838c1721d9a20a",
+  "sha256": {
+    "tests/attestation_submission.test.ts": "a1bc3482b63824f22df840941cdcbdd85a58d82468f1e31647502b83733808b5",
+    "server/attestation.ts": "eec39adbc5285e9e408202d2e71fc51b9226da312b11a09da581c59d7aab2ecd",
+    "server/migrations/020_attestation_submission.sql": "a9adb8d53fa1e660addabba6de0cf62573272e42923b36cc3e7e277624ea4f0f",
+    "docs/openapi.json": "a370f56e15906fda1987c59259c8c9ab55f11755dacc253bbb8ee12db3eb0393"
+  },
+  "note": "Run against a disposable database with disposable signing keys and repositories. The hashes identify the files that were tested; re-run with `npm run contract:receipt` to reproduce."
+}

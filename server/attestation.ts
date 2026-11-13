@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import express from 'express';
 import type pg from 'pg';
 import { canonicalJsonV2 } from '../shared/crypto';
@@ -22,6 +23,10 @@ import { scanTextForSecrets } from './textScan';
 
 export const ATTESTATION_FORMAT = 'custody-core.attestation.v1';
 export const MAX_ATTESTATIONS_PER_SESSION = 200;
+/** The only claim a machine submission (scope attestations:submit) may carry. The owner's own route accepts any claim, as before. */
+export const ATTRIBUTION_CLAIM = 'commit.attribution';
+/** Published in the API description (info.x-custody-contracts) so an integrator can tell whether this server supports the submission route. */
+export const SUBMISSION_CONTRACT = { name: 'commit-attribution-submission', version: '1' } as const;
 const CLOCK_SKEW_MS = 30_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HEX40 = /^[0-9a-f]{40}$/;
@@ -155,7 +160,12 @@ export async function attestationsFor(c: pg.Pool | pg.PoolClient, sessionId: str
   return { session_id: sessionId, attestations: rows.map(attestationView) };
 }
 
-export async function submitAttestation(pool: pg.Pool, creatorId: string, projectId: string, sessionId: string, body: unknown) {
+/** Who carries the statement when it is not the owner: a service principal, whose owner, sponsor and project all come from our records, never from the request. */
+export interface SubmissionVia {
+  principalId: string;
+}
+
+export async function submitAttestation(pool: pg.Pool, creatorId: string, projectId: string, sessionId: string, body: unknown, via?: SubmissionVia) {
   if (!isObject(body) || Object.keys(body).some((k) => !['authority_id', 'claim', 'subject_commit', 'issued_at', 'payload', 'signature'].includes(k))) {
     throw new AttestationError(400, 'Send { "authority_id", "claim", "subject_commit", "issued_at", "payload"?, "signature" }.', 'invalid');
   }
@@ -164,6 +174,7 @@ export async function submitAttestation(pool: pg.Pool, creatorId: string, projec
   if (typeof claim !== 'string' || !CLAIM.test(claim)) throw new AttestationError(400, 'claim must be lowercase letters, digits, "_", "." or "-", starting with a letter, at most 64 characters.', 'invalid');
   if (typeof subject_commit !== 'string' || !HEX40.test(subject_commit)) throw new AttestationError(400, 'subject_commit must be a full 40-character lowercase commit id.', 'invalid');
   if (typeof issued_at !== 'string' || !ISSUED_AT.test(issued_at) || Number.isNaN(Date.parse(issued_at))) throw new AttestationError(400, 'issued_at must be a UTC time like 2026-01-31T12:00:00Z (whole seconds).', 'invalid');
+  if (via && claim !== ATTRIBUTION_CLAIM) throw new AttestationError(422, `A machine submission may only carry the "${ATTRIBUTION_CLAIM}" claim.`, 'claim_not_allowed');
   const payload = (body as any).payload ?? {};
   const pp = contextProblem(payload);
   if (pp) throw new AttestationError(400, pp.replace(/^context/, 'payload'), 'invalid');
@@ -181,12 +192,21 @@ export async function submitAttestation(pool: pg.Pool, creatorId: string, projec
   if (scan.status !== 'clean') throw new AttestationError(503, 'The secret scanner is not available, so the attestation cannot be recorded. Try again later.', 'scanner_unavailable');
 
   const statement: AttestationStatement = { authority_id: authority_id.toLowerCase(), work_session_id: sessionId, claim, subject_commit, payload_sha256: payloadSha256(payload), issued_at };
+  const statementSha256 = crypto.createHash('sha256').update(attestationSigningInput(statement), 'utf8').digest('hex');
 
   return inTransaction(pool, async (c) => {
     const s = (
-      await c.query(`SELECT s.id FROM work_session s JOIN project p ON p.id = s.project_id WHERE s.id = $1 AND s.project_id = $2 AND p.creator_id = $3 AND s.session_type = 'automated_work_session' FOR UPDATE OF s`, [sessionId, projectId, creatorId])
+      await c.query(`SELECT s.id, s.requested_by_principal_id FROM work_session s JOIN project p ON p.id = s.project_id WHERE s.id = $1 AND s.project_id = $2 AND p.creator_id = $3 AND s.session_type = 'automated_work_session' FOR UPDATE OF s`, [sessionId, projectId, creatorId])
     ).rows[0];
     if (!s) throw new AttestationError(404, 'No such work session.', 'not_found');
+    if (via) {
+      // Before anything about the authority is looked at, so a caller learns nothing about authorities it was not granted.
+      if (s.requested_by_principal_id !== via.principalId) throw new AttestationError(404, 'No such work session.', 'not_found');
+      const grant = (
+        await c.query(`SELECT 1 FROM attestation_submission_grant WHERE principal_id = $1 AND authority_id = $2 AND project_id = $3 AND revoked_at IS NULL`, [via.principalId, statement.authority_id, projectId])
+      ).rows[0];
+      if (!grant) throw new AttestationError(403, 'The owner has not granted this credential the right to deliver statements by that authority for this project.', 'not_granted');
+    }
     const auth = (await c.query(`SELECT * FROM attestation_authority WHERE id = $1 AND creator_id = $2`, [statement.authority_id, creatorId])).rows[0];
     if (!auth) throw new AttestationError(404, 'No such authority.', 'not_found');
     if (auth.revoked_at) throw new AttestationError(422, 'This authority has been revoked.', 'authority_revoked');
@@ -211,30 +231,30 @@ export async function submitAttestation(pool: pg.Pool, creatorId: string, projec
         [sessionId, statement.authority_id, claim, subject_commit, new Date(issuedMs), statement.payload_sha256]
       )
     ).rows[0];
-    if (existing) return { created: false, attestation: attestationView(existing) };
+    if (existing) return { created: false, attestation: attestationView(existing), statementSha256 };
     const count = (await c.query(`SELECT count(*)::int AS n FROM attestation WHERE work_session_id = $1`, [sessionId])).rows[0].n;
     if (count >= MAX_ATTESTATIONS_PER_SESSION) throw new AttestationError(429, `This session already has ${count} attestations.`, 'too_many');
 
     const row = (
       await c.query(
-        `INSERT INTO attestation (work_session_id, authority_id, claim, subject_commit, payload_sha256, raw_payload, issued_at, signature_algorithm, signature_value, submitted_by_creator_id)
-         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10) RETURNING *`,
-        [sessionId, statement.authority_id, claim, subject_commit, statement.payload_sha256, JSON.stringify(payload), new Date(issuedMs), auth.algorithm, sigValue, creatorId]
+        `INSERT INTO attestation (work_session_id, authority_id, claim, subject_commit, payload_sha256, raw_payload, issued_at, signature_algorithm, signature_value, submitted_by_creator_id, submitted_by_principal_id)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11) RETURNING *`,
+        [sessionId, statement.authority_id, claim, subject_commit, statement.payload_sha256, JSON.stringify(payload), new Date(issuedMs), auth.algorithm, sigValue, creatorId, via?.principalId ?? null]
       )
     ).rows[0];
     await insertEvent(
       {
         project_id: projectId,
-        actor_type: 'creator',
-        actor_id: creatorId,
+        actor_type: via ? 'system' : 'creator',
+        actor_id: via ? `principal:${via.principalId}` : creatorId,
         action: 'attestation.recorded',
         subject_type: 'work_session',
         subject_id: sessionId,
-        payload: { attestation_id: row.id, authority_id: statement.authority_id, authority_fingerprint: auth.fingerprint, claim, subject_commit, payload_sha256: statement.payload_sha256, issued_at, signature_algorithm: auth.algorithm }
+        payload: { attestation_id: row.id, authority_id: statement.authority_id, authority_fingerprint: auth.fingerprint, claim, subject_commit, payload_sha256: statement.payload_sha256, issued_at, signature_algorithm: auth.algorithm, ...(via ? { submitted_by_principal_id: via.principalId } : {}) }
       },
       c
     );
-    return { created: true, attestation: attestationView({ ...row, authority_name: auth.name, authority_revoked_at: null }) };
+    return { created: true, attestation: attestationView({ ...row, authority_name: auth.name, authority_revoked_at: null }), statementSha256 };
   });
 }
 
@@ -245,6 +265,90 @@ function fail(res: express.Response, err: any, what: string) {
   console.error(`[attestation] ${what}:`, err?.message ?? err);
   return res.status(500).json({ error: 'Something went wrong on the server.' });
 }
+
+// --- submission grants -------------------------------------------------------------------------------------------------------------
+
+const grantView = (r: any) => ({
+  id: r.id,
+  principal_id: r.principal_id,
+  authority_id: r.authority_id,
+  project_id: r.project_id,
+  created_at: new Date(r.created_at).toISOString(),
+  revoked_at: r.revoked_at ? new Date(r.revoked_at).toISOString() : null
+});
+
+/** The owner lets one service principal deliver statements by one of their authorities for one of their projects. The principal must already hold attestations:submit (that is set when it is registered and can never be added later). */
+export async function createSubmissionGrant(pool: pg.Pool, creatorId: string, input: unknown) {
+  if (!isObject(input) || Object.keys(input).some((k) => !['principal_id', 'authority_id', 'project_id'].includes(k))) {
+    throw new AttestationError(400, 'Send { "principal_id", "authority_id", "project_id" }.', 'invalid');
+  }
+  for (const k of ['principal_id', 'authority_id', 'project_id']) if (typeof input[k] !== 'string' || !UUID.test(input[k] as string)) throw new AttestationError(400, `${k} must be an id.`, 'invalid');
+  const [principalId, authorityId, projectId] = ['principal_id', 'authority_id', 'project_id'].map((k) => (input[k] as string).toLowerCase());
+  return inTransaction(pool, async (c) => {
+    const sp = (await c.query(`SELECT id, status, allowed_scopes, allowed_project_ids FROM service_principal WHERE id = $1 AND creator_id = $2`, [principalId, creatorId])).rows[0];
+    if (!sp) throw new AttestationError(404, 'No such service principal.', 'not_found');
+    if (!(await c.query(`SELECT 1 FROM attestation_authority WHERE id = $1 AND creator_id = $2`, [authorityId, creatorId])).rowCount) throw new AttestationError(404, 'No such authority.', 'not_found');
+    if (!(await c.query(`SELECT 1 FROM project WHERE id = $1 AND creator_id = $2`, [projectId, creatorId])).rowCount) throw new AttestationError(404, 'No such project.', 'not_found');
+    if (sp.status !== 'active') throw new AttestationError(422, 'That service principal is not active.', 'principal_inactive');
+    if (!sp.allowed_scopes.includes('attestations:submit')) throw new AttestationError(422, 'That service principal does not hold the attestations:submit scope. Scopes cannot be added to a principal: register a new one.', 'scope_missing');
+    if (sp.allowed_project_ids && !sp.allowed_project_ids.includes(projectId)) throw new AttestationError(422, "That project is not on the service principal's project list.", 'project_not_allowed');
+    let row;
+    try {
+      row = (await c.query(`INSERT INTO attestation_submission_grant (creator_id, principal_id, authority_id, project_id) VALUES ($1, $2, $3, $4) RETURNING *`, [creatorId, principalId, authorityId, projectId])).rows[0];
+    } catch (err: any) {
+      if (err?.code === '23505') throw new AttestationError(409, 'That grant already exists (a revoked grant stays revoked).', 'conflict');
+      if (err?.code === '23514') throw new AttestationError(422, 'The authority must not be revoked.', 'authority_revoked');
+      throw err;
+    }
+    await accountEvent(c, creatorId, 'attestation_submission_grant.created', { grant_id: row.id, principal_id: principalId, authority_id: authorityId, project_id: projectId });
+    return grantView(row);
+  });
+}
+
+export async function revokeSubmissionGrant(pool: pg.Pool, creatorId: string, id: string) {
+  return inTransaction(pool, async (c) => {
+    const g = (await c.query(`SELECT * FROM attestation_submission_grant WHERE id = $1 AND creator_id = $2 FOR UPDATE`, [id, creatorId])).rows[0];
+    if (!g) throw new AttestationError(404, 'No such grant.', 'not_found');
+    if (g.revoked_at) return grantView(g);
+    const row = (await c.query(`UPDATE attestation_submission_grant SET revoked_at = now() WHERE id = $1 RETURNING *`, [id])).rows[0];
+    await accountEvent(c, creatorId, 'attestation_submission_grant.revoked', { grant_id: id, principal_id: g.principal_id, authority_id: g.authority_id, project_id: g.project_id });
+    return grantView(row);
+  });
+}
+
+/** Mounted at /api/v1/attestation-submission-grants, behind the full login. */
+export const submissionGrantsRouter = express.Router();
+
+submissionGrantsRouter.get('/', async (_req, res) => {
+  const pool = getDbPool();
+  if (!pool) return res.status(503).json({ error: 'Database not connected.' });
+  try {
+    res.json({ grants: (await pool.query(`SELECT * FROM attestation_submission_grant WHERE creator_id = $1 ORDER BY created_at`, [creatorOf(res).id])).rows.map(grantView) });
+  } catch (err) {
+    fail(res, err, 'listing grants');
+  }
+});
+
+submissionGrantsRouter.post('/', async (req, res) => {
+  const pool = getDbPool();
+  if (!pool) return res.status(503).json({ error: 'Database not connected.' });
+  try {
+    res.status(201).json({ grant: await createSubmissionGrant(pool, creatorOf(res).id, req.body) });
+  } catch (err) {
+    fail(res, err, 'creating a grant');
+  }
+});
+
+submissionGrantsRouter.post('/:id/revoke', async (req, res) => {
+  const pool = getDbPool();
+  if (!pool) return res.status(503).json({ error: 'Database not connected.' });
+  if (!UUID.test(req.params.id)) return res.status(404).json({ error: 'No such grant.' });
+  try {
+    res.json({ grant: await revokeSubmissionGrant(pool, creatorOf(res).id, req.params.id.toLowerCase()) });
+  } catch (err) {
+    fail(res, err, 'revoking a grant');
+  }
+});
 
 /** Mounted at /api/v1/attestation-authorities, behind the full login. */
 export const authoritiesRouter = express.Router();
@@ -345,5 +449,45 @@ attestationV2Router.get('/:id/attestations', requireScope('work-sessions:read'),
     res.json(await attestationsFor(pool, s.id, commit));
   } catch (err) {
     fail(res, err, 'reading attestations');
+  }
+});
+
+/**
+ * Contract "commit-attribution-submission" v1. A service principal that holds attestations:submit, for a session it requested, delivers a detached signed
+ * statement by an authority the owner granted it for this project. The owner, sponsor, requester, repository and project come from our records.
+ */
+attestationV2Router.post('/:id/attestations', requireScope('attestations:submit'), async (req, res) => {
+  const pool = getDbPool();
+  if (!pool) return res.status(503).json({ error: 'Database not connected.' });
+  if (!UUID.test(req.params.id)) return res.status(404).json({ error: 'No such work session.' });
+  try {
+    const p = principalOf(res);
+    const s = (
+      await pool.query(
+        `SELECT s.id, s.project_id FROM work_session s JOIN project pr ON pr.id = s.project_id
+          WHERE s.id = $1 AND s.session_type = 'automated_work_session' AND pr.creator_id = $2 AND s.requested_by_principal_id = $3
+            AND ($4::uuid[] IS NULL OR s.project_id = ANY($4::uuid[]))`,
+        [req.params.id, p.creatorId, p.id, p.allowedProjectIds]
+      )
+    ).rows[0];
+    if (!s) return res.status(404).json({ error: 'No such work session.' });
+    const out = await submitAttestation(pool, p.creatorId, s.project_id, s.id, req.body, { principalId: p.id });
+    const a = out.attestation;
+    res.status(out.created ? 201 : 200).json({
+      ...a,
+      recorded: out.created,
+      receipt: {
+        contract: `${SUBMISSION_CONTRACT.name}/${SUBMISSION_CONTRACT.version}`,
+        attestation_id: a.id,
+        work_session_id: s.id,
+        authority_id: a.authority.id,
+        claim: a.claim,
+        subject_commit: a.subject_commit,
+        statement_sha256: out.statementSha256,
+        recorded_at: a.recorded_at
+      }
+    });
+  } catch (err) {
+    fail(res, err, 'submitting an attestation');
   }
 });

@@ -67,6 +67,15 @@ describe('SDK and OpenAPI description, against the real application', () => {
   const problems: string[] = [];
   const exercised = new Set<string>();
   let negative = 0; // inside a deliberately bad request, the request itself is not held to the document (the answer still is)
+  const expectError = async (p: () => Promise<unknown> | Promise<unknown>, status: number, code?: string) => {
+    negative++;
+    const err: any = await (typeof p === 'function' ? p() : p).then(() => null, (e: any) => e).finally(() => negative--);
+    expect(err, 'expected a refusal').toBeInstanceOf(CustodyCoreError);
+    expect(err.status).toBe(status);
+    if (code) expect(err.code).toBe(code);
+    expect(err.message).not.toMatch(/ccs_|whsec_|BEGIN/);
+    return err as CustodyCoreError;
+  };
   const checking: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     const method = init?.method ?? 'GET';
@@ -140,7 +149,7 @@ describe('SDK and OpenAPI description, against the real application', () => {
     await db.query(`INSERT INTO github_installation (creator_id, installation_id, account_login, account_type, connected_by_github_login) VALUES ($1, $2, $3, 'Organization', 'octo')`, [creator.id, INSTALLATION, ORG]);
     projectId = (await db.query(`INSERT INTO project (creator_id, name, purpose, status) VALUES ($1, 'SDK', 'x', 'active') RETURNING id`, [creator.id])).rows[0].id;
     repoId = (await db.query(`INSERT INTO repository (project_id, github_repo_id, full_name) VALUES ($1, '1', $2) RETURNING id`, [projectId, APP])).rows[0].id;
-    requester = await principal('requester', ['work-sessions:request', 'work-sessions:read', 'work-sessions:close-own', 'repositories:push-session']);
+    requester = await principal('requester', ['work-sessions:request', 'work-sessions:read', 'work-sessions:close-own', 'repositories:push-session', 'attestations:submit']);
     ci = await principal('ci', ['evidence:submit']);
     ciEs = await principal('ci-es', ['evidence:submit'], 'ES256');
     promoter = await principal('promoter', ['repositories:promote', 'work-sessions:read']);
@@ -267,6 +276,18 @@ describe('SDK and OpenAPI description, against the real application', () => {
       expect(delivered.status, JSON.stringify(delivered.body)).toBe(201);
       expect((await requester.client.listAttestations(sessionId, commit)).map((a) => a.claim)).toEqual(['owner.reviewed']);
       expect((await owner(creator, 'GET', `/projects/${projectId}/work-sessions/${sessionId}/attestations`)).body.attestations).toHaveLength(1);
+      // Unattended delivery: the owner grants this principal the authority for the project; the principal submits and gets a receipt.
+      const gr = await owner(creator, 'POST', '/attestation-submission-grants', { principal_id: requester.id, authority_id: authority.id, project_id: projectId });
+      expect(gr.status, JSON.stringify(gr.body)).toBe(201);
+      expect((await owner(creator, 'GET', '/attestation-submission-grants')).body.grants).toHaveLength(1);
+      const sent = await requester.client.submitAttestation(sessionId, { authority_id: authority.id, subject_commit: commit, payload: { author_kind: 'ai_assistant' }, signWith: { privateKey: key.privateKey, algorithm: 'ES256' } });
+      expect(sent).toMatchObject({ recorded: true, claim: 'commit.attribution', receipt: { contract: 'commit-attribution-submission/1', subject_commit: commit } });
+      const again = await requester.client.submitAttestation(sessionId, { authority_id: authority.id, subject_commit: commit, payload: { author_kind: 'ai_assistant' }, issued_at: sent.issued_at as string, signWith: { privateKey: key.privateKey, algorithm: 'ES256' } });
+      expect(again).toMatchObject({ recorded: false, receipt: sent.receipt });
+      await expectError(() => requester.client.submitAttestation(sessionId, { authority_id: authority!.id, subject_commit: commit, claim: 'owner.reviewed', signWith: { privateKey: key.privateKey, algorithm: 'ES256' } }), 422);
+      expect((await requester.client.listAttestations(sessionId, commit)).map((a) => a.claim).sort()).toEqual(['commit.attribution', 'owner.reviewed']);
+      expect((await owner(creator, 'POST', `/attestation-submission-grants/${gr.body.grant.id}/revoke`, {})).body.grant.revoked_at).not.toBeNull();
+      await expectError(() => requester.client.submitAttestation(sessionId, { authority_id: authority!.id, subject_commit: commit, payload: { n: 2 }, signWith: { privateKey: key.privateKey, algorithm: 'ES256' } }), 403);
       expect((await owner(creator, 'POST', `/attestation-authorities/${authority.id}/revoke`, {})).body.authority.revoked_at).not.toBeNull();
     });
 
@@ -327,16 +348,6 @@ describe('SDK and OpenAPI description, against the real application', () => {
 
   // ------------------------------------------------------------------------------------------------------------
   describe('refusals are described too, and reach the caller as CustodyCoreError', () => {
-    const expectError = async (p: () => Promise<unknown> | Promise<unknown>, status: number, code?: string) => {
-      negative++;
-      const err: any = await (typeof p === 'function' ? p() : p).then(() => null, (e: any) => e).finally(() => negative--);
-      expect(err, 'expected a refusal').toBeInstanceOf(CustodyCoreError);
-      expect(err.status).toBe(status);
-      if (code) expect(err.code).toBe(code);
-      expect(err.message).not.toMatch(/ccs_|whsec_|BEGIN/);
-      return err as CustodyCoreError;
-    };
-
     it('wrong key, wrong scope, not yours, not ready, not approved, bad input', async () => {
       const wrongKey = new CustodyCoreClient({ baseUrl: app.base, principalId: requester.id, keyId: requester.keyId, privateKey: newKey('Ed25519').privateKey, algorithm: 'Ed25519', fetch: checking });
       await expectError(() => wrongKey.whoami(), 401);

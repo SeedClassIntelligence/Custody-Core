@@ -11,7 +11,7 @@ import { snapshotsRouter } from '../../server/snapshotRoutes';
 import { workSessionsCreatorRouter } from '../../server/workSessions';
 import { evidenceCreatorRouter } from '../../server/evidence';
 import { attributionCreatorRouter } from '../../server/attribution';
-import { attestationCreatorRouter, authoritiesRouter } from '../../server/attestation';
+import { attestationCreatorRouter, authoritiesRouter, submissionGrantsRouter } from '../../server/attestation';
 import { promotionCreatorRouter, promotionDecisionRouter } from '../../server/promotion';
 import { webhookEndpointsRouter } from '../../server/webhooks';
 
@@ -50,6 +50,7 @@ export async function startHarness(): Promise<Harness> {
   api.use('/projects/:id/work-sessions', attributionCreatorRouter);
   api.use('/projects/:id/work-sessions', attestationCreatorRouter);
   api.use('/attestation-authorities', authoritiesRouter);
+  api.use('/attestation-submission-grants', submissionGrantsRouter);
   api.use('/projects/:id/work-sessions', promotionCreatorRouter);
   api.use('/projects/:id/promotions', promotionDecisionRouter);
   api.use('/webhook-endpoints', webhookEndpointsRouter);

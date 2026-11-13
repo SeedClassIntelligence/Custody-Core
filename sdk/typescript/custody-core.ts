@@ -64,6 +64,28 @@ export interface AttestationStatement {
   issued_at: string;
 }
 
+export interface AttributionInput {
+  authority_id: string;
+  subject_commit: string;
+  /** Default "commit.attribution", the only claim a machine submission may carry. */
+  claim?: string;
+  payload?: Record<string, unknown>;
+  issued_at?: string;
+  signature?: { algorithm: KeyAlgorithm; value: string };
+  signWith?: { privateKey: crypto.KeyObject; algorithm: KeyAlgorithm };
+}
+export interface AttestationReceipt {
+  contract: string;
+  attestation_id: string;
+  work_session_id: string;
+  authority_id: string;
+  claim: string;
+  subject_commit: string;
+  statement_sha256: string;
+  recorded_at: string;
+}
+export type AttestationSubmitted = Record<string, unknown> & { id: string; recorded: boolean; receipt: AttestationReceipt };
+
 /** The exact text a signing authority signs (for the tool that makes attestations; the owner delivers them). */
 export function attestationSigningInput(s: AttestationStatement): string {
   return canonicalJson({ format: 'custody-core.attestation.v1', ...s });
@@ -266,6 +288,20 @@ export class CustodyCoreClient {
   }
   async listAttestations(id: string, commit?: string) {
     return (await this.get<{ attestations: Array<Record<string, unknown>> }>(`/work-sessions/${id}/attestations${q({ commit })}`)).attestations;
+  }
+  /**
+   * Contract commit-attribution-submission/1 (docs/contracts/): deliver a detached statement by a signing authority the owner has granted this principal,
+   * about a commit of a session this principal requested. Scope attestations:submit. Identical statements are safe to send again; the answer carries the same receipt.
+   * The authority signs, not this client: pass its `signature`, or `signWith` (its private key) where the key is at hand. `issued_at` must be the same on a retry.
+   */
+  submitAttestation(sessionId: string, a: AttributionInput) {
+    const payload = a.payload ?? {};
+    const claim = a.claim ?? 'commit.attribution';
+    const issued_at = a.issued_at ?? new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+    const statement: AttestationStatement = { authority_id: a.authority_id, work_session_id: sessionId, claim, subject_commit: a.subject_commit, payload_sha256: payloadSha256(payload), issued_at };
+    const signature = a.signature ?? (a.signWith ? { algorithm: a.signWith.algorithm, value: signText(a.signWith.privateKey, a.signWith.algorithm, attestationSigningInput(statement)) } : null);
+    if (!signature) throw new Error('submitAttestation needs the authority\'s signature (or signWith, its private key).');
+    return this.post<AttestationSubmitted>(`/work-sessions/${sessionId}/attestations`, { authority_id: a.authority_id, claim, subject_commit: a.subject_commit, issued_at, payload, signature });
   }
   /** Scope repositories:promote. The request waits for the owner. */
   async requestPromotion(id: string, commit?: string) {

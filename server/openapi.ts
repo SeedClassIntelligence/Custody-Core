@@ -7,6 +7,8 @@
  * (`npm run build:openapi`).
  */
 
+import { ATTRIBUTION_CLAIM, SUBMISSION_CONTRACT } from './attestation';
+
 type J = Record<string, any>;
 const ref = (name: string): J => ({ $ref: `#/components/schemas/${name}` });
 const resp = (name: string): J => ({ $ref: `#/components/responses/${name}` });
@@ -180,6 +182,16 @@ const schemas: J = {
   Attestations: obj({ session_id: ref('Uuid'), attestations: arr(ref('Attestation')) }),
   Attestation: attestationView,
   AttestationRecorded: { ...attestationView, properties: { ...attestationView.properties, recorded: { type: 'boolean', description: 'False when this exact statement was already recorded.' } } },
+  AttestationReceipt: obj(
+    {
+      contract: str({ description: 'The contract and version this server implements: "commit-attribution-submission/1".' }), attestation_id: ref('Uuid'), work_session_id: ref('Uuid'), authority_id: ref('Uuid'),
+      claim: str(), subject_commit: ref('Sha1'), statement_sha256: { ...ref('Sha256'), description: 'SHA-256 of the exact signed statement. Identical on every retry; compute it yourself to check.' }, recorded_at: ref('Timestamp')
+    },
+    ['contract', 'attestation_id', 'work_session_id', 'authority_id', 'claim', 'subject_commit', 'statement_sha256', 'recorded_at']
+  ),
+  AttestationSubmitted: { ...attestationView, properties: { ...attestationView.properties, recorded: { type: 'boolean', description: 'False when this exact statement was already recorded (a retry).' }, receipt: ref('AttestationReceipt') }, required: [...attestationView.required, 'recorded', 'receipt'] },
+  SubmissionGrant: obj({ id: ref('Uuid'), principal_id: ref('Uuid'), authority_id: ref('Uuid'), project_id: ref('Uuid'), created_at: ref('Timestamp'), revoked_at: nullable(ref('Timestamp')) }, ['id', 'principal_id', 'authority_id', 'project_id']),
+  SubmissionGrantRequest: obj({ principal_id: ref('Uuid'), authority_id: ref('Uuid'), project_id: ref('Uuid') }, ['principal_id', 'authority_id', 'project_id']),
   AttestationRequest: obj(
     { authority_id: ref('Uuid'), claim: str({ pattern: '^[a-z][a-z0-9_.-]{0,63}$' }), subject_commit: ref('Sha1'), issued_at: ref('IssuedAt'), payload: { type: 'object' }, signature: obj({ algorithm: { type: 'string', enum: ['Ed25519', 'ES256'] }, value: str({ pattern: '^[A-Za-z0-9_-]{86}$' }) }, ['algorithm', 'value']) },
     ['authority_id', 'claim', 'subject_commit', 'issued_at', 'signature'],
@@ -264,6 +276,16 @@ const paths: J = {
   '/api/v2/work-sessions/{id}/attestations': {
     get: op('listAttestations', 'Attestations by signing authorities about the session\'s commits.', ['Attribution'], MACHINE, {
       description: 'Scope `work-sessions:read`.', parameters: [ID, COMMIT_QUERY], responses: { '200': ok('The attestations.', ref('Attestations')), ...errors('BadRequest', 'Unauthorized', 'Forbidden', 'NotFound') }
+    }),
+    post: op('submitAttestation', 'Deliver a detached signed commit-attribution statement for a commit of your own session (contract commit-attribution-submission/1).', ['Attribution'], MACHINE, {
+      description: [
+        'Scope `attestations:submit`, and an owner\'s grant naming this principal, the authority and the project (`/api/v1/attestation-submission-grants`). The scope alone permits nothing.',
+        'Only the claim `commit.attribution` is accepted here, and only for a session this principal requested. The owner, sponsor, requester, repository and project are taken from our records: the body cannot name them.',
+        'The signature is verified (before anything is stored) with the authority\'s registered key over the canonical statement described on `AttestationRequest`. Sending the identical statement again (after a lost response) answers 200 with the same receipt and `recorded: false`; a different statement for the same commit is a new attestation, never a replacement.',
+        'Errors, all `{ error, code }`: 403 `not_granted`; 404 (not your session); 422 `claim_not_allowed`, `authority_revoked`, `bad_signature` (a changed claim, commit or payload fails here), `unknown_commit`, `issued_before_commit`, `issued_in_future`; 400 `secret_found`; 429 `too_many`; 503 `scanner_unavailable`.'
+      ].join('\n\n'),
+      parameters: [ID], requestBody: jsonBody(ref('AttestationRequest')),
+      responses: { '200': ok('Already recorded: the same receipt.', ref('AttestationSubmitted')), '201': ok('Recorded.', ref('AttestationSubmitted')), ...errors('BadRequest', 'Unauthorized', 'Forbidden', 'NotFound', 'Unprocessable', 'TooMany', 'Unavailable') }
     })
   },
   '/api/v2/work-sessions/{id}/promote': {
@@ -325,6 +347,16 @@ const paths: J = {
   '/api/v1/attestation-authorities/{id}/revoke': {
     post: op('revokeAttestationAuthority', 'Revoke an authority (final).', ['Owner'], OWNER, { parameters: [pathParam('id', 'The authority.')], responses: { '200': ok('Revoked.', obj({ authority: ref('AttestationAuthority') })), ...errors('Unauthorized', 'NotFound') } })
   },
+  '/api/v1/attestation-submission-grants': {
+    get: op('listSubmissionGrants', 'Your submission grants.', ['Owner'], OWNER, { responses: { '200': ok('The grants.', obj({ grants: arr(ref('SubmissionGrant')) })), ...errors('Unauthorized') } }),
+    post: op('createSubmissionGrant', 'Let one service principal deliver statements by one of your authorities for one of your projects.', ['Owner'], OWNER, {
+      description: 'The principal must already hold `attestations:submit` (a scope can never be added to an existing principal). Revoking the grant, the authority or the principal ends it at once.',
+      requestBody: jsonBody(ref('SubmissionGrantRequest')), responses: { '201': ok('Granted.', obj({ grant: ref('SubmissionGrant') })), ...errors('BadRequest', 'Unauthorized', 'NotFound', 'Conflict', 'Unprocessable') }
+    })
+  },
+  '/api/v1/attestation-submission-grants/{id}/revoke': {
+    post: op('revokeSubmissionGrant', 'Revoke a grant (final).', ['Owner'], OWNER, { parameters: [pathParam('id', 'The grant.')], responses: { '200': ok('Revoked.', obj({ grant: ref('SubmissionGrant') })), ...errors('Unauthorized', 'NotFound') } })
+  },
   '/api/v1/webhook-endpoints': {
     get: op('listWebhookEndpoints', 'Your webhook endpoints, with delivery counts.', ['Webhooks'], OWNER, { responses: { '200': ok('The endpoints.', obj({ endpoints: arr(ref('WebhookEndpointSummary')) })), ...errors('Unauthorized') } }),
     post: op('createWebhookEndpoint', 'Register an https address to receive events. The signing secret is shown once.', ['Webhooks'], OWNER, {
@@ -352,6 +384,7 @@ export const openApiDocument: J = {
     title: 'Custody Core integration API',
     version: '1.0.0',
     summary: 'Let an outside platform request, work on, evidence and promote code under the creator\'s control.',
+    'x-custody-contracts': { [SUBMISSION_CONTRACT.name]: { version: SUBMISSION_CONTRACT.version, scope: 'attestations:submit', route: 'POST /api/v2/work-sessions/{id}/attestations', claim: ATTRIBUTION_CLAIM, document: 'docs/contracts/commit-attribution-submission.v1.md' } },
     description: [
       'Machine callers sign in with a **client assertion**: a short-lived JWT signed with a key registered for their principal (EdDSA or ES256), sent as `Authorization: Bearer <jwt>` on every request. Claims: `iss` = `sub` = the principal id, `aud` = `custody-core`, `iat`, `exp` (at most 300 seconds after `iat`), a unique `jti`; header: `alg`, `kid` (the key id). What a caller may do comes from its principal\'s recorded scopes, never from the token.',
       'Owners use the `/api/v1` routes listed here with their signed-in session (a login with the authenticator code step). Approval and promotion decisions are only ever made there, by a person.',
